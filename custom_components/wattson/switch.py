@@ -7,6 +7,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
+from . import wattson_device_info
 from .const import DOMAIN
 from .coordinator import WattsonCoordinator
 
@@ -24,6 +25,7 @@ class WattsonDryRunSwitch(CoordinatorEntity[WattsonCoordinator], SwitchEntity):
         self._attr_unique_id = f"{entry.entry_id}_dry_run"
         self._attr_name = "Wattson Dry-Run"
         self._attr_icon = "mdi:test-tube"
+        self._attr_device_info = wattson_device_info(entry)
 
     @property
     def is_on(self) -> bool:

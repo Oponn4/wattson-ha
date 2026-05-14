@@ -5,6 +5,7 @@ import logging
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.device_registry import DeviceInfo
 
 from .const import DOMAIN
 from .coordinator import WattsonCoordinator
@@ -12,6 +13,16 @@ from .coordinator import WattsonCoordinator
 _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS = ["sensor", "switch", "button"]
+
+
+def wattson_device_info(entry: ConfigEntry) -> DeviceInfo:
+    return DeviceInfo(
+        identifiers={(DOMAIN, entry.entry_id)},
+        name="Wattson",
+        manufacturer="Christian",
+        model="Energy Coordinator",
+        configuration_url="https://github.com/Oponn4/wattson-ha",
+    )
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

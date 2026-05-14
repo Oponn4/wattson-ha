@@ -7,6 +7,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
+from . import wattson_device_info
 from .const import DOMAIN
 from .coordinator import WattsonCoordinator
 
@@ -29,6 +30,7 @@ class WattsonBaseSensor(CoordinatorEntity[WattsonCoordinator], SensorEntity):
         self._attr_unique_id = f"{entry.entry_id}_{key}"
         self._attr_name = f"Wattson {name}"
         self._attr_has_entity_name = False
+        self._attr_device_info = wattson_device_info(entry)
 
 
 class WattsonStatusSensor(WattsonBaseSensor):

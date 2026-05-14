@@ -6,6 +6,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+from . import wattson_device_info
 from .const import DOMAIN
 from .coordinator import WattsonCoordinator
 
@@ -23,6 +24,7 @@ class WattsonRefreshButton(ButtonEntity):
         self._attr_unique_id = f"{entry.entry_id}_refresh"
         self._attr_name = "Wattson Zyklus ausführen"
         self._attr_icon = "mdi:refresh"
+        self._attr_device_info = wattson_device_info(entry)
 
     async def async_press(self) -> None:
         await self._coordinator.async_request_refresh()
