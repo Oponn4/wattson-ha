@@ -26,13 +26,10 @@ class WattsonConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     @staticmethod
     @callback
     def async_get_options_flow(entry):
-        return WattsonOptionsFlow(entry)
+        return WattsonOptionsFlow()
 
 
 class WattsonOptionsFlow(config_entries.OptionsFlow):
-    def __init__(self, entry):
-        self._entry = entry
-
     async def async_step_init(self, user_input=None):
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)
@@ -41,7 +38,7 @@ class WattsonOptionsFlow(config_entries.OptionsFlow):
             data_schema=vol.Schema({
                 vol.Required(
                     "dry_run",
-                    default=self._entry.options.get("dry_run", True),
+                    default=self.config_entry.options.get("dry_run", True),
                 ): bool,
             }),
         )

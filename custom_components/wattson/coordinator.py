@@ -119,12 +119,12 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
     def _ival(self, entity_id: str, default: int = 0) -> int:
         return int(self._fval(entity_id, default))
 
-    def _act(self, domain: str, service: str, **kwargs) -> str:
+    async def _act(self, domain: str, service: str, **kwargs) -> str:
         desc = f"{domain}.{service}({kwargs})"
         if self._dry_run:
             _LOGGER.info("[DRY-RUN] %s", desc)
         else:
-            self.hass.services.call(domain, service, kwargs, blocking=False)
+            await self.hass.services.async_call(domain, service, kwargs, blocking=False)
             _LOGGER.info("Aktion: %s", desc)
         return desc
 
@@ -185,18 +185,18 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         s.t300_target = new_temp
         if abs(new_temp - s.t300_solltemperatur) >= 1.0:
             _LOGGER.info("T300: %.1f°C → %.1f°C (%s)", s.t300_solltemperatur, new_temp, reason)
-            actions.append(self._act("input_number", "set_value",
-                                     entity_id=ENTITY_T300_SOLL, value=new_temp))
+            actions.append(await self._act("input_number", "set_value",
+                                           entity_id=ENTITY_T300_SOLL, value=new_temp))
         else:
             _LOGGER.info("T300: %.1f°C OK (%s)", s.t300_solltemperatur, reason)
 
         # ── UC4b: E-Heizstab bei PV-Überschuss ───────────────────────────────
         if s.pv_surplus >= PV_SURPLUS_ON and not s.t300_heizstab_on:
             _LOGGER.info("E-Heizstab EIN (Überschuss %dW)", s.pv_surplus)
-            actions.append(self._act("switch", "turn_on", entity_id=ENTITY_T300_HEIZSTAB))
+            actions.append(await self._act("switch", "turn_on", entity_id=ENTITY_T300_HEIZSTAB))
         elif s.pv_surplus < PV_SURPLUS_OFF and s.t300_heizstab_on:
             _LOGGER.info("E-Heizstab AUS (Überschuss %dW)", s.pv_surplus)
-            actions.append(self._act("switch", "turn_off", entity_id=ENTITY_T300_HEIZSTAB))
+            actions.append(await self._act("switch", "turn_off", entity_id=ENTITY_T300_HEIZSTAB))
 
         # ── UC6/UC7: evcc Modus ───────────────────────────────────────────────
         if s.car_connected:
@@ -213,8 +213,8 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             s.evcc_target = target_mode
             if target_mode != s.evcc_mode:
                 _LOGGER.info("evcc: %s → %s (%s)", s.evcc_mode, target_mode, reason)
-                actions.append(self._act("select", "select_option",
-                                         entity_id=ENTITY_EVCC_MODE, option=target_mode))
+                actions.append(await self._act("select", "select_option",
+                                               entity_id=ENTITY_EVCC_MODE, option=target_mode))
             else:
                 _LOGGER.info("evcc: %s OK (%s)", s.evcc_mode, reason)
 
@@ -222,7 +222,7 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         if s.car_soc > 0 and s.car_soc < SOC_WARNUNG and not s.low_soc_notified:
             msg = f"ORA 03 Akku niedrig: {s.car_soc:.0f}% ({s.car_range} km)"
             _LOGGER.warning("UC1: %s", msg)
-            actions.append(self._act(
+            actions.append(await self._act(
                 "notify", NOTIFY_SERVICE.split(".")[1],
                 message=msg, title="⚡ Wattson: Niedriger Ladestand",
             ))

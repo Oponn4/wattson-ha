@@ -19,8 +19,8 @@ SOC_VORLADEN = 80  # % → Ziel bei langem Kalendertermin
 CHEAP_LEVELS = ("very_cheap", "cheap")
 
 # HA Entity IDs
-ENTITY_PRICE          = "sensor.haus_current_electricity_price"
-ENTITY_PRICE_RANKING  = "sensor.electricity_price_haus"   # attr: intraday_price_ranking
+ENTITY_PRICE          = "sensor.electricity_price_haus"   # state in EUR/kWh
+ENTITY_PRICE_RANKING  = "sensor.electricity_price_haus"   # attr: intraday_price_ranking (float 0.0-1.0)
 ENTITY_PRICE_LEVEL    = "sensor.haus_current_hour_price_level"
 ENTITY_PV_SURPLUS     = "sensor.pv_uberschuss_der_letzen_15_minuten"
 ENTITY_T300_TANK      = "sensor.proxon_t300_t21_behalter_mitte"
