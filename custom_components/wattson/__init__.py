@@ -32,5 +32,5 @@ async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> Non
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
-        hass.data[DOMAIN].pop(entry.entry_id)
+        hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
     return unload_ok

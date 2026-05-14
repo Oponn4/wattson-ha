@@ -32,7 +32,9 @@ class WattsonDryRunSwitch(CoordinatorEntity[WattsonCoordinator], SwitchEntity):
     async def async_turn_on(self, **kwargs) -> None:
         self.coordinator.dry_run = True
         self.async_write_ha_state()
+        await self.coordinator.async_request_refresh()
 
     async def async_turn_off(self, **kwargs) -> None:
         self.coordinator.dry_run = False
         self.async_write_ha_state()
+        await self.coordinator.async_request_refresh()

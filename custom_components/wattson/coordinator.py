@@ -165,6 +165,8 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         if s.sleep_mode:
             _LOGGER.info("Schlafmodus — keine Aktionen")
             s.last_actions = ["Schlafmodus aktiv"]
+            s.t300_target = s.t300_solltemperatur
+            s.evcc_target = s.evcc_mode
             self._prev = s
             return s
 
