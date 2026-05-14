@@ -2,6 +2,7 @@
   "domain": "wattson",
   "name": "Wattson Energy Coordinator",
   "codeowners": ["@Oponn4"],
+  "config_flow": true,
   "dependencies": [],
   "documentation": "https://github.com/Oponn4/wattson-ha",
   "iot_class": "local_polling",
