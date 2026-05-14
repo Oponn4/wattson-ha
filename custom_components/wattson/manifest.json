@@ -5,5 +5,6 @@
   "requirements": [],
   "dependencies": [],
   "codeowners": ["@Oponn4"],
+  "documentation": "https://github.com/Oponn4/wattson-ha",
   "iot_class": "local_polling"
 }
