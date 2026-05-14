@@ -1,0 +1,25 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Set up Wattson",
+        "data": {
+          "dry_run": "Dry-Run (no real actions)"
+        }
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "Wattson is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Wattson Options",
+        "data": {
+          "dry_run": "Dry-Run (no real actions)"
+        }
+      }
+    }
+  }
+}
