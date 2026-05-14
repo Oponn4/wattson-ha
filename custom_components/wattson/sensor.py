@@ -21,6 +21,9 @@ async def async_setup_entry(
         WattsonLastActionSensor(coordinator, entry),
         WattsonT300TargetSensor(coordinator, entry),
         WattsonEvccTargetSensor(coordinator, entry),
+        WattsonCheapestWindowSensor(coordinator, entry, hours=2),
+        WattsonCheapestWindowSensor(coordinator, entry, hours=4),
+        WattsonExpensiveWindowSensor(coordinator, entry, hours=2),
     ])
 
 
@@ -84,3 +87,73 @@ class WattsonEvccTargetSensor(WattsonBaseSensor):
     @property
     def native_value(self):
         return self.coordinator.data.evcc_target if self.coordinator.data else None
+
+
+class WattsonCheapestWindowSensor(WattsonBaseSensor):
+    def __init__(self, coordinator, entry, hours: int):
+        super().__init__(coordinator, entry, f"cheapest_{hours}h",
+                         f"Günstigste {hours}h")
+        self._attr_icon = "mdi:cash-clock"
+        self._hours = hours
+
+    @property
+    def _window(self):
+        d = self.coordinator.data
+        if d is None:
+            return (None, None, None)
+        if self._hours == 2:
+            return (d.cheapest_2h_start, d.cheapest_2h_end, d.cheapest_2h_avg)
+        if self._hours == 4:
+            return (d.cheapest_4h_start, d.cheapest_4h_end, d.cheapest_4h_avg)
+        return (None, None, None)
+
+    @property
+    def native_value(self):
+        start, end, _ = self._window
+        if start is None or end is None:
+            return None
+        return f"{start.strftime('%H:%M')}–{end.strftime('%H:%M')}"
+
+    @property
+    def extra_state_attributes(self):
+        start, end, avg = self._window
+        if start is None:
+            return {}
+        return {
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+            "avg_price_eur_kwh": round(avg, 4) if avg is not None else None,
+        }
+
+
+class WattsonExpensiveWindowSensor(WattsonBaseSensor):
+    def __init__(self, coordinator, entry, hours: int):
+        super().__init__(coordinator, entry, f"expensive_{hours}h",
+                         f"Teuerste {hours}h")
+        self._attr_icon = "mdi:cash-remove"
+        self._hours = hours
+
+    @property
+    def _window(self):
+        d = self.coordinator.data
+        if d is None or self._hours != 2:
+            return (None, None, None)
+        return (d.expensive_2h_start, d.expensive_2h_end, d.expensive_2h_avg)
+
+    @property
+    def native_value(self):
+        start, end, _ = self._window
+        if start is None or end is None:
+            return None
+        return f"{start.strftime('%H:%M')}–{end.strftime('%H:%M')}"
+
+    @property
+    def extra_state_attributes(self):
+        start, end, avg = self._window
+        if start is None:
+            return {}
+        return {
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+            "avg_price_eur_kwh": round(avg, 4) if avg is not None else None,
+        }

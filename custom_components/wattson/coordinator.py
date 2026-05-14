@@ -3,11 +3,19 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+from homeassistant.util import dt as dt_util
 
+from .forecast import (
+    PriceSlot,
+    cheapest_window,
+    most_expensive_window,
+    parse_tibber_response,
+)
 from .const import (
     CHEAP_LEVELS,
     DOMAIN,
@@ -72,6 +80,18 @@ class WattsonData:
     t300_target: float = 52.0
     evcc_target: str = "pv"
 
+    # Forecast (Tibber)
+    forecast_slots: list[PriceSlot] = field(default_factory=list)
+    cheapest_2h_start: datetime | None = None
+    cheapest_2h_end: datetime | None = None
+    cheapest_2h_avg: float | None = None
+    expensive_2h_start: datetime | None = None
+    expensive_2h_end: datetime | None = None
+    expensive_2h_avg: float | None = None
+    cheapest_4h_start: datetime | None = None
+    cheapest_4h_end: datetime | None = None
+    cheapest_4h_avg: float | None = None
+
     # intern
     low_soc_notified: bool = False
 
@@ -119,6 +139,20 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
     def _ival(self, entity_id: str, default: int = 0) -> int:
         return int(self._fval(entity_id, default))
 
+    async def _fetch_tibber_forecast(self) -> list[PriceSlot]:
+        try:
+            response = await self.hass.services.async_call(
+                "tibber", "get_prices", {},
+                blocking=True, return_response=True,
+            )
+        except HomeAssistantError as e:
+            _LOGGER.warning("Tibber-Forecast nicht verfügbar: %s", e)
+            return []
+        slots = parse_tibber_response(response)
+        if not slots:
+            _LOGGER.warning("Tibber-Forecast leer")
+        return slots
+
     async def _act(self, domain: str, service: str, **kwargs) -> str:
         desc = f"{domain}.{service}({kwargs})"
         if self._dry_run:
@@ -147,6 +181,28 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         s.evcc_mode            = self._state(ENTITY_EVCC_MODE, "pv") or "pv"
         s.sleep_mode           = self._state(ENTITY_SLEEP) == "on"
         s.low_soc_notified     = self._prev.low_soc_notified
+
+        # ── Tibber-Forecast holen + Fenster berechnen ─────────────────────────
+        s.forecast_slots = await self._fetch_tibber_forecast()
+        now = dt_util.now()
+        if s.forecast_slots:
+            if (w := cheapest_window(s.forecast_slots, 120, now, lookahead_hours=12)):
+                s.cheapest_2h_start, s.cheapest_2h_end, s.cheapest_2h_avg = w
+            if (w := most_expensive_window(s.forecast_slots, 120, now, lookahead_hours=12)):
+                s.expensive_2h_start, s.expensive_2h_end, s.expensive_2h_avg = w
+            if (w := cheapest_window(s.forecast_slots, 240, now, lookahead_hours=24)):
+                s.cheapest_4h_start, s.cheapest_4h_end, s.cheapest_4h_avg = w
+            if s.cheapest_2h_start and s.expensive_2h_start:
+                _LOGGER.info(
+                    "Forecast — günstigste 2h: %s–%s (%.3f€) | teuerste 2h: %s–%s (%.3f€) | günstigste 4h: %s–%s (%.3f€)",
+                    s.cheapest_2h_start.strftime("%H:%M"),
+                    s.cheapest_2h_end.strftime("%H:%M"), s.cheapest_2h_avg,
+                    s.expensive_2h_start.strftime("%H:%M"),
+                    s.expensive_2h_end.strftime("%H:%M"), s.expensive_2h_avg,
+                    s.cheapest_4h_start.strftime("%H:%M") if s.cheapest_4h_start else "?",
+                    s.cheapest_4h_end.strftime("%H:%M") if s.cheapest_4h_end else "?",
+                    s.cheapest_4h_avg if s.cheapest_4h_avg else 0.0,
+                )
 
         actions: list[str] = []
         prefix = "[DRY-RUN] " if self._dry_run else ""
