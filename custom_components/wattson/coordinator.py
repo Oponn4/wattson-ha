@@ -27,6 +27,13 @@ from .const import (
     ENTITY_PRICE,
     ENTITY_PRICE_LEVEL,
     ENTITY_PRICE_RANKING,
+    ENTITY_PV_FC_HOUR,
+    ENTITY_PV_FC_NEXT_HOUR,
+    ENTITY_PV_FC_NOW,
+    ENTITY_PV_FC_REMAINING,
+    ENTITY_PV_FC_TOMORROW,
+    ENTITY_PV_PEAK_TODAY,
+    ENTITY_PV_PEAK_TOMORROW,
     ENTITY_PV_POWER,
     ENTITY_PV_SURPLUS,
     ENTITY_SLEEP,
@@ -79,6 +86,15 @@ class WattsonData:
     last_actions: list[str] = field(default_factory=list)
     t300_target: float = 52.0
     evcc_target: str = "pv"
+
+    # PV-Forecast (forecast.solar)
+    pv_fc_now: int = 0                       # W aktuell erwartet
+    pv_fc_current_hour: float = 0.0          # kWh diese Stunde
+    pv_fc_next_hour: float = 0.0             # kWh nächste Stunde
+    pv_fc_today_remaining: float = 0.0       # kWh Rest heute
+    pv_fc_tomorrow: float = 0.0              # kWh morgen
+    pv_peak_today: datetime | None = None
+    pv_peak_tomorrow: datetime | None = None
 
     # Forecast (Tibber)
     forecast_slots: list[PriceSlot] = field(default_factory=list)
@@ -139,6 +155,15 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
     def _ival(self, entity_id: str, default: int = 0) -> int:
         return int(self._fval(entity_id, default))
 
+    def _dtval(self, entity_id: str) -> datetime | None:
+        raw = self._state(entity_id)
+        if not raw:
+            return None
+        try:
+            return datetime.fromisoformat(raw)
+        except (ValueError, TypeError):
+            return None
+
     async def _fetch_tibber_forecast(self) -> list[PriceSlot]:
         try:
             response = await self.hass.services.async_call(
@@ -182,6 +207,15 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         s.sleep_mode           = self._state(ENTITY_SLEEP) == "on"
         s.low_soc_notified     = self._prev.low_soc_notified
 
+        # ── PV-Forecast (forecast.solar) ─────────────────────────────────────
+        s.pv_fc_now            = self._ival(ENTITY_PV_FC_NOW)
+        s.pv_fc_current_hour   = self._fval(ENTITY_PV_FC_HOUR)
+        s.pv_fc_next_hour      = self._fval(ENTITY_PV_FC_NEXT_HOUR)
+        s.pv_fc_today_remaining = self._fval(ENTITY_PV_FC_REMAINING)
+        s.pv_fc_tomorrow       = self._fval(ENTITY_PV_FC_TOMORROW)
+        s.pv_peak_today        = self._dtval(ENTITY_PV_PEAK_TODAY)
+        s.pv_peak_tomorrow     = self._dtval(ENTITY_PV_PEAK_TOMORROW)
+
         # ── Tibber-Forecast holen + Fenster berechnen ─────────────────────────
         s.forecast_slots = await self._fetch_tibber_forecast()
         now = dt_util.now()
@@ -194,7 +228,7 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
                 s.cheapest_4h_start, s.cheapest_4h_end, s.cheapest_4h_avg = w
             if s.cheapest_2h_start and s.expensive_2h_start:
                 _LOGGER.info(
-                    "Forecast — günstigste 2h: %s–%s (%.3f€) | teuerste 2h: %s–%s (%.3f€) | günstigste 4h: %s–%s (%.3f€)",
+                    "Tibber-Forecast — günstigste 2h: %s–%s (%.3f€) | teuerste 2h: %s–%s (%.3f€) | günstigste 4h: %s–%s (%.3f€)",
                     s.cheapest_2h_start.strftime("%H:%M"),
                     s.cheapest_2h_end.strftime("%H:%M"), s.cheapest_2h_avg,
                     s.expensive_2h_start.strftime("%H:%M"),
@@ -203,6 +237,13 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
                     s.cheapest_4h_end.strftime("%H:%M") if s.cheapest_4h_end else "?",
                     s.cheapest_4h_avg if s.cheapest_4h_avg else 0.0,
                 )
+
+        _LOGGER.info(
+            "PV-Forecast — jetzt %dW | diese Std %.1fkWh | nächste Std %.1fkWh | Rest heute %.1fkWh | morgen %.1fkWh | Peak heute: %s",
+            s.pv_fc_now, s.pv_fc_current_hour, s.pv_fc_next_hour,
+            s.pv_fc_today_remaining, s.pv_fc_tomorrow,
+            s.pv_peak_today.strftime("%H:%M") if s.pv_peak_today else "?",
+        )
 
         actions: list[str] = []
         prefix = "[DRY-RUN] " if self._dry_run else ""

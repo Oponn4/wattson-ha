@@ -34,4 +34,13 @@ ENTITY_BATTERY_SOC    = "sensor.e3dc_batterie_soc_in_prozent"
 ENTITY_PV_POWER       = "sensor.e3dc_photovoltaik_leistung_in_watt"
 ENTITY_SLEEP          = "input_boolean.sleepmode_helper"
 
+# forecast.solar (PV Forecast)
+ENTITY_PV_FC_NOW       = "sensor.power_production_now"               # W
+ENTITY_PV_FC_HOUR      = "sensor.energy_current_hour"                # kWh
+ENTITY_PV_FC_NEXT_HOUR = "sensor.energy_next_hour"                   # kWh
+ENTITY_PV_FC_REMAINING = "sensor.energy_production_today_remaining"  # kWh
+ENTITY_PV_FC_TOMORROW  = "sensor.energy_production_tomorrow"         # kWh
+ENTITY_PV_PEAK_TODAY   = "sensor.power_highest_peak_time_today"      # datetime
+ENTITY_PV_PEAK_TOMORROW = "sensor.power_highest_peak_time_tomorrow"  # datetime
+
 NOTIFY_SERVICE = "notify.mobile_app_ios_hw23x69q47"
