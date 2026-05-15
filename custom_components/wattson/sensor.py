@@ -78,6 +78,12 @@ class WattsonT300TargetSensor(WattsonBaseSensor):
     def native_value(self):
         return self.coordinator.data.t300_target if self.coordinator.data else None
 
+    @property
+    def extra_state_attributes(self):
+        if self.coordinator.data is None:
+            return {}
+        return {"begruendung": self.coordinator.data.t300_reason}
+
 
 class WattsonEvccTargetSensor(WattsonBaseSensor):
     def __init__(self, coordinator, entry):
@@ -87,6 +93,12 @@ class WattsonEvccTargetSensor(WattsonBaseSensor):
     @property
     def native_value(self):
         return self.coordinator.data.evcc_target if self.coordinator.data else None
+
+    @property
+    def extra_state_attributes(self):
+        if self.coordinator.data is None:
+            return {}
+        return {"begruendung": self.coordinator.data.evcc_reason}
 
 
 class WattsonCheapestWindowSensor(WattsonBaseSensor):

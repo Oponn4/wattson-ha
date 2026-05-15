@@ -13,10 +13,13 @@ from homeassistant.util import dt as dt_util
 from .forecast import (
     PriceSlot,
     cheapest_window,
+    is_in_window,
     most_expensive_window,
     parse_tibber_response,
 )
 from .const import (
+    BATTERY_FULL,
+    BATTERY_NOT_FULL,
     CHEAP_LEVELS,
     DOMAIN,
     ENTITY_BATTERY_SOC,
@@ -44,7 +47,9 @@ from .const import (
     PV_SURPLUS_OFF,
     PV_SURPLUS_ON,
     SCAN_INTERVAL_SECONDS,
+    SOC_TARGET,
     SOC_WARNUNG,
+    T300_TANK_MAX,
     T300_TEMP_CHEAP,
     T300_TEMP_MIN,
     T300_TEMP_NORMAL,
@@ -85,7 +90,9 @@ class WattsonData:
     dry_run: bool = True
     last_actions: list[str] = field(default_factory=list)
     t300_target: float = 52.0
+    t300_reason: str = ""
     evcc_target: str = "pv"
+    evcc_reason: str = ""
 
     # PV-Forecast (forecast.solar)
     pv_fc_now: int = 0                       # W aktuell erwartet
@@ -264,24 +271,43 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             s.last_actions = ["Schlafmodus aktiv"]
             s.t300_target = s.t300_solltemperatur
             s.evcc_target = s.evcc_mode
+            s.t300_reason = "Schlafmodus"
+            s.evcc_reason = "Schlafmodus"
             self._prev = s
             return s
 
-        # ── UC4a: T300 Solltemperatur via Tibber ──────────────────────────────
+        # ── UC4a: T300 Solltemperatur vorausschauend ─────────────────────────
+        # Notfall vor Forecast — Tank zu kalt → immer heizen
         if s.t300_tank_temp < T300_TEMP_MIN:
             new_temp = T300_TEMP_NORMAL
-            reason = f"Notfall (Tank {s.t300_tank_temp:.1f}°C)"
-        elif s.price_ranking <= 0.33 or s.price < 0.20:
+            reason = f"Notfall (Tank {s.t300_tank_temp:.1f}°C<{T300_TEMP_MIN}°C)"
+        elif s.cheapest_2h_start and is_in_window(now, s.cheapest_2h_start, s.cheapest_2h_end):
             new_temp = T300_TEMP_CHEAP
-            reason = f"günstig (Rank {s.price_ranking:.2f})"
-        elif s.price_ranking >= 0.67 and s.price >= 0.20:
+            reason = (f"günstigste 2h "
+                      f"{s.cheapest_2h_start.strftime('%H:%M')}–{s.cheapest_2h_end.strftime('%H:%M')} "
+                      f"@ {s.cheapest_2h_avg * 100:.1f}ct")
+        elif s.expensive_2h_start and is_in_window(now, s.expensive_2h_start, s.expensive_2h_end):
             new_temp = T300_TEMP_TEUER
-            reason = f"teuer (Rank {s.price_ranking:.2f})"
+            reason = (f"teuerste 2h "
+                      f"{s.expensive_2h_start.strftime('%H:%M')}–{s.expensive_2h_end.strftime('%H:%M')} "
+                      f"@ {s.expensive_2h_avg * 100:.1f}ct")
+        elif not s.forecast_slots:
+            # Forecast nicht verfügbar — Fallback reaktiv
+            if s.price_ranking <= 0.33:
+                new_temp = T300_TEMP_CHEAP
+                reason = f"günstig reaktiv (Rank {s.price_ranking:.2f}, kein Forecast)"
+            elif s.price_ranking >= 0.67:
+                new_temp = T300_TEMP_TEUER
+                reason = f"teuer reaktiv (Rank {s.price_ranking:.2f}, kein Forecast)"
+            else:
+                new_temp = T300_TEMP_NORMAL
+                reason = f"normal reaktiv (Rank {s.price_ranking:.2f}, kein Forecast)"
         else:
             new_temp = T300_TEMP_NORMAL
             reason = f"normal (Rank {s.price_ranking:.2f})"
 
         s.t300_target = new_temp
+        s.t300_reason = reason
         if abs(new_temp - s.t300_solltemperatur) >= 1.0:
             _LOGGER.info("T300: %.1f°C → %.1f°C (%s)", s.t300_solltemperatur, new_temp, reason)
             actions.append(await self._act("input_number", "set_value",
@@ -289,33 +315,64 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         else:
             _LOGGER.info("T300: %.1f°C OK (%s)", s.t300_solltemperatur, reason)
 
-        # ── UC4b: E-Heizstab bei PV-Überschuss ───────────────────────────────
-        if s.pv_surplus >= PV_SURPLUS_ON and not s.t300_heizstab_on:
-            _LOGGER.info("E-Heizstab EIN (Überschuss %dW)", s.pv_surplus)
+        # ── UC4b: E-Heizstab bei PV-Überschuss + Speicher voll ───────────────
+        # AN nur wenn: Überschuss da UND Speicher (fast) voll UND Tank nicht zu heiß
+        should_on = (
+            s.pv_surplus >= PV_SURPLUS_ON
+            and s.battery_soc >= BATTERY_FULL
+            and s.t300_tank_temp < T300_TANK_MAX
+        )
+        # AUS wenn: Überschuss zu klein ODER Speicher unter Schwelle ODER Tank heiß
+        should_off = (
+            s.pv_surplus < PV_SURPLUS_OFF
+            or s.battery_soc < BATTERY_NOT_FULL
+            or s.t300_tank_temp >= T300_TANK_MAX
+        )
+        if should_on and not s.t300_heizstab_on:
+            _LOGGER.info("E-Heizstab EIN (Überschuss %dW, Bat %d%%, Tank %.1f°C)",
+                         s.pv_surplus, s.battery_soc, s.t300_tank_temp)
             actions.append(await self._act("switch", "turn_on", entity_id=ENTITY_T300_HEIZSTAB))
-        elif s.pv_surplus < PV_SURPLUS_OFF and s.t300_heizstab_on:
-            _LOGGER.info("E-Heizstab AUS (Überschuss %dW)", s.pv_surplus)
+        elif should_off and s.t300_heizstab_on:
+            _LOGGER.info("E-Heizstab AUS (Überschuss %dW, Bat %d%%, Tank %.1f°C)",
+                         s.pv_surplus, s.battery_soc, s.t300_tank_temp)
             actions.append(await self._act("switch", "turn_off", entity_id=ENTITY_T300_HEIZSTAB))
 
-        # ── UC6/UC7: evcc Modus ───────────────────────────────────────────────
+        # ── UC6/UC7: evcc Modus vorausschauend ───────────────────────────────
         if s.car_connected:
-            if s.price_level in CHEAP_LEVELS:
+            needs_charge = s.car_soc < SOC_TARGET
+            in_cheapest_4h = bool(
+                s.cheapest_4h_start
+                and is_in_window(now, s.cheapest_4h_start, s.cheapest_4h_end)
+            )
+            if needs_charge and in_cheapest_4h:
+                target_mode = "now"
+                reason = (f"günstigste 4h "
+                          f"{s.cheapest_4h_start.strftime('%H:%M')}–{s.cheapest_4h_end.strftime('%H:%M')} "
+                          f"@ {s.cheapest_4h_avg * 100:.1f}ct (SOC {s.car_soc:.0f}%<{SOC_TARGET}%)")
+            elif not s.forecast_slots and s.price_level in CHEAP_LEVELS:
+                # Forecast nicht verfügbar, Tibber-Level sagt günstig
                 target_mode = "minpv"
-                reason = f"Strom günstig ({s.price_level})"
-            elif s.pv_power > 500 and s.battery_soc >= 60:
-                target_mode = "pv"
-                reason = f"PV {s.pv_power}W, Bat {s.battery_soc}%"
+                reason = f"reaktiv günstig ({s.price_level}, kein Forecast)"
             else:
                 target_mode = "pv"
-                reason = "Standard"
+                if not needs_charge:
+                    reason = f"SOC {s.car_soc:.0f}% ≥ {SOC_TARGET}% (kein Forcieren nötig)"
+                elif s.cheapest_4h_start:
+                    reason = (f"warte auf günstigste 4h "
+                              f"{s.cheapest_4h_start.strftime('%H:%M')}")
+                else:
+                    reason = "Standard"
 
             s.evcc_target = target_mode
+            s.evcc_reason = reason
             if target_mode != s.evcc_mode:
                 _LOGGER.info("evcc: %s → %s (%s)", s.evcc_mode, target_mode, reason)
                 actions.append(await self._act("select", "select_option",
                                                entity_id=ENTITY_EVCC_MODE, option=target_mode))
             else:
                 _LOGGER.info("evcc: %s OK (%s)", s.evcc_mode, reason)
+        else:
+            s.evcc_reason = "Auto nicht angeschlossen"
 
         # ── UC1: Niedrig-SOC Warnung ──────────────────────────────────────────
         if s.car_soc > 0 and s.car_soc < SOC_WARNUNG and not s.low_soc_notified:

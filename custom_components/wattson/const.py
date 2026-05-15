@@ -11,11 +11,17 @@ T300_TEMP_MIN     = 45.0  # Unter dieser Temperatur immer heizen
 PV_SURPLUS_ON  = 1700  # W
 PV_SURPLUS_OFF = 1600  # W
 
+# E-Heizstab Vorbedingungen (Welle 4)
+BATTERY_FULL     = 95   # % SOC ab dem Heizstab überhaupt erlaubt ist
+BATTERY_NOT_FULL = 90   # % SOC unter dem Heizstab abschaltet
+T300_TANK_MAX    = 60.0 # °C über dem Heizstab nicht weiter heizt
+
 # Auto
 SOC_WARNUNG  = 20  # % → Push-Notification
 SOC_VORLADEN = 80  # % → Ziel bei langem Kalendertermin
+SOC_TARGET   = 80  # % → unter diesem SOC wird in günstigste 4h forciert
 
-# Tibber Preis-Level
+# Tibber Preis-Level (Fallback wenn kein Forecast verfügbar)
 CHEAP_LEVELS = ("very_cheap", "cheap")
 
 # HA Entity IDs
