@@ -12,16 +12,21 @@ from homeassistant.util import dt as dt_util
 
 from .forecast import (
     PriceSlot,
+    calculate_required_soc,
     cheapest_window,
     is_in_window,
     most_expensive_window,
+    next_relevant_event,
     parse_tibber_response,
 )
+from .gmaps import GoogleMapsClient
 from .const import (
     BATTERY_FULL,
     BATTERY_NOT_FULL,
     CHEAP_LEVELS,
     DOMAIN,
+    EVCC_PLAN_BUFFER_MINUTES,
+    SKIP_LOCATION_KEYWORDS,
     ENTITY_BATTERY_SOC,
     ENTITY_EVCC_CONNECTED,
     ENTITY_EVCC_MODE,
@@ -57,6 +62,19 @@ from .const import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+
+@dataclass
+class WattsonTripConfig:
+    """Config-Werte für UC2 (Calendar-basiertes Vorladen)."""
+    gmaps: GoogleMapsClient | None
+    home_address: str
+    calendar_entity: str
+    vehicle_consumption: float   # kWh/100km
+    vehicle_capacity: float      # kWh
+    safety_margin: int           # %
+    evcc_vehicle_name: str
+    lookahead_hours: int
 
 
 @dataclass
@@ -103,6 +121,15 @@ class WattsonData:
     pv_peak_today: datetime | None = None
     pv_peak_tomorrow: datetime | None = None
 
+    # UC2 — nächste Fahrt
+    trip_title: str = ""
+    trip_location: str = ""
+    trip_start: datetime | None = None
+    trip_distance_km: float | None = None
+    trip_required_soc: int | None = None
+    trip_plan_set: bool = False
+    trip_reason: str = ""
+
     # Forecast (Tibber)
     forecast_slots: list[PriceSlot] = field(default_factory=list)
     cheapest_2h_start: datetime | None = None
@@ -121,7 +148,8 @@ class WattsonData:
 
 class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
 
-    def __init__(self, hass: HomeAssistant, dry_run: bool) -> None:
+    def __init__(self, hass: HomeAssistant, dry_run: bool,
+                 trip_cfg: WattsonTripConfig | None = None) -> None:
         super().__init__(
             hass,
             _LOGGER,
@@ -129,7 +157,9 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             update_interval=timedelta(seconds=SCAN_INTERVAL_SECONDS),
         )
         self._dry_run = dry_run
+        self._trip_cfg = trip_cfg
         self._prev: WattsonData = WattsonData(dry_run=dry_run)
+        self._planned_event_uid: str | None = None
 
     @property
     def dry_run(self) -> bool:
@@ -386,6 +416,90 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         elif s.car_soc >= SOC_WARNUNG:
             s.low_soc_notified = False
 
+        # ── UC2: Kalender-basiertes Vorladen ──────────────────────────────────
+        await self._handle_trip_planning(s, now, actions)
+
         s.last_actions = actions if actions else ["Keine Änderungen"]
         self._prev = s
         return s
+
+    async def _fetch_calendar_events(self, entity_id: str, hours: int) -> list[dict]:
+        try:
+            resp = await self.hass.services.async_call(
+                "calendar", "get_events",
+                {"entity_id": entity_id, "duration": {"hours": hours}},
+                blocking=True, return_response=True,
+            )
+        except HomeAssistantError as e:
+            _LOGGER.warning("calendar.get_events fehlgeschlagen: %s", e)
+            return []
+        if not resp:
+            return []
+        cal_data = resp.get(entity_id) or {}
+        return cal_data.get("events", []) if isinstance(cal_data, dict) else []
+
+    async def _handle_trip_planning(
+        self, s: WattsonData, now: datetime, actions: list[str]
+    ) -> None:
+        cfg = self._trip_cfg
+        if cfg is None or cfg.gmaps is None:
+            s.trip_reason = "deaktiviert (kein Google Maps Key)"
+            return
+
+        events = await self._fetch_calendar_events(cfg.calendar_entity, cfg.lookahead_hours)
+        event = next_relevant_event(events, now, SKIP_LOCATION_KEYWORDS)
+        if event is None:
+            s.trip_reason = "kein relevanter Termin in Sicht"
+            self._planned_event_uid = None
+            return
+
+        s.trip_title = event.get("summary", "?")
+        s.trip_location = event.get("location", "")
+        s.trip_start = event["_start_dt"]
+
+        route = await cfg.gmaps.distance(cfg.home_address, s.trip_location)
+        if route is None:
+            s.trip_reason = f"Distanz für '{s.trip_location}' nicht ermittelbar"
+            return
+        s.trip_distance_km = route.distance_km
+
+        required_soc = calculate_required_soc(
+            route.distance_km, cfg.vehicle_consumption,
+            cfg.vehicle_capacity, cfg.safety_margin,
+        )
+        s.trip_required_soc = required_soc
+
+        if s.car_soc >= required_soc:
+            s.trip_reason = (f"SOC {s.car_soc:.0f}% ≥ benötigt {required_soc}% "
+                             f"({s.trip_title}, {route.distance_km:.0f} km)")
+            return
+
+        # Plan nur einmal pro Event setzen (idempotent via UID)
+        event_uid = event.get("uid") or f"{s.trip_start.isoformat()}:{s.trip_title}"
+        if self._planned_event_uid == event_uid and self._prev.trip_plan_set:
+            s.trip_plan_set = True
+            s.trip_reason = (f"Plan aktiv: {required_soc}% bis {s.trip_start.strftime('%d.%m %H:%M')} "
+                             f"({s.trip_title})")
+            return
+
+        departure = s.trip_start - timedelta(minutes=EVCC_PLAN_BUFFER_MINUTES)
+        if departure <= now:
+            s.trip_reason = f"Termin {s.trip_title} zu kurzfristig — Plan nicht mehr sinnvoll"
+            return
+
+        _LOGGER.info(
+            "UC2: setze Plan für '%s' (%s) — Ziel %d%% bis %s (%.0f km, %s Termin)",
+            s.trip_title, s.trip_location, required_soc,
+            departure.strftime("%d.%m %H:%M"), route.distance_km,
+            s.trip_start.strftime("%d.%m %H:%M"),
+        )
+        actions.append(await self._act(
+            "evcc_intg", "set_vehicle_plan",
+            startdate=departure.isoformat(),
+            vehicle=cfg.evcc_vehicle_name,
+            soc=required_soc,
+        ))
+        s.trip_plan_set = True
+        s.trip_reason = (f"Plan gesetzt: {required_soc}% bis {departure.strftime('%d.%m %H:%M')} "
+                         f"({s.trip_title}, {route.distance_km:.0f} km)")
+        self._planned_event_uid = event_uid

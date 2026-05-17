@@ -5,10 +5,29 @@ import logging
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.device_registry import DeviceInfo
 
-from .const import DOMAIN
-from .coordinator import WattsonCoordinator
+from .const import (
+    CONF_CALENDAR_ENTITY,
+    CONF_EVCC_VEHICLE_NAME,
+    CONF_EVENT_LOOKAHEAD,
+    CONF_GMAPS_KEY,
+    CONF_HOME_ADDRESS,
+    CONF_SAFETY_MARGIN,
+    CONF_VEHICLE_CAPACITY,
+    CONF_VEHICLE_CONSUMPTION,
+    DEFAULT_CALENDAR_ENTITY,
+    DEFAULT_EVCC_VEHICLE_NAME,
+    DEFAULT_EVENT_LOOKAHEAD,
+    DEFAULT_HOME_ADDRESS,
+    DEFAULT_SAFETY_MARGIN,
+    DEFAULT_VEHICLE_CAPACITY,
+    DEFAULT_VEHICLE_CONSUMPTION,
+    DOMAIN,
+)
+from .coordinator import WattsonCoordinator, WattsonTripConfig
+from .gmaps import GoogleMapsClient
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -25,9 +44,30 @@ def wattson_device_info(entry: ConfigEntry) -> DeviceInfo:
     )
 
 
+def _opt(entry: ConfigEntry, key: str, default):
+    return entry.options.get(key, entry.data.get(key, default))
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    dry_run = entry.options.get("dry_run", entry.data.get("dry_run", True))
-    coordinator = WattsonCoordinator(hass, dry_run=dry_run)
+    dry_run = _opt(entry, "dry_run", True)
+
+    gmaps_key = _opt(entry, CONF_GMAPS_KEY, "")
+    gmaps = None
+    if gmaps_key:
+        gmaps = GoogleMapsClient(gmaps_key, async_get_clientsession(hass))
+
+    trip_cfg = WattsonTripConfig(
+        gmaps=gmaps,
+        home_address=_opt(entry, CONF_HOME_ADDRESS, DEFAULT_HOME_ADDRESS),
+        calendar_entity=_opt(entry, CONF_CALENDAR_ENTITY, DEFAULT_CALENDAR_ENTITY),
+        vehicle_consumption=float(_opt(entry, CONF_VEHICLE_CONSUMPTION, DEFAULT_VEHICLE_CONSUMPTION)),
+        vehicle_capacity=float(_opt(entry, CONF_VEHICLE_CAPACITY, DEFAULT_VEHICLE_CAPACITY)),
+        safety_margin=int(_opt(entry, CONF_SAFETY_MARGIN, DEFAULT_SAFETY_MARGIN)),
+        evcc_vehicle_name=_opt(entry, CONF_EVCC_VEHICLE_NAME, DEFAULT_EVCC_VEHICLE_NAME),
+        lookahead_hours=int(_opt(entry, CONF_EVENT_LOOKAHEAD, DEFAULT_EVENT_LOOKAHEAD)),
+    )
+
+    coordinator = WattsonCoordinator(hass, dry_run=dry_run, trip_cfg=trip_cfg)
     await coordinator.async_config_entry_first_refresh()
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator

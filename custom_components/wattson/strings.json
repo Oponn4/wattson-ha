@@ -4,7 +4,15 @@
       "user": {
         "title": "Wattson einrichten",
         "data": {
-          "dry_run": "Dry-Run (keine echten Aktionen)"
+          "dry_run": "Dry-Run (keine echten Aktionen)",
+          "google_maps_api_key": "Google Maps API Key (optional, für UC2 Kalender-Vorladen)",
+          "home_address": "Home-Adresse (Origin für Distanzberechnung)",
+          "calendar_entity": "Kalender-Entity (z.B. calendar.amazone)",
+          "evcc_vehicle_name": "evcc Vehicle-Name (z.B. ora)",
+          "vehicle_consumption_kwh_100km": "Verbrauch in kWh/100km",
+          "vehicle_capacity_kwh": "Batterie-Kapazität in kWh",
+          "safety_margin_percent": "Sicherheitspuffer in % SOC",
+          "event_lookahead_hours": "Kalender-Lookahead in Stunden"
         }
       }
     },
@@ -17,7 +25,15 @@
       "init": {
         "title": "Wattson Optionen",
         "data": {
-          "dry_run": "Dry-Run (keine echten Aktionen)"
+          "dry_run": "Dry-Run (keine echten Aktionen)",
+          "google_maps_api_key": "Google Maps API Key",
+          "home_address": "Home-Adresse",
+          "calendar_entity": "Kalender-Entity",
+          "evcc_vehicle_name": "evcc Vehicle-Name",
+          "vehicle_consumption_kwh_100km": "Verbrauch in kWh/100km",
+          "vehicle_capacity_kwh": "Batterie-Kapazität in kWh",
+          "safety_margin_percent": "Sicherheitspuffer in % SOC",
+          "event_lookahead_hours": "Kalender-Lookahead in Stunden"
         }
       }
     }

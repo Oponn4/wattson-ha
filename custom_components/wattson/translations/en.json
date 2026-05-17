@@ -4,7 +4,15 @@
       "user": {
         "title": "Set up Wattson",
         "data": {
-          "dry_run": "Dry-Run (no real actions)"
+          "dry_run": "Dry-Run (no real actions)",
+          "google_maps_api_key": "Google Maps API Key (optional, for UC2 calendar pre-charging)",
+          "home_address": "Home address (origin for distance calculation)",
+          "calendar_entity": "Calendar entity (e.g. calendar.amazone)",
+          "evcc_vehicle_name": "evcc vehicle name (e.g. ora)",
+          "vehicle_consumption_kwh_100km": "Consumption in kWh/100km",
+          "vehicle_capacity_kwh": "Battery capacity in kWh",
+          "safety_margin_percent": "Safety margin in % SOC",
+          "event_lookahead_hours": "Calendar lookahead in hours"
         }
       }
     },
@@ -17,7 +25,15 @@
       "init": {
         "title": "Wattson Options",
         "data": {
-          "dry_run": "Dry-Run (no real actions)"
+          "dry_run": "Dry-Run (no real actions)",
+          "google_maps_api_key": "Google Maps API Key",
+          "home_address": "Home address",
+          "calendar_entity": "Calendar entity",
+          "evcc_vehicle_name": "evcc vehicle name",
+          "vehicle_consumption_kwh_100km": "Consumption in kWh/100km",
+          "vehicle_capacity_kwh": "Battery capacity in kWh",
+          "safety_margin_percent": "Safety margin in % SOC",
+          "event_lookahead_hours": "Calendar lookahead in hours"
         }
       }
     }

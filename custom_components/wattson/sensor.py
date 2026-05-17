@@ -24,6 +24,7 @@ async def async_setup_entry(
         WattsonCheapestWindowSensor(coordinator, entry, hours=2),
         WattsonCheapestWindowSensor(coordinator, entry, hours=4),
         WattsonExpensiveWindowSensor(coordinator, entry, hours=2),
+        WattsonNextTripSensor(coordinator, entry),
     ])
 
 
@@ -168,4 +169,31 @@ class WattsonExpensiveWindowSensor(WattsonBaseSensor):
             "start": start.isoformat(),
             "end": end.isoformat(),
             "avg_price_eur_kwh": round(avg, 4) if avg is not None else None,
+        }
+
+
+class WattsonNextTripSensor(WattsonBaseSensor):
+    def __init__(self, coordinator, entry):
+        super().__init__(coordinator, entry, "next_trip", "Nächste Fahrt")
+        self._attr_icon = "mdi:map-marker-path"
+
+    @property
+    def native_value(self):
+        d = self.coordinator.data
+        if d is None or not d.trip_title:
+            return None
+        return d.trip_title
+
+    @property
+    def extra_state_attributes(self):
+        d = self.coordinator.data
+        if d is None:
+            return {}
+        return {
+            "ort": d.trip_location,
+            "start": d.trip_start.isoformat() if d.trip_start else None,
+            "distanz_km": d.trip_distance_km,
+            "benoetigter_soc": d.trip_required_soc,
+            "plan_gesetzt": d.trip_plan_set,
+            "begruendung": d.trip_reason,
         }

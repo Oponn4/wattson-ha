@@ -90,3 +90,52 @@ def most_expensive_window(
 
 def is_in_window(now: datetime, start: datetime, end: datetime) -> bool:
     return start <= now < end
+
+
+def next_relevant_event(
+    events: list[dict], now: datetime, skip_keywords: tuple[str, ...]
+) -> dict | None:
+    """Erstes Event mit nutzbarem Location-Feld in der Zukunft.
+
+    events: Liste von HA-Calendar-Events (jeweils dict mit start/end/summary/location/uid)
+    Format der Service-Response: {"events": [{"start": "...", "summary": "...", "location": "..."}]}
+    """
+    skip_lower = tuple(k.lower() for k in skip_keywords)
+    relevant: list[dict] = []
+    for ev in events:
+        loc = (ev.get("location") or "").strip()
+        if not loc:
+            continue
+        if any(kw in loc.lower() for kw in skip_lower):
+            continue
+        start_str = ev.get("start") or ""
+        try:
+            start_dt = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            continue
+        if start_dt <= now:
+            continue
+        relevant.append({**ev, "_start_dt": start_dt})
+    if not relevant:
+        return None
+    relevant.sort(key=lambda e: e["_start_dt"])
+    return relevant[0]
+
+
+def calculate_required_soc(
+    distance_km: float,
+    consumption_kwh_100km: float,
+    capacity_kwh: float,
+    safety_margin_percent: int,
+    round_step: int = 5,
+) -> int:
+    """SOC% nötig für Hin+Rückfahrt + Sicherheitspuffer, gerundet auf round_step%."""
+    energy_needed_kwh = (distance_km * 2.0) * consumption_kwh_100km / 100.0
+    soc_pct = (energy_needed_kwh / capacity_kwh) * 100.0
+    soc_with_margin = soc_pct + safety_margin_percent
+    if soc_with_margin < 5:
+        soc_with_margin = 5
+    if soc_with_margin > 100:
+        soc_with_margin = 100
+    # Aufrunden auf round_step
+    return int(((soc_with_margin + round_step - 1) // round_step) * round_step)
