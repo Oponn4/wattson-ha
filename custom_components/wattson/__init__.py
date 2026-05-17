@@ -9,6 +9,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.device_registry import DeviceInfo
 
 from .const import (
+    CONF_AUTO_CALENDARS,
     CONF_CALENDAR_ENTITY,
     CONF_EVCC_VEHICLE_NAME,
     CONF_EVENT_LOOKAHEAD,
@@ -17,7 +18,7 @@ from .const import (
     CONF_SAFETY_MARGIN,
     CONF_VEHICLE_CAPACITY,
     CONF_VEHICLE_CONSUMPTION,
-    DEFAULT_CALENDAR_ENTITY,
+    DEFAULT_AUTO_CALENDARS,
     DEFAULT_EVCC_VEHICLE_NAME,
     DEFAULT_EVENT_LOOKAHEAD,
     DEFAULT_HOME_ADDRESS,
@@ -56,10 +57,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if gmaps_key:
         gmaps = GoogleMapsClient(gmaps_key, async_get_clientsession(hass))
 
+    # Multi-Calendar mit Migration: alter Single-Key calendar_entity → Liste
+    auto_calendars = _opt(entry, CONF_AUTO_CALENDARS, None)
+    if not auto_calendars:
+        legacy = _opt(entry, CONF_CALENDAR_ENTITY, None)
+        auto_calendars = [legacy] if legacy else list(DEFAULT_AUTO_CALENDARS)
+
     trip_cfg = WattsonTripConfig(
         gmaps=gmaps,
         home_address=_opt(entry, CONF_HOME_ADDRESS, DEFAULT_HOME_ADDRESS),
-        calendar_entity=_opt(entry, CONF_CALENDAR_ENTITY, DEFAULT_CALENDAR_ENTITY),
+        auto_calendars=auto_calendars,
         vehicle_consumption=float(_opt(entry, CONF_VEHICLE_CONSUMPTION, DEFAULT_VEHICLE_CONSUMPTION)),
         vehicle_capacity=float(_opt(entry, CONF_VEHICLE_CAPACITY, DEFAULT_VEHICLE_CAPACITY)),
         safety_margin=int(_opt(entry, CONF_SAFETY_MARGIN, DEFAULT_SAFETY_MARGIN)),

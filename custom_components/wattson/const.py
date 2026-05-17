@@ -54,7 +54,8 @@ NOTIFY_SERVICE = "notify.mobile_app_ios_hw23x69q47"
 # Welle 7 — UC2 Kalender-Vorladen (Defaults für Config Flow)
 CONF_GMAPS_KEY            = "google_maps_api_key"
 CONF_HOME_ADDRESS         = "home_address"
-CONF_CALENDAR_ENTITY      = "calendar_entity"
+CONF_CALENDAR_ENTITY      = "calendar_entity"      # deprecated, siehe AUTO_CALENDARS
+CONF_AUTO_CALENDARS       = "auto_calendars"       # Liste der für Auto-Fahrten relevanten Kalender
 CONF_VEHICLE_CONSUMPTION  = "vehicle_consumption_kwh_100km"
 CONF_VEHICLE_CAPACITY     = "vehicle_capacity_kwh"
 CONF_SAFETY_MARGIN        = "safety_margin_percent"
@@ -62,7 +63,8 @@ CONF_EVCC_VEHICLE_NAME    = "evcc_vehicle_name"
 CONF_EVENT_LOOKAHEAD      = "event_lookahead_hours"
 
 DEFAULT_HOME_ADDRESS         = "Limburg an der Lahn, Germany"
-DEFAULT_CALENDAR_ENTITY      = "calendar.amazone"
+DEFAULT_CALENDAR_ENTITY      = "calendar.amazone"  # deprecated
+DEFAULT_AUTO_CALENDARS       = ["calendar.arbeit", "calendar.barchen"]
 DEFAULT_VEHICLE_CONSUMPTION  = 20.0   # kWh/100km
 DEFAULT_VEHICLE_CAPACITY     = 63.0   # kWh
 DEFAULT_SAFETY_MARGIN        = 25     # %

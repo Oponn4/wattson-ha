@@ -69,7 +69,7 @@ class WattsonTripConfig:
     """Config-Werte für UC2 (Calendar-basiertes Vorladen)."""
     gmaps: GoogleMapsClient | None
     home_address: str
-    calendar_entity: str
+    auto_calendars: list[str]    # Kalender deren Termine als Auto-Fahrt gelten
     vehicle_consumption: float   # kWh/100km
     vehicle_capacity: float      # kWh
     safety_margin: int           # %
@@ -124,6 +124,7 @@ class WattsonData:
     # UC2 — nächste Fahrt
     trip_title: str = ""
     trip_location: str = ""
+    trip_calendar: str = ""
     trip_start: datetime | None = None
     trip_distance_km: float | None = None
     trip_required_soc: int | None = None
@@ -430,11 +431,13 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         self._prev = s
         return s
 
-    async def _fetch_calendar_events(self, entity_id: str, hours: int) -> list[dict]:
+    async def _fetch_calendar_events(self, entity_ids: list[str], hours: int) -> list[dict]:
+        if not entity_ids:
+            return []
         try:
             resp = await self.hass.services.async_call(
                 "calendar", "get_events",
-                {"entity_id": entity_id, "duration": {"hours": hours}},
+                {"entity_id": entity_ids, "duration": {"hours": hours}},
                 blocking=True, return_response=True,
             )
         except HomeAssistantError as e:
@@ -442,8 +445,13 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             return []
         if not resp:
             return []
-        cal_data = resp.get(entity_id) or {}
-        return cal_data.get("events", []) if isinstance(cal_data, dict) else []
+        # Response ist {entity_id: {"events": [...]}, ...} — mergen
+        merged: list[dict] = []
+        for cal_id, cal_data in resp.items():
+            if isinstance(cal_data, dict):
+                for ev in cal_data.get("events", []):
+                    merged.append({**ev, "_calendar": cal_id})
+        return merged
 
     async def _handle_trip_planning(
         self, s: WattsonData, now: datetime, actions: list[str]
@@ -452,8 +460,11 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         if cfg is None or cfg.gmaps is None:
             s.trip_reason = "deaktiviert (kein Google Maps Key)"
             return
+        if not cfg.auto_calendars:
+            s.trip_reason = "deaktiviert (keine Kalender konfiguriert)"
+            return
 
-        events = await self._fetch_calendar_events(cfg.calendar_entity, cfg.lookahead_hours)
+        events = await self._fetch_calendar_events(cfg.auto_calendars, cfg.lookahead_hours)
         event = next_relevant_event(events, now, SKIP_LOCATION_KEYWORDS)
         if event is None:
             s.trip_reason = "kein relevanter Termin in Sicht"
@@ -463,6 +474,7 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         s.trip_title = event.get("summary", "?")
         s.trip_location = event.get("location", "")
         s.trip_start = event["_start_dt"]
+        s.trip_calendar = event.get("_calendar", "")
 
         route = await cfg.gmaps.distance(cfg.home_address, s.trip_location)
         if route is None:
