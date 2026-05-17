@@ -367,6 +367,9 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
                          s.pv_surplus, s.battery_soc, s.t300_tank_temp)
             actions.append(await self._act("switch", "turn_off", entity_id=ENTITY_T300_HEIZSTAB))
 
+        # ── UC2: Kalender-basiertes Vorladen (vor UC6/7 weil setzt Plan-Mode-Hinweis) ──
+        await self._handle_trip_planning(s, now, actions)
+
         # ── UC6/UC7: evcc Modus vorausschauend ───────────────────────────────
         if s.car_connected:
             needs_charge = s.car_soc < SOC_TARGET
@@ -374,7 +377,14 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
                 s.cheapest_4h_start
                 and is_in_window(now, s.cheapest_4h_start, s.cheapest_4h_end)
             )
-            if needs_charge and in_cheapest_4h:
+            if s.trip_plan_set:
+                # UC2-Plan aktiv → evcc soll planen, niemals "now" forcieren
+                target_mode = "pv"
+                reason = (f"Trip-Plan aktiv ({s.trip_title}, "
+                          f"Ziel {s.trip_required_soc}% bis "
+                          f"{s.trip_start.strftime('%d.%m %H:%M') if s.trip_start else '?'}) "
+                          f"— pv-Mode damit Plan greift")
+            elif needs_charge and in_cheapest_4h:
                 target_mode = "now"
                 reason = (f"günstigste 4h "
                           f"{s.cheapest_4h_start.strftime('%H:%M')}–{s.cheapest_4h_end.strftime('%H:%M')} "
@@ -415,9 +425,6 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             s.low_soc_notified = True
         elif s.car_soc >= SOC_WARNUNG:
             s.low_soc_notified = False
-
-        # ── UC2: Kalender-basiertes Vorladen ──────────────────────────────────
-        await self._handle_trip_planning(s, now, actions)
 
         s.last_actions = actions if actions else ["Keine Änderungen"]
         self._prev = s
