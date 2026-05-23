@@ -76,3 +76,12 @@ SKIP_LOCATION_KEYWORDS = ("microsoft teams", "teams meeting", "zoom", "https://"
 
 # Plan-Charging — Wattson setzt Plan max 1× pro Event, identifiziert via uid
 EVCC_PLAN_BUFFER_MINUTES = 30  # Plan zielt N Min vor Event-Start
+
+# ── Use Cases (für Override-Manager + UI-Switches/Sensoren/Buttons) ──
+# Tuple: (uc_id, display_name, default_enabled)
+UC_DEFINITIONS = [
+    ("uc4a", "T300 Solltemperatur", True),
+    ("uc4b", "T300 E-Heizstab", True),
+    ("uc6",  "evcc Lademodus",     True),
+    ("uc2",  "evcc Fahrplan",      True),
+]

@@ -20,6 +20,7 @@ from .forecast import (
     parse_tibber_response,
 )
 from .gmaps import GoogleMapsClient
+from .override import OverrideManager, UCDefinition
 from .const import (
     BATTERY_FULL,
     BATTERY_NOT_FULL,
@@ -27,6 +28,7 @@ from .const import (
     DOMAIN,
     EVCC_PLAN_BUFFER_MINUTES,
     SKIP_LOCATION_KEYWORDS,
+    UC_DEFINITIONS,
     ENTITY_BATTERY_SOC,
     ENTITY_EVCC_CONNECTED,
     ENTITY_EVCC_MODE,
@@ -143,6 +145,10 @@ class WattsonData:
     cheapest_4h_end: datetime | None = None
     cheapest_4h_avg: float | None = None
 
+    # UC-Status (für Sensoren) — string-werte: aktiv / disabled / user-override / dry-run
+    uc_status: dict[str, str] = field(default_factory=dict)
+    uc_reason: dict[str, str] = field(default_factory=dict)
+
     # intern
     low_soc_notified: bool = False
 
@@ -161,6 +167,18 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         self._trip_cfg = trip_cfg
         self._prev: WattsonData = WattsonData(dry_run=dry_run)
         self._planned_event_uid: str | None = None
+        self._override = OverrideManager(
+            hass,
+            [UCDefinition(uc_id, name, default) for uc_id, name, default in UC_DEFINITIONS],
+        )
+
+    @property
+    def override(self) -> OverrideManager:
+        return self._override
+
+    async def async_setup(self) -> None:
+        """Wird vom __init__ vor first_refresh aufgerufen."""
+        await self._override.async_load()
 
     @property
     def dry_run(self) -> bool:
@@ -217,6 +235,7 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         return slots
 
     async def _act(self, domain: str, service: str, **kwargs) -> str:
+        """Ungetrackte Aktion (z.B. Notify) — kein Override-Check."""
         desc = f"{domain}.{service}({kwargs})"
         if self._dry_run:
             _LOGGER.info("[DRY-RUN] %s", desc)
@@ -224,6 +243,44 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             await self.hass.services.async_call(domain, service, kwargs, blocking=False)
             _LOGGER.info("Aktion: %s", desc)
         return desc
+
+    def _uc_idle_status(self, uc_id: str) -> str:
+        """Status wenn UC im Tick aktiv geblieben ist aber keine Aktion nötig war."""
+        if not self._override.is_enabled(uc_id):
+            return "disabled"
+        if self._override.in_cooldown(uc_id):
+            remaining = self._override.cooldown_remaining_minutes(uc_id)
+            return f"user-override ({remaining}min Rest)"
+        return "aktiv"
+
+    async def _try_act(
+        self, uc_id: str, entity_id: str, value_for_track,
+        domain: str, service: str, service_data: dict,
+    ) -> tuple[bool, str]:
+        """Override-bewusste Aktion. Returns (acted, reason)."""
+        if not self._override.is_enabled(uc_id):
+            return False, "disabled"
+
+        if self._override.in_cooldown(uc_id):
+            remaining = self._override.cooldown_remaining_minutes(uc_id)
+            return False, f"user-override ({remaining}min Rest)"
+
+        # User-Eingriff seit letzter Wattson-Aktion?
+        current = self._state(entity_id)
+        if self._override.detect_override(entity_id, current):
+            await self._override.async_record_override(uc_id, entity_id, current)
+            remaining = self._override.cooldown_remaining_minutes(uc_id)
+            return False, f"user-override neu erkannt ({remaining}min Rest)"
+
+        desc = f"{domain}.{service}({service_data})"
+        if self._dry_run:
+            _LOGGER.info("[DRY-RUN] %s", desc)
+            return True, f"DRY-RUN: {desc}"
+
+        await self.hass.services.async_call(domain, service, service_data, blocking=False)
+        await self._override.async_record_action(uc_id, entity_id, value_for_track)
+        _LOGGER.info("Aktion: %s", desc)
+        return True, desc
 
     async def _async_update_data(self) -> WattsonData:
         s = WattsonData(dry_run=self._dry_run)
@@ -304,6 +361,9 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             s.evcc_target = s.evcc_mode
             s.t300_reason = "Schlafmodus"
             s.evcc_reason = "Schlafmodus"
+            for uc_id, _, _ in UC_DEFINITIONS:
+                s.uc_status[uc_id] = "schlafmodus"
+                s.uc_reason[uc_id] = "Schlafmodus aktiv"
             self._prev = s
             return s
 
@@ -341,10 +401,24 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         s.t300_reason = reason
         if abs(new_temp - s.t300_solltemperatur) >= 1.0:
             _LOGGER.info("T300: %.1f°C → %.1f°C (%s)", s.t300_solltemperatur, new_temp, reason)
-            actions.append(await self._act("input_number", "set_value",
-                                           entity_id=ENTITY_T300_SOLL, value=new_temp))
+            acted, act_desc = await self._try_act(
+                "uc4a", ENTITY_T300_SOLL, new_temp,
+                "input_number", "set_value",
+                {"entity_id": ENTITY_T300_SOLL, "value": new_temp},
+            )
+            if acted:
+                actions.append(act_desc)
+                s.uc_status["uc4a"] = "aktiv"
+                s.uc_reason["uc4a"] = reason
+            else:
+                _LOGGER.info("UC4a übersprungen: %s", act_desc)
+                s.uc_status["uc4a"] = act_desc
+                s.uc_reason["uc4a"] = f"{reason} (geblockt: {act_desc})"
         else:
             _LOGGER.info("T300: %.1f°C OK (%s)", s.t300_solltemperatur, reason)
+            # Aktiv aber nichts zu tun — Status reflektiert das
+            s.uc_status.setdefault("uc4a", self._uc_idle_status("uc4a"))
+            s.uc_reason["uc4a"] = reason
 
         # ── UC4b: E-Heizstab bei PV-Überschuss + Speicher voll ───────────────
         # AN nur wenn: Überschuss da UND Speicher (fast) voll UND Tank nicht zu heiß
@@ -359,14 +433,44 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             or s.battery_soc < BATTERY_NOT_FULL
             or s.t300_tank_temp >= T300_TANK_MAX
         )
+        heizstab_reason = ""
         if should_on and not s.t300_heizstab_on:
-            _LOGGER.info("E-Heizstab EIN (Überschuss %dW, Bat %d%%, Tank %.1f°C)",
-                         s.pv_surplus, s.battery_soc, s.t300_tank_temp)
-            actions.append(await self._act("switch", "turn_on", entity_id=ENTITY_T300_HEIZSTAB))
+            heizstab_reason = (f"Heizstab EIN (Überschuss {s.pv_surplus}W, "
+                               f"Bat {s.battery_soc}%, Tank {s.t300_tank_temp:.1f}°C)")
+            _LOGGER.info("E-%s", heizstab_reason)
+            acted, act_desc = await self._try_act(
+                "uc4b", ENTITY_T300_HEIZSTAB, "on",
+                "switch", "turn_on",
+                {"entity_id": ENTITY_T300_HEIZSTAB},
+            )
+            if acted:
+                actions.append(act_desc)
+                s.uc_status["uc4b"] = "aktiv"
+            else:
+                _LOGGER.info("UC4b übersprungen: %s", act_desc)
+                s.uc_status["uc4b"] = act_desc
+                heizstab_reason = f"{heizstab_reason} (geblockt: {act_desc})"
         elif should_off and s.t300_heizstab_on:
-            _LOGGER.info("E-Heizstab AUS (Überschuss %dW, Bat %d%%, Tank %.1f°C)",
-                         s.pv_surplus, s.battery_soc, s.t300_tank_temp)
-            actions.append(await self._act("switch", "turn_off", entity_id=ENTITY_T300_HEIZSTAB))
+            heizstab_reason = (f"Heizstab AUS (Überschuss {s.pv_surplus}W, "
+                               f"Bat {s.battery_soc}%, Tank {s.t300_tank_temp:.1f}°C)")
+            _LOGGER.info("E-%s", heizstab_reason)
+            acted, act_desc = await self._try_act(
+                "uc4b", ENTITY_T300_HEIZSTAB, "off",
+                "switch", "turn_off",
+                {"entity_id": ENTITY_T300_HEIZSTAB},
+            )
+            if acted:
+                actions.append(act_desc)
+                s.uc_status["uc4b"] = "aktiv"
+            else:
+                _LOGGER.info("UC4b übersprungen: %s", act_desc)
+                s.uc_status["uc4b"] = act_desc
+                heizstab_reason = f"{heizstab_reason} (geblockt: {act_desc})"
+        else:
+            heizstab_reason = (f"Stabil ({'an' if s.t300_heizstab_on else 'aus'}, "
+                               f"Überschuss {s.pv_surplus}W, Bat {s.battery_soc}%)")
+            s.uc_status.setdefault("uc4b", self._uc_idle_status("uc4b"))
+        s.uc_reason["uc4b"] = heizstab_reason
 
         # ── UC2: Kalender-basiertes Vorladen (vor UC6/7 weil setzt Plan-Mode-Hinweis) ──
         await self._handle_trip_planning(s, now, actions)
@@ -408,12 +512,25 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             s.evcc_reason = reason
             if target_mode != s.evcc_mode:
                 _LOGGER.info("evcc: %s → %s (%s)", s.evcc_mode, target_mode, reason)
-                actions.append(await self._act("select", "select_option",
-                                               entity_id=ENTITY_EVCC_MODE, option=target_mode))
+                acted, act_desc = await self._try_act(
+                    "uc6", ENTITY_EVCC_MODE, target_mode,
+                    "select", "select_option",
+                    {"entity_id": ENTITY_EVCC_MODE, "option": target_mode},
+                )
+                if acted:
+                    actions.append(act_desc)
+                    s.uc_status["uc6"] = "aktiv"
+                else:
+                    _LOGGER.info("UC6 übersprungen: %s", act_desc)
+                    s.uc_status["uc6"] = act_desc
+                    s.evcc_reason = f"{reason} (geblockt: {act_desc})"
             else:
                 _LOGGER.info("evcc: %s OK (%s)", s.evcc_mode, reason)
+                s.uc_status.setdefault("uc6", self._uc_idle_status("uc6"))
         else:
             s.evcc_reason = "Auto nicht angeschlossen"
+            s.uc_status.setdefault("uc6", self._uc_idle_status("uc6"))
+        s.uc_reason["uc6"] = s.evcc_reason
 
         # ── UC1: Niedrig-SOC Warnung ──────────────────────────────────────────
         if s.car_soc > 0 and s.car_soc < SOC_WARNUNG and not s.low_soc_notified:
@@ -456,12 +573,31 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
     async def _handle_trip_planning(
         self, s: WattsonData, now: datetime, actions: list[str]
     ) -> None:
+        # Default: aktiv mit reason — wird ggf. überschrieben
+        s.uc_status["uc2"] = self._uc_idle_status("uc2")
         cfg = self._trip_cfg
+        if not self._override.is_enabled("uc2"):
+            s.trip_reason = "disabled (per Switch)"
+            s.uc_status["uc2"] = "disabled"
+            s.uc_reason["uc2"] = s.trip_reason
+            return
+        # UC2 erbt UC6's mode-Override — wenn User mode überschrieben hat,
+        # macht ein Plan ohnehin keinen Sinn (pv-Mode wird nicht greifen)
+        if self._override.in_cooldown("uc6"):
+            remaining = self._override.cooldown_remaining_minutes("uc6")
+            s.trip_reason = f"pausiert — evcc Mode-Override aktiv ({remaining}min Rest)"
+            s.uc_status["uc2"] = f"user-override via uc6 ({remaining}min Rest)"
+            s.uc_reason["uc2"] = s.trip_reason
+            return
         if cfg is None or cfg.gmaps is None:
             s.trip_reason = "deaktiviert (kein Google Maps Key)"
+            s.uc_status["uc2"] = "aktiv"
+            s.uc_reason["uc2"] = s.trip_reason
             return
         if not cfg.auto_calendars:
             s.trip_reason = "deaktiviert (keine Kalender konfiguriert)"
+            s.uc_status["uc2"] = "aktiv"
+            s.uc_reason["uc2"] = s.trip_reason
             return
 
         events = await self._fetch_calendar_events(cfg.auto_calendars, cfg.lookahead_hours)
@@ -521,4 +657,5 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         s.trip_plan_set = True
         s.trip_reason = (f"Plan gesetzt: {required_soc}% bis {departure.strftime('%d.%m %H:%M')} "
                          f"({s.trip_title}, {route.distance_km:.0f} km)")
+        s.uc_reason["uc2"] = s.trip_reason
         self._planned_event_uid = event_uid

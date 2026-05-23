@@ -8,7 +8,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import wattson_device_info
-from .const import DOMAIN
+from .const import DOMAIN, UC_DEFINITIONS
 from .coordinator import WattsonCoordinator
 
 
@@ -16,7 +16,7 @@ async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
     coordinator: WattsonCoordinator = hass.data[DOMAIN][entry.entry_id]
-    async_add_entities([
+    entities: list[SensorEntity] = [
         WattsonStatusSensor(coordinator, entry),
         WattsonLastActionSensor(coordinator, entry),
         WattsonT300TargetSensor(coordinator, entry),
@@ -25,7 +25,10 @@ async def async_setup_entry(
         WattsonCheapestWindowSensor(coordinator, entry, hours=4),
         WattsonExpensiveWindowSensor(coordinator, entry, hours=2),
         WattsonNextTripSensor(coordinator, entry),
-    ])
+    ]
+    for uc_id, name, _ in UC_DEFINITIONS:
+        entities.append(WattsonUCStatusSensor(coordinator, entry, uc_id, name))
+    async_add_entities(entities)
 
 
 class WattsonBaseSensor(CoordinatorEntity[WattsonCoordinator], SensorEntity):
@@ -170,6 +173,34 @@ class WattsonExpensiveWindowSensor(WattsonBaseSensor):
             "end": end.isoformat(),
             "avg_price_eur_kwh": round(avg, 4) if avg is not None else None,
         }
+
+
+class WattsonUCStatusSensor(WattsonBaseSensor):
+    """Pro-UC Status: aktiv / disabled / user-override (Xmin) / schlafmodus."""
+
+    _attr_icon = "mdi:traffic-light"
+
+    def __init__(self, coordinator, entry, uc_id: str, display_name: str):
+        super().__init__(coordinator, entry, f"{uc_id}_status",
+                         f"{uc_id.upper()} {display_name} Status")
+        self._uc_id = uc_id
+
+    @property
+    def native_value(self):
+        d = self.coordinator.data
+        if d is None:
+            return None
+        return d.uc_status.get(self._uc_id, self.coordinator._uc_idle_status(self._uc_id))
+
+    @property
+    def extra_state_attributes(self):
+        d = self.coordinator.data
+        if d is None:
+            return {}
+        info = self.coordinator.override.status_for(self._uc_id)
+        attrs = {"begruendung": d.uc_reason.get(self._uc_id, "")}
+        attrs.update(info["attrs"])
+        return attrs
 
 
 class WattsonNextTripSensor(WattsonBaseSensor):
