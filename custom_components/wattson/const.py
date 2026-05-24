@@ -100,3 +100,10 @@ DEFAULT_E3DC_PASSWORD = "admin"
 EEG_VERGUETUNG_EUR_KWH = 0.111  # Einspeisevergütung am Haus BGW29
 MIN_SPREAD_EUR         = 0.07   # cheapest_4h vs expensive_4h muss >= 7ct sein damit UC10 lohnt
 SOC_BATTERY_RESERVE    = 20     # % — unter diesem SOC keine Discharge-Sperre (Batterie eh leer)
+
+# UC10 Phase 2: PV-Forecast-Bypass
+# Wenn morgen mehr PV erwartet wird als BATTERIE_KAPAZITÄT × N, soll Discharge
+# NICHT gesperrt werden — Batterie soll nachts entladen damit morgens Platz für
+# PV-Aufnahme bleibt (verhindert Einspeisung @ 11.1ct statt Eigennutzung @ 30ct)
+BATTERIE_KAPAZITAT_KWH = 4.6
+PV_BYPASS_FACTOR       = 4.0    # pv_fc_tomorrow > 4.6 * 4.0 = 18.4 kWh → Bypass

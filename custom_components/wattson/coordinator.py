@@ -55,7 +55,9 @@ from .const import (
     NOTIFY_SERVICE,
     PV_SURPLUS_OFF,
     PV_SURPLUS_ON,
+    BATTERIE_KAPAZITAT_KWH,
     MIN_SPREAD_EUR,
+    PV_BYPASS_FACTOR,
     SCAN_INTERVAL_SECONDS,
     SOC_BATTERY_RESERVE,
     SOC_TARGET,
@@ -626,7 +628,16 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             return
 
         in_cheapest = is_in_window(now, s.cheapest_4h_start, s.cheapest_4h_end)
-        should_lock = bool(in_cheapest and s.battery_soc >= SOC_BATTERY_RESERVE)
+
+        # Phase 2 Bypass: viel PV morgen → Batterie soll leer werden für Aufnahme
+        pv_bypass_threshold = BATTERIE_KAPAZITAT_KWH * PV_BYPASS_FACTOR
+        pv_bypass_active = s.pv_fc_tomorrow > pv_bypass_threshold
+
+        should_lock = bool(
+            in_cheapest
+            and s.battery_soc >= SOC_BATTERY_RESERVE
+            and not pv_bypass_active
+        )
         s.uc10_idle_active = should_lock
 
         # Aktuelles idle_periods holen
@@ -664,17 +675,23 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         # Nur setzen wenn Änderung nötig
         target_json = json.dumps(target_periods, sort_keys=True)
         current_json = json.dumps(current_periods, sort_keys=True)
+        bypass_str = (
+            f" — bypass aktiv (PV morgen {s.pv_fc_tomorrow:.1f}kWh > "
+            f"{pv_bypass_threshold:.1f}kWh)" if pv_bypass_active else ""
+        )
+
         if target_json == current_json:
             s.uc_reason["uc10"] = (
                 f"OK (spread {spread*100:.1f}ct, SOC {s.battery_soc}%, "
                 f"{'lock aktiv ' + window_str if should_lock else 'normal'})"
+                f"{bypass_str}"
             )
             return
 
         reason = (
             f"lock={'on ' + window_str if should_lock else 'off'} "
             f"(spread {spread*100:.1f}ct, cheap-avg {s.cheapest_4h_avg*100:.1f}ct, "
-            f"SOC {s.battery_soc}%)"
+            f"SOC {s.battery_soc}%){bypass_str}"
         )
         desc = f"e3dc.set_idle_periods({window_str or 'clear'})"
         _LOGGER.info("UC10: %s", reason)
