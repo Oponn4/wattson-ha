@@ -1,6 +1,7 @@
 """Wattson DataUpdateCoordinator — Entscheidungslogik."""
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -20,6 +21,7 @@ from .forecast import (
     parse_tibber_response,
 )
 from .gmaps import GoogleMapsClient
+from .e3dc_client import E3DCClient, empty_periods_for_week, make_discharge_period
 from .override import OverrideManager, UCDefinition
 from .const import (
     BATTERY_FULL,
@@ -53,7 +55,9 @@ from .const import (
     NOTIFY_SERVICE,
     PV_SURPLUS_OFF,
     PV_SURPLUS_ON,
+    MIN_SPREAD_EUR,
     SCAN_INTERVAL_SECONDS,
+    SOC_BATTERY_RESERVE,
     SOC_TARGET,
     SOC_WARNUNG,
     T300_TANK_MAX,
@@ -144,6 +148,13 @@ class WattsonData:
     cheapest_4h_start: datetime | None = None
     cheapest_4h_end: datetime | None = None
     cheapest_4h_avg: float | None = None
+    expensive_4h_start: datetime | None = None
+    expensive_4h_end: datetime | None = None
+    expensive_4h_avg: float | None = None
+
+    # UC10
+    uc10_spread_eur: float = 0.0
+    uc10_idle_active: bool = False
 
     # UC-Status (für Sensoren) — string-werte: aktiv / disabled / user-override / dry-run
     uc_status: dict[str, str] = field(default_factory=dict)
@@ -156,7 +167,8 @@ class WattsonData:
 class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
 
     def __init__(self, hass: HomeAssistant, dry_run: bool,
-                 trip_cfg: WattsonTripConfig | None = None) -> None:
+                 trip_cfg: WattsonTripConfig | None = None,
+                 e3dc: E3DCClient | None = None) -> None:
         super().__init__(
             hass,
             _LOGGER,
@@ -165,8 +177,10 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         )
         self._dry_run = dry_run
         self._trip_cfg = trip_cfg
+        self._e3dc = e3dc
         self._prev: WattsonData = WattsonData(dry_run=dry_run)
         self._planned_event_uid: str | None = None
+        self._last_idle_periods: dict | None = None  # für UC10 override-detection
         self._override = OverrideManager(
             hass,
             [UCDefinition(uc_id, name, default) for uc_id, name, default in UC_DEFINITIONS],
@@ -321,6 +335,8 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
                 s.expensive_2h_start, s.expensive_2h_end, s.expensive_2h_avg = w
             if (w := cheapest_window(s.forecast_slots, 240, now, lookahead_hours=24)):
                 s.cheapest_4h_start, s.cheapest_4h_end, s.cheapest_4h_avg = w
+            if (w := most_expensive_window(s.forecast_slots, 240, now, lookahead_hours=24)):
+                s.expensive_4h_start, s.expensive_4h_end, s.expensive_4h_avg = w
             if s.cheapest_2h_start and s.expensive_2h_start:
                 _LOGGER.info(
                     "Tibber-Forecast — günstigste 2h: %s–%s (%.3f€) | teuerste 2h: %s–%s (%.3f€) | günstigste 4h: %s–%s (%.3f€)",
@@ -472,6 +488,9 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             s.uc_status.setdefault("uc4b", self._uc_idle_status("uc4b"))
         s.uc_reason["uc4b"] = heizstab_reason
 
+        # ── UC10: E3DC Discharge-Sperre in günstigen Stunden ──
+        await self._handle_uc10_discharge_lock(s, now, actions)
+
         # ── UC2: Kalender-basiertes Vorladen (vor UC6/7 weil setzt Plan-Mode-Hinweis) ──
         await self._handle_trip_planning(s, now, actions)
 
@@ -569,6 +588,112 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
                 for ev in cal_data.get("events", []):
                     merged.append({**ev, "_calendar": cal_id})
         return merged
+
+    async def _handle_uc10_discharge_lock(
+        self, s: WattsonData, now: datetime, actions: list[str]
+    ) -> None:
+        """UC10: Wenn aktuelle Stunde in cheapest_4h und Spread groß genug,
+        sperrt Discharge der E3DC-Batterie via idle_periods → Haus läuft aus
+        Netz (billig), Batterie hält SOC für teure Stunden."""
+        s.uc_status["uc10"] = self._uc_idle_status("uc10")
+        s.uc_reason["uc10"] = ""
+
+        if self._e3dc is None:
+            s.uc_reason["uc10"] = "deaktiviert (kein E3DC konfiguriert)"
+            return
+        if not self._override.is_enabled("uc10"):
+            s.uc_status["uc10"] = "disabled"
+            s.uc_reason["uc10"] = "disabled (per Switch)"
+            return
+        if self._override.in_cooldown("uc10"):
+            remaining = self._override.cooldown_remaining_minutes("uc10")
+            s.uc_status["uc10"] = f"user-override ({remaining}min Rest)"
+            s.uc_reason["uc10"] = f"user-override aktiv ({remaining}min Rest)"
+            return
+
+        if not (s.cheapest_4h_avg is not None and s.expensive_4h_avg is not None
+                and s.cheapest_4h_start and s.cheapest_4h_end):
+            s.uc_reason["uc10"] = "kein Tibber-Forecast verfügbar"
+            return
+
+        spread = s.expensive_4h_avg - s.cheapest_4h_avg
+        s.uc10_spread_eur = spread
+        if spread < MIN_SPREAD_EUR:
+            s.uc_reason["uc10"] = (
+                f"spread {spread*100:.1f}ct < {MIN_SPREAD_EUR*100:.1f}ct "
+                f"(nicht wirtschaftlich)"
+            )
+            return
+
+        in_cheapest = is_in_window(now, s.cheapest_4h_start, s.cheapest_4h_end)
+        should_lock = bool(in_cheapest and s.battery_soc >= SOC_BATTERY_RESERVE)
+        s.uc10_idle_active = should_lock
+
+        # Aktuelles idle_periods holen
+        current_periods = await self._e3dc.get_idle_periods()
+        if current_periods is None:
+            s.uc_reason["uc10"] = "E3DC nicht erreichbar"
+            return
+
+        # Override-Detection: hat User idle_periods extern geändert?
+        if self._last_idle_periods is not None:
+            current_json = json.dumps(current_periods, sort_keys=True)
+            last_json = json.dumps(self._last_idle_periods, sort_keys=True)
+            if current_json != last_json:
+                await self._override.async_record_override(
+                    "uc10", "e3dc_idle_periods", current_periods,
+                )
+                remaining = self._override.cooldown_remaining_minutes("uc10")
+                s.uc_status["uc10"] = f"user-override neu erkannt ({remaining}min)"
+                s.uc_reason["uc10"] = "User hat E3DC idle_periods extern geändert"
+                return
+
+        # Ziel-Konfiguration berechnen
+        target_periods = empty_periods_for_week()
+        window_str = ""
+        if should_lock:
+            weekday = s.cheapest_4h_start.weekday()  # 0=Montag
+            target_periods["idleDischarge"][weekday] = make_discharge_period(
+                weekday,
+                s.cheapest_4h_start.hour, s.cheapest_4h_start.minute,
+                s.cheapest_4h_end.hour, s.cheapest_4h_end.minute,
+            )
+            window_str = (f"{s.cheapest_4h_start.strftime('%H:%M')}–"
+                          f"{s.cheapest_4h_end.strftime('%H:%M')}")
+
+        # Nur setzen wenn Änderung nötig
+        target_json = json.dumps(target_periods, sort_keys=True)
+        current_json = json.dumps(current_periods, sort_keys=True)
+        if target_json == current_json:
+            s.uc_reason["uc10"] = (
+                f"OK (spread {spread*100:.1f}ct, SOC {s.battery_soc}%, "
+                f"{'lock aktiv ' + window_str if should_lock else 'normal'})"
+            )
+            return
+
+        reason = (
+            f"lock={'on ' + window_str if should_lock else 'off'} "
+            f"(spread {spread*100:.1f}ct, cheap-avg {s.cheapest_4h_avg*100:.1f}ct, "
+            f"SOC {s.battery_soc}%)"
+        )
+        desc = f"e3dc.set_idle_periods({window_str or 'clear'})"
+        _LOGGER.info("UC10: %s", reason)
+
+        if self._dry_run:
+            _LOGGER.info("[DRY-RUN] %s | target=%s", desc, target_periods)
+            actions.append(f"DRY-RUN: {desc}")
+            s.uc_status["uc10"] = "aktiv"
+            s.uc_reason["uc10"] = reason
+        else:
+            success = await self._e3dc.set_idle_periods(target_periods)
+            if success:
+                self._last_idle_periods = target_periods
+                actions.append(desc)
+                s.uc_status["uc10"] = "aktiv"
+                s.uc_reason["uc10"] = reason
+            else:
+                s.uc_status["uc10"] = "fehler"
+                s.uc_reason["uc10"] = "E3DC POST set_idle_periods fehlgeschlagen"
 
     async def _handle_trip_planning(
         self, s: WattsonData, now: datetime, actions: list[str]

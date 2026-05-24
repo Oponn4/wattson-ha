@@ -8,6 +8,9 @@ from homeassistant.helpers import selector
 
 from .const import (
     CONF_AUTO_CALENDARS,
+    CONF_E3DC_PASSWORD,
+    CONF_E3DC_URL,
+    CONF_E3DC_USER,
     CONF_EVCC_VEHICLE_NAME,
     CONF_EVENT_LOOKAHEAD,
     CONF_GMAPS_KEY,
@@ -16,6 +19,9 @@ from .const import (
     CONF_VEHICLE_CAPACITY,
     CONF_VEHICLE_CONSUMPTION,
     DEFAULT_AUTO_CALENDARS,
+    DEFAULT_E3DC_PASSWORD,
+    DEFAULT_E3DC_URL,
+    DEFAULT_E3DC_USER,
     DEFAULT_EVCC_VEHICLE_NAME,
     DEFAULT_EVENT_LOOKAHEAD,
     DEFAULT_HOME_ADDRESS,
@@ -63,6 +69,18 @@ def _schema(defaults: dict) -> vol.Schema:
             CONF_EVENT_LOOKAHEAD,
             default=defaults.get(CONF_EVENT_LOOKAHEAD, DEFAULT_EVENT_LOOKAHEAD),
         ): vol.All(int, vol.Range(min=1, max=168)),
+        vol.Optional(
+            CONF_E3DC_URL,
+            default=defaults.get(CONF_E3DC_URL, DEFAULT_E3DC_URL),
+        ): str,
+        vol.Optional(
+            CONF_E3DC_USER,
+            default=defaults.get(CONF_E3DC_USER, DEFAULT_E3DC_USER),
+        ): str,
+        vol.Optional(
+            CONF_E3DC_PASSWORD,
+            default=defaults.get(CONF_E3DC_PASSWORD, DEFAULT_E3DC_PASSWORD),
+        ): str,
     })
 
 

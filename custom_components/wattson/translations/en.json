@@ -12,7 +12,10 @@
           "vehicle_consumption_kwh_100km": "Consumption in kWh/100km",
           "vehicle_capacity_kwh": "Battery capacity in kWh",
           "safety_margin_percent": "Safety margin in % SOC",
-          "event_lookahead_hours": "Calendar lookahead in hours"
+          "event_lookahead_hours": "Calendar lookahead in hours",
+          "e3dc_url": "E3DC URL (optional, e.g. http://10.42.2.5:8080)",
+          "e3dc_user": "E3DC user",
+          "e3dc_password": "E3DC password"
         }
       }
     },
@@ -33,7 +36,10 @@
           "vehicle_consumption_kwh_100km": "Consumption in kWh/100km",
           "vehicle_capacity_kwh": "Battery capacity in kWh",
           "safety_margin_percent": "Safety margin in % SOC",
-          "event_lookahead_hours": "Calendar lookahead in hours"
+          "event_lookahead_hours": "Calendar lookahead in hours",
+          "e3dc_url": "E3DC URL",
+          "e3dc_user": "E3DC user",
+          "e3dc_password": "E3DC password"
         }
       }
     }
