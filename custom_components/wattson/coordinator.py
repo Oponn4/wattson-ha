@@ -56,9 +56,15 @@ from .const import (
     PV_SURPLUS_OFF,
     PV_SURPLUS_ON,
     BATTERIE_KAPAZITAT_KWH,
+    COOL_ABLUFT_HYSTERESE_C,
+    COOL_ABLUFT_TRIGGER_C,
+    ENTITY_PROXON_ABLUFT,
+    ENTITY_PROXON_COOL_ENABLE,
     MIN_SPREAD_EUR,
     PV_BYPASS_FACTOR,
+    PV_COOLING_MIN_W,
     SCAN_INTERVAL_SECONDS,
+    SMART_SPREAD_THRESHOLD_EUR,
     SOC_BATTERY_RESERVE,
     SOC_TARGET,
     SOC_WARNUNG,
@@ -157,6 +163,11 @@ class WattsonData:
     # UC10
     uc10_spread_eur: float = 0.0
     uc10_idle_active: bool = False
+
+    # UC12 — Kühlung
+    cooling_active: bool = False    # ob UC12 die Freigabe gerade gegeben hat
+    abluft_temp: float = 0.0
+    cool_enable_on: bool = False    # tatsächlicher Switch-Status
 
     # UC-Status (für Sensoren) — string-werte: aktiv / disabled / user-override / dry-run
     uc_status: dict[str, str] = field(default_factory=dict)
@@ -317,6 +328,8 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         s.evcc_mode            = self._state(ENTITY_EVCC_MODE, "pv") or "pv"
         s.sleep_mode           = self._state(ENTITY_SLEEP) == "on"
         s.low_soc_notified     = self._prev.low_soc_notified
+        s.abluft_temp          = self._fval(ENTITY_PROXON_ABLUFT, 22.0)
+        s.cool_enable_on       = self._state(ENTITY_PROXON_COOL_ENABLE) == "on"
 
         # ── PV-Forecast (forecast.solar) ─────────────────────────────────────
         s.pv_fc_now            = self._ival(ENTITY_PV_FC_NOW)
@@ -490,6 +503,9 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             s.uc_status.setdefault("uc4b", self._uc_idle_status("uc4b"))
         s.uc_reason["uc4b"] = heizstab_reason
 
+        # ── UC12: Proxon Kühlung (läuft vor UC10 weil UC10 das Ergebnis braucht) ──
+        await self._handle_uc12_cooling(s, now, actions)
+
         # ── UC10: E3DC Discharge-Sperre in günstigen Stunden ──
         await self._handle_uc10_discharge_lock(s, now, actions)
 
@@ -591,6 +607,96 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
                     merged.append({**ev, "_calendar": cal_id})
         return merged
 
+    async def _handle_uc12_cooling(
+        self, s: WattsonData, now: datetime, actions: list[str]
+    ) -> None:
+        """UC12: Proxon-Kühlung-Freigabe netzdienlich steuern. Setzt s.cooling_active
+        damit UC10 die Discharge-Sperre entsprechend lockern kann."""
+        s.uc_status["uc12"] = self._uc_idle_status("uc12")
+        s.uc_reason["uc12"] = ""
+
+        if not self._override.is_enabled("uc12"):
+            s.uc_status["uc12"] = "disabled"
+            s.uc_reason["uc12"] = "disabled (per Switch)"
+            s.cooling_active = s.cool_enable_on  # respect aktuellen Zustand
+            return
+
+        if self._override.in_cooldown("uc12"):
+            remaining = self._override.cooldown_remaining_minutes("uc12")
+            s.uc_status["uc12"] = f"user-override ({remaining}min Rest)"
+            s.uc_reason["uc12"] = f"user-override aktiv ({remaining}min Rest)"
+            s.cooling_active = s.cool_enable_on
+            return
+
+        # Entscheidung berechnen
+        if s.sleep_mode:
+            should_cool = False
+            reason = f"Schlafmodus → Kühlung aus (Abluft {s.abluft_temp:.1f}°C)"
+        elif s.abluft_temp <= COOL_ABLUFT_TRIGGER_C:
+            should_cool = False
+            reason = (f"Abluft {s.abluft_temp:.1f}°C ≤ "
+                      f"{COOL_ABLUFT_TRIGGER_C}°C (kein Bedarf)")
+        else:
+            # Innen zu warm — evaluiere ob freigeben
+            spread = (s.expensive_4h_avg - s.cheapest_4h_avg
+                      if s.expensive_4h_avg and s.cheapest_4h_avg else 0)
+            in_cheapest = bool(
+                s.cheapest_4h_start
+                and is_in_window(now, s.cheapest_4h_start, s.cheapest_4h_end)
+            )
+
+            if s.pv_surplus >= PV_COOLING_MIN_W:
+                should_cool = True
+                reason = (f"PV-Überschuss {s.pv_surplus}W ≥ {PV_COOLING_MIN_W}W "
+                          f"(Abluft {s.abluft_temp:.1f}°C)")
+            elif in_cheapest and spread < SMART_SPREAD_THRESHOLD_EUR:
+                should_cool = True
+                reason = (f"cheapest_4h, spread {spread*100:.1f}ct < "
+                          f"{SMART_SPREAD_THRESHOLD_EUR*100:.1f}ct → UC12 Priorität "
+                          f"(Abluft {s.abluft_temp:.1f}°C)")
+            elif in_cheapest:
+                should_cool = False
+                reason = (f"cheapest_4h, aber spread {spread*100:.1f}ct ≥ "
+                          f"{SMART_SPREAD_THRESHOLD_EUR*100:.1f}ct → UC10 Priorität, "
+                          f"Kühlung warten (Abluft {s.abluft_temp:.1f}°C)")
+            else:
+                should_cool = False
+                reason = (f"kein PV-Überschuss + nicht in cheapest_4h "
+                          f"(Abluft {s.abluft_temp:.1f}°C, "
+                          f"Preis-Level {s.price_level})")
+
+        # Hysterese gegen Schwingen — wenn Kühlung gerade läuft, erst bei Trigger-1 ausgehen
+        if s.cool_enable_on and not should_cool and s.abluft_temp > (
+            COOL_ABLUFT_TRIGGER_C - COOL_ABLUFT_HYSTERESE_C
+        ) and not s.sleep_mode:
+            should_cool = True
+            reason = (f"Hysterese: Kühlung läuft + Abluft {s.abluft_temp:.1f}°C noch "
+                      f"über {COOL_ABLUFT_TRIGGER_C - COOL_ABLUFT_HYSTERESE_C}°C")
+
+        s.cooling_active = should_cool
+        s.uc_reason["uc12"] = reason
+
+        # Switch anpassen wenn nötig
+        if should_cool == s.cool_enable_on:
+            s.uc_status["uc12"] = self._uc_idle_status("uc12")
+            return
+
+        target_value = "on" if should_cool else "off"
+        service = "turn_on" if should_cool else "turn_off"
+        _LOGGER.info("UC12: switch %s (%s)", target_value, reason)
+
+        acted, act_desc = await self._try_act(
+            "uc12", ENTITY_PROXON_COOL_ENABLE, target_value,
+            "switch", service,
+            {"entity_id": ENTITY_PROXON_COOL_ENABLE},
+        )
+        if acted:
+            actions.append(act_desc)
+            s.uc_status["uc12"] = "aktiv"
+        else:
+            s.uc_status["uc12"] = act_desc
+            s.uc_reason["uc12"] = f"{reason} (geblockt: {act_desc})"
+
     async def _handle_uc10_discharge_lock(
         self, s: WattsonData, now: datetime, actions: list[str]
     ) -> None:
@@ -633,10 +739,17 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         pv_bypass_threshold = BATTERIE_KAPAZITAT_KWH * PV_BYPASS_FACTOR
         pv_bypass_active = s.pv_fc_tomorrow > pv_bypass_threshold
 
+        # Smart-Spread: bei laufender UC12-Kühlung lockt UC10 nur wenn Spread sehr groß
+        # (sonst trägt Batterie+Netz die Kühl-Last gemeinsam, Komfort vor 3ct Spread)
+        cooling_bypass = bool(
+            s.cooling_active and spread < SMART_SPREAD_THRESHOLD_EUR
+        )
+
         should_lock = bool(
             in_cheapest
             and s.battery_soc >= SOC_BATTERY_RESERVE
             and not pv_bypass_active
+            and not cooling_bypass
         )
         s.uc10_idle_active = should_lock
 
@@ -675,10 +788,18 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         # Nur setzen wenn Änderung nötig
         target_json = json.dumps(target_periods, sort_keys=True)
         current_json = json.dumps(current_periods, sort_keys=True)
-        bypass_str = (
-            f" — bypass aktiv (PV morgen {s.pv_fc_tomorrow:.1f}kWh > "
-            f"{pv_bypass_threshold:.1f}kWh)" if pv_bypass_active else ""
-        )
+        bypass_parts = []
+        if pv_bypass_active:
+            bypass_parts.append(
+                f"PV-bypass (morgen {s.pv_fc_tomorrow:.1f}kWh > "
+                f"{pv_bypass_threshold:.1f}kWh)"
+            )
+        if cooling_bypass:
+            bypass_parts.append(
+                f"UC12-bypass (Kühlung läuft, spread {spread*100:.1f}ct < "
+                f"{SMART_SPREAD_THRESHOLD_EUR*100:.1f}ct)"
+            )
+        bypass_str = f" — {', '.join(bypass_parts)}" if bypass_parts else ""
 
         if target_json == current_json:
             s.uc_reason["uc10"] = (

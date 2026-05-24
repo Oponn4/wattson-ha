@@ -25,6 +25,8 @@ SOC_TARGET   = 80  # % → unter diesem SOC wird in günstigste 4h forciert
 CHEAP_LEVELS = ("very_cheap", "cheap")
 
 # HA Entity IDs
+ENTITY_PROXON_ABLUFT      = "sensor.proxon_t7_abluft"          # Innen-Temperatur (Abluft als Indikator)
+ENTITY_PROXON_COOL_ENABLE = "switch.proxon_kuehlung_freigabe" # Kühlung Freigabe (Modbus Reg 62)
 ENTITY_PRICE          = "sensor.electricity_price_haus"   # state in EUR/kWh
 ENTITY_PRICE_RANKING  = "sensor.electricity_price_haus"   # attr: intraday_price_ranking (float 0.0-1.0)
 ENTITY_PRICE_LEVEL    = "sensor.haus_current_hour_price_level"
@@ -85,6 +87,7 @@ UC_DEFINITIONS = [
     ("uc6",  "evcc Lademodus",     True),
     ("uc2",  "evcc Fahrplan",      True),
     ("uc10", "E3DC Discharge-Sperre", True),
+    ("uc12", "Proxon Kühlung",     True),
 ]
 
 # ── UC10 — E3DC Batterie-Discharge-Sperre in günstigen Stunden ──
@@ -107,3 +110,9 @@ SOC_BATTERY_RESERVE    = 20     # % — unter diesem SOC keine Discharge-Sperre 
 # PV-Aufnahme bleibt (verhindert Einspeisung @ 11.1ct statt Eigennutzung @ 30ct)
 BATTERIE_KAPAZITAT_KWH = 4.6
 PV_BYPASS_FACTOR       = 4.0    # pv_fc_tomorrow > 4.6 * 4.0 = 18.4 kWh → Bypass
+
+# UC12 — Proxon Kühlung
+COOL_ABLUFT_TRIGGER_C    = 24.0   # °C — wenn Abluft drüber → Kühlbedarf
+COOL_ABLUFT_HYSTERESE_C  = 1.0    # °C — Hysterese gegen Schwingen
+PV_COOLING_MIN_W         = 1500   # W — ab diesem PV-Überschuss darf gekühlt werden
+SMART_SPREAD_THRESHOLD_EUR = 0.15 # spread >= 15ct → UC10 gewinnt vs UC12, sonst Komfort wichtiger
