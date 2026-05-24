@@ -26,8 +26,8 @@ async def async_setup_entry(
         WattsonExpensiveWindowSensor(coordinator, entry, hours=2),
         WattsonNextTripSensor(coordinator, entry),
     ]
-    for uc_id, name, _ in UC_DEFINITIONS:
-        entities.append(WattsonUCStatusSensor(coordinator, entry, uc_id, name))
+    for uc_id, slug, display, _ in UC_DEFINITIONS:
+        entities.append(WattsonUCStatusSensor(coordinator, entry, uc_id, slug, display))
     async_add_entities(entities)
 
 
@@ -74,7 +74,7 @@ class WattsonLastActionSensor(WattsonBaseSensor):
 
 class WattsonT300TargetSensor(WattsonBaseSensor):
     def __init__(self, coordinator, entry):
-        super().__init__(coordinator, entry, "t300_target", "T300 Zieltemperatur")
+        super().__init__(coordinator, entry, "warmwasser_ziel", "Warmwasser Ziel")
         self._attr_icon = "mdi:thermometer"
         self._attr_native_unit_of_measurement = "°C"
 
@@ -91,7 +91,7 @@ class WattsonT300TargetSensor(WattsonBaseSensor):
 
 class WattsonEvccTargetSensor(WattsonBaseSensor):
     def __init__(self, coordinator, entry):
-        super().__init__(coordinator, entry, "evcc_target", "evcc Zielmodus")
+        super().__init__(coordinator, entry, "eauto_ziel", "E-Auto Ziel")
         self._attr_icon = "mdi:car-electric"
 
     @property
@@ -180,9 +180,9 @@ class WattsonUCStatusSensor(WattsonBaseSensor):
 
     _attr_icon = "mdi:traffic-light"
 
-    def __init__(self, coordinator, entry, uc_id: str, display_name: str):
-        super().__init__(coordinator, entry, f"{uc_id}_status",
-                         f"{uc_id.upper()} {display_name} Status")
+    def __init__(self, coordinator, entry, uc_id: str, slug: str, display_name: str):
+        super().__init__(coordinator, entry, f"{slug}_status",
+                         f"{display_name} Status")
         self._uc_id = uc_id
 
     @property
@@ -205,7 +205,7 @@ class WattsonUCStatusSensor(WattsonBaseSensor):
 
 class WattsonNextTripSensor(WattsonBaseSensor):
     def __init__(self, coordinator, entry):
-        super().__init__(coordinator, entry, "next_trip", "Nächste Fahrt")
+        super().__init__(coordinator, entry, "naechste_fahrt", "Nächste Fahrt")
         self._attr_icon = "mdi:map-marker-path"
 
     @property

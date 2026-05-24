@@ -16,8 +16,8 @@ async def async_setup_entry(
 ) -> None:
     coordinator: WattsonCoordinator = hass.data[DOMAIN][entry.entry_id]
     entities: list[ButtonEntity] = [WattsonRefreshButton(coordinator, entry)]
-    for uc_id, name, _ in UC_DEFINITIONS:
-        entities.append(WattsonUCResumeButton(coordinator, entry, uc_id, name))
+    for uc_id, slug, display, _ in UC_DEFINITIONS:
+        entities.append(WattsonUCResumeButton(coordinator, entry, uc_id, slug, display))
     async_add_entities(entities)
 
 
@@ -40,12 +40,12 @@ class WattsonUCResumeButton(ButtonEntity):
 
     def __init__(
         self, coordinator: WattsonCoordinator, entry: ConfigEntry,
-        uc_id: str, display_name: str,
+        uc_id: str, slug: str, display_name: str,
     ) -> None:
         self._coordinator = coordinator
         self._uc_id = uc_id
-        self._attr_unique_id = f"{entry.entry_id}_{uc_id}_resume"
-        self._attr_name = f"Wattson {uc_id.upper()} {display_name} Resume"
+        self._attr_unique_id = f"{entry.entry_id}_{slug}_resume"
+        self._attr_name = f"Wattson {display_name} Resume"
         self._attr_device_info = wattson_device_info(entry)
 
     async def async_press(self) -> None:

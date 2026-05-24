@@ -17,8 +17,8 @@ async def async_setup_entry(
 ) -> None:
     coordinator: WattsonCoordinator = hass.data[DOMAIN][entry.entry_id]
     entities: list[SwitchEntity] = [WattsonDryRunSwitch(coordinator, entry)]
-    for uc_id, name, _ in UC_DEFINITIONS:
-        entities.append(WattsonUCEnabledSwitch(coordinator, entry, uc_id, name))
+    for uc_id, slug, display, _ in UC_DEFINITIONS:
+        entities.append(WattsonUCEnabledSwitch(coordinator, entry, uc_id, slug, display))
     async_add_entities(entities)
 
 
@@ -52,12 +52,12 @@ class WattsonUCEnabledSwitch(CoordinatorEntity[WattsonCoordinator], SwitchEntity
 
     def __init__(
         self, coordinator: WattsonCoordinator, entry: ConfigEntry,
-        uc_id: str, display_name: str,
+        uc_id: str, slug: str, display_name: str,
     ) -> None:
         super().__init__(coordinator)
         self._uc_id = uc_id
-        self._attr_unique_id = f"{entry.entry_id}_{uc_id}_enabled"
-        self._attr_name = f"Wattson {uc_id.upper()} {display_name}"
+        self._attr_unique_id = f"{entry.entry_id}_{slug}_enabled"
+        self._attr_name = f"Wattson {display_name}"
         self._attr_device_info = wattson_device_info(entry)
 
     @property

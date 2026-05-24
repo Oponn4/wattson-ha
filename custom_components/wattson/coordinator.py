@@ -196,7 +196,8 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         self._last_idle_periods: dict | None = None  # für UC10 override-detection
         self._override = OverrideManager(
             hass,
-            [UCDefinition(uc_id, name, default) for uc_id, name, default in UC_DEFINITIONS],
+            [UCDefinition(uc_id, display, default)
+             for uc_id, _slug, display, default in UC_DEFINITIONS],
         )
 
     @property
@@ -392,7 +393,7 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             s.evcc_target = s.evcc_mode
             s.t300_reason = "Schlafmodus"
             s.evcc_reason = "Schlafmodus"
-            for uc_id, _, _ in UC_DEFINITIONS:
+            for uc_id, _slug, _display, _default in UC_DEFINITIONS:
                 s.uc_status[uc_id] = "schlafmodus"
                 s.uc_reason[uc_id] = "Schlafmodus aktiv"
             self._prev = s

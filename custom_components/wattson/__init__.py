@@ -5,6 +5,7 @@ import logging
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.device_registry import DeviceInfo
 
@@ -32,6 +33,7 @@ from .const import (
     DEFAULT_VEHICLE_CAPACITY,
     DEFAULT_VEHICLE_CONSUMPTION,
     DOMAIN,
+    UNIQUE_ID_MIGRATION_V2,
 )
 from .coordinator import WattsonCoordinator, WattsonTripConfig
 from .e3dc_client import E3DCClient
@@ -54,6 +56,58 @@ def wattson_device_info(entry: ConfigEntry) -> DeviceInfo:
 
 def _opt(entry: ConfigEntry, key: str, default):
     return entry.options.get(key, entry.data.get(key, default))
+
+
+async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Migrate v1 (uc4a/uc6/...-Suffixe) → v2 (slug-basierte Namen)."""
+    if entry.version >= 2:
+        return True
+
+    _LOGGER.info("Wattson migration v%d → v2: renaming entity unique_ids + entity_ids", entry.version)
+    ent_reg = er.async_get(hass)
+    renamed = 0
+    # Map sowohl die ALTEN als auch die NEUEN suffixe auf die Ziel-entity_id —
+    # robust gegen partial migrations (z.B. unique_id schon neu aber entity_id alt)
+    suffix_to_target = {}
+    for old_suffix, new_suffix in UNIQUE_ID_MIGRATION_V2.items():
+        base = new_suffix.rsplit("_", 1)[0] if new_suffix.endswith(
+            ("_enabled", "_status", "_resume")
+        ) else new_suffix
+        suffix_to_target[old_suffix] = (new_suffix, base)
+        suffix_to_target[new_suffix] = (new_suffix, base)
+
+    for entity in er.async_entries_for_config_entry(ent_reg, entry.entry_id):
+        # Suffix aus unique_id extrahieren (= alles nach entry_id_)
+        prefix = f"{entry.entry_id}_"
+        if not entity.unique_id.startswith(prefix):
+            continue
+        current_suffix = entity.unique_id[len(prefix):]
+        if current_suffix not in suffix_to_target:
+            continue
+        new_suffix, base = suffix_to_target[current_suffix]
+        new_unique = f"{entry.entry_id}_{new_suffix}"
+        domain = entity.entity_id.split(".")[0]
+        target_entity_id = f"{domain}.wattson_{base}"
+
+        if entity.unique_id == new_unique and entity.entity_id == target_entity_id:
+            continue  # nichts zu tun
+
+        _LOGGER.info(
+            "  %s → %s (unique %s → %s)",
+            entity.entity_id, target_entity_id, current_suffix, new_suffix,
+        )
+        updates = {}
+        if entity.unique_id != new_unique:
+            updates["new_unique_id"] = new_unique
+        if entity.entity_id != target_entity_id:
+            updates["new_entity_id"] = target_entity_id
+        if updates:
+            ent_reg.async_update_entity(entity.entity_id, **updates)
+            renamed += 1
+
+    hass.config_entries.async_update_entry(entry, version=2)
+    _LOGGER.info("Wattson migration v2 abgeschlossen, %d Entities umbenannt", renamed)
+    return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

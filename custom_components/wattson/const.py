@@ -80,15 +80,44 @@ SKIP_LOCATION_KEYWORDS = ("microsoft teams", "teams meeting", "zoom", "https://"
 EVCC_PLAN_BUFFER_MINUTES = 30  # Plan zielt N Min vor Event-Start
 
 # ── Use Cases (für Override-Manager + UI-Switches/Sensoren/Buttons) ──
-# Tuple: (uc_id, display_name, default_enabled)
+# Tuple: (uc_id, slug, display_name, default_enabled)
+# uc_id = interner Code-Identifier (für Override-Manager, Status-Tracking)
+# slug = User-facing Entity-ID-Suffix (kebab-case-frei, snake_case)
+# display = friendly_name nach "Wattson "
 UC_DEFINITIONS = [
-    ("uc4a", "T300 Solltemperatur", True),
-    ("uc4b", "T300 E-Heizstab", True),
-    ("uc6",  "evcc Lademodus",     True),
-    ("uc2",  "evcc Fahrplan",      True),
-    ("uc10", "E3DC Discharge-Sperre", True),
-    ("uc12", "Proxon Kühlung",     True),
+    ("uc4a", "warmwasser_soll",     "Warmwasser Solltemperatur", True),
+    ("uc4b", "warmwasser_heizstab", "Warmwasser Heizstab",       True),
+    ("uc6",  "eauto_modus",         "E-Auto Modus",              True),
+    ("uc2",  "eauto_fahrplan",      "E-Auto Fahrplan",           True),
+    ("uc10", "batterie_schoner",    "Batterie Schoner",          True),
+    ("uc12", "kuhlung",             "Kühlung",                   True),
 ]
+
+# Mapping für Migration v1 → v2: alte unique_id-Suffixe → neue
+UNIQUE_ID_MIGRATION_V2 = {
+    "uc4a_enabled":  "warmwasser_soll_enabled",
+    "uc4a_status":   "warmwasser_soll_status",
+    "uc4a_resume":   "warmwasser_soll_resume",
+    "uc4b_enabled":  "warmwasser_heizstab_enabled",
+    "uc4b_status":   "warmwasser_heizstab_status",
+    "uc4b_resume":   "warmwasser_heizstab_resume",
+    "uc6_enabled":   "eauto_modus_enabled",
+    "uc6_status":    "eauto_modus_status",
+    "uc6_resume":    "eauto_modus_resume",
+    "uc2_enabled":   "eauto_fahrplan_enabled",
+    "uc2_status":    "eauto_fahrplan_status",
+    "uc2_resume":    "eauto_fahrplan_resume",
+    "uc10_enabled":  "batterie_schoner_enabled",
+    "uc10_status":   "batterie_schoner_status",
+    "uc10_resume":   "batterie_schoner_resume",
+    "uc12_enabled":  "kuhlung_enabled",
+    "uc12_status":   "kuhlung_status",
+    "uc12_resume":   "kuhlung_resume",
+    # Sensoren mit unschönen Namen
+    "t300_target":   "warmwasser_ziel",
+    "evcc_target":   "eauto_ziel",
+    "next_trip":     "naechste_fahrt",
+}
 
 # ── UC10 — E3DC Batterie-Discharge-Sperre in günstigen Stunden ──
 CONF_E3DC_URL      = "e3dc_url"
