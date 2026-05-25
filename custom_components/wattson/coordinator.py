@@ -55,8 +55,10 @@ from .const import (
     NOTIFY_SERVICE,
     PV_SURPLUS_OFF,
     PV_SURPLUS_ON,
+    AWAY_LONG_HOURS,
     BATTERIE_KAPAZITAT_KWH,
     CLIMATE_COOL_OFFSET_C,
+    CLIMATE_ECO_OFFSET_C,
     CLIMATE_PEAK_OFFSET_C,
     CLIMATE_PRECOOL_OFFSET_C,
     CLIMATE_TARGET_HYSTERESE_C,
@@ -71,6 +73,8 @@ from .const import (
     ENTITY_FRISCHLUFT,
     ENTITY_KLIMA_OFFICE,
     ENTITY_KLIMA_SCHLAFZIMMER,
+    ENTITY_PERSON_CHRISTIAN,
+    ENTITY_PERSON_SONJA,
     ENTITY_PROXON_ABLUFT,
     ENTITY_PROXON_COOL_ENABLE,
     ENTITY_PROXON_SOLL_OFFICE,
@@ -207,6 +211,11 @@ class WattsonData:
     klima_schlaf_hvac: str = "off"
     proxon_soll_office: float = 21.0
     proxon_soll_schlaf: float = 21.0
+    # UC11 v2 — Anwesenheit
+    christian_home: bool = True
+    sonja_home: bool = True
+    all_away: bool = False
+    all_away_since: datetime | None = None  # für Long-Away-Erkennung
 
     # UC-Status (für Sensoren) — string-werte: aktiv / disabled / user-override / dry-run
     uc_status: dict[str, str] = field(default_factory=dict)
@@ -233,6 +242,7 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         self._prev: WattsonData = WattsonData(dry_run=dry_run)
         self._planned_event_uid: str | None = None
         self._last_idle_periods: dict | None = None  # für UC10 override-detection
+        self._all_away_since: datetime | None = None  # Tracking für UC11 v2
         self._override = OverrideManager(
             hass,
             [UCDefinition(uc_id, display, default)
@@ -399,6 +409,17 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         forecast = self._attr(ENTITY_WEATHER_FORECAST, "forecast", []) or []
         if forecast and isinstance(forecast, list) and len(forecast) > 0:
             s.forecast_max_temp_c = float(forecast[0].get("temperature", 20.0) or 20.0)
+        # Anwesenheit (UC11 v2)
+        s.christian_home = self._state(ENTITY_PERSON_CHRISTIAN, "unknown") == "home"
+        s.sonja_home = self._state(ENTITY_PERSON_SONJA, "unknown") == "home"
+        s.all_away = not (s.christian_home or s.sonja_home)
+        if s.all_away:
+            if self._all_away_since is None:
+                self._all_away_since = dt_util.now()
+            s.all_away_since = self._all_away_since
+        else:
+            self._all_away_since = None
+            s.all_away_since = None
 
         # ── PV-Forecast (forecast.solar) ─────────────────────────────────────
         s.pv_fc_now            = self._ival(ENTITY_PV_FC_NOW)
@@ -722,7 +743,21 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             s.uc_reason["uc11"] = "Urlaub-Modus aktiv → beide Klimas aus"
             return
 
-        # Normal: pro Raum entscheiden
+        # Long-Away (>24h): wie Urlaub
+        away_hours = 0.0
+        if s.all_away_since:
+            away_hours = (now - s.all_away_since).total_seconds() / 3600
+            if away_hours > AWAY_LONG_HOURS:
+                await self._uc11_handle_room(s, actions, "office", forced_off=True,
+                                             reason_prefix=f"Long-Away {away_hours:.1f}h")
+                await self._uc11_handle_room(s, actions, "schlaf", forced_off=True,
+                                             reason_prefix=f"Long-Away {away_hours:.1f}h")
+                s.uc_reason["uc11"] = (
+                    f"Niemand zuhause seit {away_hours:.1f}h → beide Klimas aus"
+                )
+                return
+
+        # Eco-Mode (kurze Abwesenheit) wird per Modifier in _uc11_handle_room behandelt
         await self._uc11_handle_room(s, actions, "office")
         await self._uc11_handle_room(s, actions, "schlaf")
         if not s.uc_reason["uc11"]:
@@ -765,7 +800,12 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         cool_target = proxon_soll + CLIMATE_COOL_OFFSET_C
         modifier_parts = []
 
-        # Modifier: Hitze-Forecast + jetzt PV → Pre-Cool
+        # Modifier: niemand zuhause (kurze Abwesenheit) → Eco-Bump
+        if s.all_away:
+            cool_target += CLIMATE_ECO_OFFSET_C
+            modifier_parts.append("Eco (niemand da)")
+
+        # Modifier: Hitze-Forecast + jetzt PV → Pre-Cool (überschreibt Eco wenn aktiv)
         if (s.forecast_max_temp_c > HOT_FORECAST_THRESHOLD_C
                 and s.pv_surplus > PV_KLIMA_MIN_W):
             cool_target += CLIMATE_PRECOOL_OFFSET_C
