@@ -249,9 +249,16 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             return None
 
     async def _fetch_tibber_forecast(self) -> list[PriceSlot]:
+        # Default-Call liefert nur aktuellen Tag — explizit start/end angeben
+        # damit auch morgige Day-Ahead-Preise enthalten sind (ab ~13:00 verfügbar)
+        now = dt_util.now()
+        end = (now + timedelta(days=2)).replace(
+            hour=0, minute=0, second=0, microsecond=0,
+        )
         try:
             response = await self.hass.services.async_call(
-                "tibber", "get_prices", {},
+                "tibber", "get_prices",
+                {"start": now.isoformat(), "end": end.isoformat()},
                 blocking=True, return_response=True,
             )
         except HomeAssistantError as e:
