@@ -56,6 +56,10 @@ from .const import (
     PV_SURPLUS_OFF,
     PV_SURPLUS_ON,
     BATTERIE_KAPAZITAT_KWH,
+    CLIMATE_COOL_OFFSET_C,
+    CLIMATE_PEAK_OFFSET_C,
+    CLIMATE_PRECOOL_OFFSET_C,
+    CLIMATE_TARGET_HYSTERESE_C,
     COOL_ABLUFT_HYSTERESE_C,
     COOL_ABLUFT_TRIGGER_C,
     EMHASS_BATT_DISCHARGE_MIN_W,
@@ -64,11 +68,21 @@ from .const import (
     ENTITY_EMHASS_OPTIM_STATUS,
     ENTITY_EMHASS_P_BATT_FORECAST,
     ENTITY_EMHASS_P_DEFERRABLE0,
+    ENTITY_FRISCHLUFT,
+    ENTITY_KLIMA_OFFICE,
+    ENTITY_KLIMA_SCHLAFZIMMER,
     ENTITY_PROXON_ABLUFT,
     ENTITY_PROXON_COOL_ENABLE,
+    ENTITY_PROXON_SOLL_OFFICE,
+    ENTITY_PROXON_SOLL_SCHLAFZIMMER,
+    ENTITY_URLAUB_MODE,
+    ENTITY_WEATHER_FORECAST,
+    HOT_FORECAST_THRESHOLD_C,
     MIN_SPREAD_EUR,
+    OUTDOOR_WARM_MIN_C,
     PV_BYPASS_FACTOR,
     PV_COOLING_MIN_W,
+    PV_KLIMA_MIN_W,
     SCAN_INTERVAL_SECONDS,
     SMART_SPREAD_THRESHOLD_EUR,
     SOC_BATTERY_RESERVE,
@@ -180,6 +194,19 @@ class WattsonData:
     emhass_p_batt_plan: float = 0.0          # W, EMHASS-Plan für jetzt
     emhass_p_deferrable0_plan: float = 0.0   # W, T300-Heizstab Plan
     emhass_available: bool = False           # ob EMHASS-Daten nutzbar
+
+    # UC11 — Klimaanlagen OG
+    urlaub_mode: bool = False
+    frischluft_temp: float = 20.0            # Außen via Proxon
+    forecast_max_temp_c: float = 20.0        # heutiger Höchstwert aus Weather
+    klima_office_target: float = 23.0
+    klima_office_current: float = 22.0
+    klima_office_hvac: str = "off"
+    klima_schlaf_target: float = 23.0
+    klima_schlaf_current: float = 22.0
+    klima_schlaf_hvac: str = "off"
+    proxon_soll_office: float = 21.0
+    proxon_soll_schlaf: float = 21.0
 
     # UC-Status (für Sensoren) — string-werte: aktiv / disabled / user-override / dry-run
     uc_status: dict[str, str] = field(default_factory=dict)
@@ -356,6 +383,22 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         s.emhass_p_batt_plan = self._fval(ENTITY_EMHASS_P_BATT_FORECAST, 0.0)
         s.emhass_p_deferrable0_plan = self._fval(ENTITY_EMHASS_P_DEFERRABLE0, 0.0)
         s.emhass_available = s.emhass_status == EMHASS_OPTIM_OK
+
+        # UC11 — Klima State
+        s.urlaub_mode = self._state(ENTITY_URLAUB_MODE) == "on"
+        s.frischluft_temp = self._fval(ENTITY_FRISCHLUFT, 20.0)
+        s.proxon_soll_office = self._fval(ENTITY_PROXON_SOLL_OFFICE, 21.0)
+        s.proxon_soll_schlaf = self._fval(ENTITY_PROXON_SOLL_SCHLAFZIMMER, 21.0)
+        s.klima_office_hvac = self._state(ENTITY_KLIMA_OFFICE, "off") or "off"
+        s.klima_office_current = float(self._attr(ENTITY_KLIMA_OFFICE, "current_temperature", 22.0) or 22.0)
+        s.klima_office_target = float(self._attr(ENTITY_KLIMA_OFFICE, "temperature", 23.0) or 23.0)
+        s.klima_schlaf_hvac = self._state(ENTITY_KLIMA_SCHLAFZIMMER, "off") or "off"
+        s.klima_schlaf_current = float(self._attr(ENTITY_KLIMA_SCHLAFZIMMER, "current_temperature", 22.0) or 22.0)
+        s.klima_schlaf_target = float(self._attr(ENTITY_KLIMA_SCHLAFZIMMER, "temperature", 23.0) or 23.0)
+        # Heute-Höchsttemperatur aus Weather-Forecast (für Pre-Cool-Trigger)
+        forecast = self._attr(ENTITY_WEATHER_FORECAST, "forecast", []) or []
+        if forecast and isinstance(forecast, list) and len(forecast) > 0:
+            s.forecast_max_temp_c = float(forecast[0].get("temperature", 20.0) or 20.0)
 
         # ── PV-Forecast (forecast.solar) ─────────────────────────────────────
         s.pv_fc_now            = self._ival(ENTITY_PV_FC_NOW)
@@ -540,6 +583,9 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         # ── UC12: Proxon Kühlung (läuft vor UC10 weil UC10 das Ergebnis braucht) ──
         await self._handle_uc12_cooling(s, now, actions)
 
+        # ── UC11: Klimaanlagen OG (Office + Schlafzimmer) ──
+        await self._handle_uc11_klima(s, now, actions)
+
         # ── UC10: E3DC Discharge-Sperre in günstigen Stunden ──
         await self._handle_uc10_discharge_lock(s, now, actions)
 
@@ -640,6 +686,140 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
                 for ev in cal_data.get("events", []):
                     merged.append({**ev, "_calendar": cal_id})
         return merged
+
+    async def _handle_uc11_klima(
+        self, s: WattsonData, now: datetime, actions: list[str]
+    ) -> None:
+        """UC11: Klimaanlagen OG (Office + Schlafzimmer).
+        Sleep-Mode = NICHTS (Frau leichter Schläfer, Office=Nachbarzimmer).
+        Urlaub-Mode = alles aus.
+        Sonst: Komfort-Sollwert = Proxon-Heiz-Soll + 2°C, modifiziert durch
+        PV-Pre-Cool / Tibber-Peak-Bump."""
+        s.uc_status["uc11"] = self._uc_idle_status("uc11")
+        s.uc_reason["uc11"] = ""
+
+        if not self._override.is_enabled("uc11"):
+            s.uc_status["uc11"] = "disabled"
+            s.uc_reason["uc11"] = "disabled (per Switch)"
+            return
+        if self._override.in_cooldown("uc11"):
+            remaining = self._override.cooldown_remaining_minutes("uc11")
+            s.uc_status["uc11"] = f"user-override ({remaining}min Rest)"
+            s.uc_reason["uc11"] = f"user-override aktiv ({remaining}min Rest)"
+            return
+
+        # STRICT Sleep-Mode: NICHTS — auch Office nicht (Nachbarzimmer)
+        if s.sleep_mode:
+            s.uc_reason["uc11"] = "Schlafmodus → NICHTS (Frau leichter Schläfer)"
+            return
+
+        # Urlaub: beide aus
+        if s.urlaub_mode:
+            await self._uc11_handle_room(s, actions, "office", forced_off=True,
+                                         reason_prefix="Urlaub")
+            await self._uc11_handle_room(s, actions, "schlaf", forced_off=True,
+                                         reason_prefix="Urlaub")
+            s.uc_reason["uc11"] = "Urlaub-Modus aktiv → beide Klimas aus"
+            return
+
+        # Normal: pro Raum entscheiden
+        await self._uc11_handle_room(s, actions, "office")
+        await self._uc11_handle_room(s, actions, "schlaf")
+        if not s.uc_reason["uc11"]:
+            s.uc_reason["uc11"] = (
+                f"OK (office {s.klima_office_current:.1f}°C/{s.klima_office_hvac}, "
+                f"schlaf {s.klima_schlaf_current:.1f}°C/{s.klima_schlaf_hvac})"
+            )
+
+    async def _uc11_handle_room(
+        self, s: WattsonData, actions: list[str], room: str,
+        forced_off: bool = False, reason_prefix: str = "",
+    ) -> None:
+        """Hilfsfunktion: Steuere ein Klima-Raum nach UC11-Regeln."""
+        if room == "office":
+            entity = ENTITY_KLIMA_OFFICE
+            proxon_soll = s.proxon_soll_office
+            current_hvac = s.klima_office_hvac
+            inside_temp = s.klima_office_current
+            current_target = s.klima_office_target
+        else:
+            entity = ENTITY_KLIMA_SCHLAFZIMMER
+            proxon_soll = s.proxon_soll_schlaf
+            current_hvac = s.klima_schlaf_hvac
+            inside_temp = s.klima_schlaf_current
+            current_target = s.klima_schlaf_target
+
+        # Forced-off (Urlaub)
+        if forced_off:
+            if current_hvac != "off":
+                acted, desc = await self._try_act(
+                    "uc11", entity, "off",
+                    "climate", "set_hvac_mode",
+                    {"entity_id": entity, "hvac_mode": "off"},
+                )
+                if acted:
+                    actions.append(f"{room} off ({reason_prefix})")
+            return
+
+        # Cool-Sollwert berechnen
+        cool_target = proxon_soll + CLIMATE_COOL_OFFSET_C
+        modifier_parts = []
+
+        # Modifier: Hitze-Forecast + jetzt PV → Pre-Cool
+        if (s.forecast_max_temp_c > HOT_FORECAST_THRESHOLD_C
+                and s.pv_surplus > PV_KLIMA_MIN_W):
+            cool_target += CLIMATE_PRECOOL_OFFSET_C
+            modifier_parts.append("Pre-Cool")
+
+        # Modifier: in Tibber-Peak → Sollwert hoch (sparen)
+        in_expensive = bool(
+            s.expensive_4h_start and s.expensive_4h_end
+            and is_in_window(dt_util.now(), s.expensive_4h_start, s.expensive_4h_end)
+        )
+        if in_expensive:
+            cool_target += CLIMATE_PEAK_OFFSET_C
+            modifier_parts.append("Tibber-Peak")
+        modifier_str = (" + " + " + ".join(modifier_parts)) if modifier_parts else ""
+
+        # Entscheidung
+        if inside_temp > cool_target + CLIMATE_TARGET_HYSTERESE_C:
+            # Zu warm → cool
+            # Außen sollte warmer sein (sonst Fenster auf billiger)
+            if s.frischluft_temp < OUTDOOR_WARM_MIN_C:
+                # Cooling nicht effizient, lieber lüften
+                return
+            target_mode = "cool"
+            target_temp = cool_target
+        else:
+            # Komfort erreicht oder leicht zu kühl → kein Eingriff
+            # (nicht aus-schalten weil User vielleicht aus anderem Grund eingeschaltet)
+            return
+
+        # Aktion: hvac_mode wenn anders
+        if current_hvac != target_mode:
+            acted, _ = await self._try_act(
+                "uc11", entity, target_mode,
+                "climate", "set_hvac_mode",
+                {"entity_id": entity, "hvac_mode": target_mode},
+            )
+            if acted:
+                actions.append(
+                    f"{room} → {target_mode} {target_temp:.1f}°C"
+                    f"{modifier_str}"
+                )
+
+        # Sollwert setzen wenn deutlich abweicht
+        if abs(current_target - target_temp) >= 0.5:
+            acted, _ = await self._try_act(
+                "uc11", entity, target_temp,
+                "climate", "set_temperature",
+                {"entity_id": entity, "temperature": target_temp},
+            )
+            if acted:
+                actions.append(
+                    f"{room} Soll {current_target:.1f}→{target_temp:.1f}°C"
+                    f"{modifier_str}"
+                )
 
     async def _handle_uc12_cooling(
         self, s: WattsonData, now: datetime, actions: list[str]

@@ -27,6 +27,15 @@ CHEAP_LEVELS = ("very_cheap", "cheap")
 # HA Entity IDs
 ENTITY_PROXON_ABLUFT      = "sensor.proxon_t7_abluft"          # Innen-Temperatur (Abluft als Indikator)
 ENTITY_PROXON_COOL_ENABLE = "switch.proxon_kuehlung_freigabe" # Kühlung Freigabe (Modbus Reg 62)
+
+# UC11 — Klimaanlagen OG (Office + Schlafzimmer)
+ENTITY_KLIMA_OFFICE         = "climate.klimaanlage_office_air_conditioner"
+ENTITY_KLIMA_SCHLAFZIMMER   = "climate.klimaanlage_schlafzimmer_air_conditioner"
+ENTITY_PROXON_SOLL_OFFICE   = "sensor.proxon_solltemperatur_kreativzimmer"  # Office = Kreativzimmer
+ENTITY_PROXON_SOLL_SCHLAFZIMMER = "sensor.proxon_solltemperatur_schlafzimmer"
+ENTITY_URLAUB_MODE          = "input_boolean.wattson_urlaub_modus"
+ENTITY_FRISCHLUFT           = "sensor.proxon_t3_frischluft"    # Außentemp via Proxon-Frischluft
+ENTITY_WEATHER_FORECAST     = "weather.forecast_home"           # Für Hitze-Forecast morgen
 ENTITY_PRICE          = "sensor.electricity_price_haus"   # state in EUR/kWh
 ENTITY_PRICE_RANKING  = "sensor.electricity_price_haus"   # attr: intraday_price_ranking (float 0.0-1.0)
 ENTITY_PRICE_LEVEL    = "sensor.haus_current_hour_price_level"
@@ -102,6 +111,7 @@ UC_DEFINITIONS = [
     ("uc2",  "eauto_fahrplan",      "E-Auto Fahrplan",           True),
     ("uc10", "batterie_schoner",    "Batterie Schoner",          True),
     ("uc12", "kuhlung",             "Kühlung",                   True),
+    ("uc11", "klima",               "Klimaanlagen OG",           True),
 ]
 
 # Mapping für Migration v1 → v2: alte unique_id-Suffixe → neue
@@ -156,3 +166,12 @@ COOL_ABLUFT_TRIGGER_C    = 24.0   # °C — wenn Abluft drüber → Kühlbedarf
 COOL_ABLUFT_HYSTERESE_C  = 1.0    # °C — Hysterese gegen Schwingen
 PV_COOLING_MIN_W         = 1500   # W — ab diesem PV-Überschuss darf gekühlt werden
 SMART_SPREAD_THRESHOLD_EUR = 0.15 # spread >= 15ct → UC10 gewinnt vs UC12, sonst Komfort wichtiger
+
+# UC11 — Klimaanlagen OG
+CLIMATE_COOL_OFFSET_C      = 2.0   # Klima-Cool-Sollwert = Proxon-Heiz-Soll + diese Offset
+CLIMATE_PRECOOL_OFFSET_C   = -2.0  # bei Pre-Cool: zusätzlicher Offset zum Cool-Sollwert
+CLIMATE_PEAK_OFFSET_C      = 1.0   # bei Tibber-Peak: zusätzlicher Offset (höher = sparen)
+PV_KLIMA_MIN_W             = 2000  # PV-Überschuss-Schwelle für aktives Klima-Triggern
+HOT_FORECAST_THRESHOLD_C   = 30.0  # Tagesforecast > X°C → Pre-Cooling sinnvoll
+OUTDOOR_WARM_MIN_C         = 24.0  # Außen > X°C → Klima cooling sinnvoll (sonst Fenster auf)
+CLIMATE_TARGET_HYSTERESE_C = 0.5   # Innen muss > target + diese Diff sein für cool-Start
