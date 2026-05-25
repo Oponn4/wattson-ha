@@ -58,6 +58,12 @@ from .const import (
     BATTERIE_KAPAZITAT_KWH,
     COOL_ABLUFT_HYSTERESE_C,
     COOL_ABLUFT_TRIGGER_C,
+    EMHASS_BATT_DISCHARGE_MIN_W,
+    EMHASS_DEFERRABLE_ON_MIN_W,
+    EMHASS_OPTIM_OK,
+    ENTITY_EMHASS_OPTIM_STATUS,
+    ENTITY_EMHASS_P_BATT_FORECAST,
+    ENTITY_EMHASS_P_DEFERRABLE0,
     ENTITY_PROXON_ABLUFT,
     ENTITY_PROXON_COOL_ENABLE,
     MIN_SPREAD_EUR,
@@ -168,6 +174,12 @@ class WattsonData:
     cooling_active: bool = False    # ob UC12 die Freigabe gerade gegeben hat
     abluft_temp: float = 0.0
     cool_enable_on: bool = False    # tatsächlicher Switch-Status
+
+    # EMHASS — externer LP-Optimizer (v0.9.0)
+    emhass_status: str = "unknown"           # "Optimal" wenn EMHASS bereit
+    emhass_p_batt_plan: float = 0.0          # W, EMHASS-Plan für jetzt
+    emhass_p_deferrable0_plan: float = 0.0   # W, T300-Heizstab Plan
+    emhass_available: bool = False           # ob EMHASS-Daten nutzbar
 
     # UC-Status (für Sensoren) — string-werte: aktiv / disabled / user-override / dry-run
     uc_status: dict[str, str] = field(default_factory=dict)
@@ -339,6 +351,12 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         s.abluft_temp          = self._fval(ENTITY_PROXON_ABLUFT, 22.0)
         s.cool_enable_on       = self._state(ENTITY_PROXON_COOL_ENABLE) == "on"
 
+        # EMHASS State lesen — wenn nicht "Optimal" oder Sensor weg → fallback heuristik
+        s.emhass_status = self._state(ENTITY_EMHASS_OPTIM_STATUS, "unknown") or "unknown"
+        s.emhass_p_batt_plan = self._fval(ENTITY_EMHASS_P_BATT_FORECAST, 0.0)
+        s.emhass_p_deferrable0_plan = self._fval(ENTITY_EMHASS_P_DEFERRABLE0, 0.0)
+        s.emhass_available = s.emhass_status == EMHASS_OPTIM_OK
+
         # ── PV-Forecast (forecast.solar) ─────────────────────────────────────
         s.pv_fc_now            = self._ival(ENTITY_PV_FC_NOW)
         s.pv_fc_current_hour   = self._fval(ENTITY_PV_FC_HOUR)
@@ -459,23 +477,32 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             s.uc_status.setdefault("uc4a", self._uc_idle_status("uc4a"))
             s.uc_reason["uc4a"] = reason
 
-        # ── UC4b: E-Heizstab bei PV-Überschuss + Speicher voll ───────────────
-        # AN nur wenn: Überschuss da UND Speicher (fast) voll UND Tank nicht zu heiß
-        should_on = (
-            s.pv_surplus >= PV_SURPLUS_ON
-            and s.battery_soc >= BATTERY_FULL
-            and s.t300_tank_temp < T300_TANK_MAX
-        )
-        # AUS wenn: Überschuss zu klein ODER Speicher unter Schwelle ODER Tank heiß
-        should_off = (
-            s.pv_surplus < PV_SURPLUS_OFF
-            or s.battery_soc < BATTERY_NOT_FULL
-            or s.t300_tank_temp >= T300_TANK_MAX
-        )
+        # ── UC4b: E-Heizstab ─────────────────────────────────────────────────
+        # EMHASS-driven wenn verfügbar, sonst Heuristik
+        # Sicherheits-Check (Tank-Temp) gilt IMMER, auch wenn EMHASS sagt "on"
+        tank_safe = s.t300_tank_temp < T300_TANK_MAX
+        if s.emhass_available:
+            should_on = (s.emhass_p_deferrable0_plan >= EMHASS_DEFERRABLE_ON_MIN_W
+                         and tank_safe)
+            should_off = not should_on
+            uc4b_source = (f"EMHASS p_def0={s.emhass_p_deferrable0_plan:.0f}W"
+                           f"{'(Tank-Limit)' if not tank_safe else ''}")
+        else:
+            should_on = (
+                s.pv_surplus >= PV_SURPLUS_ON
+                and s.battery_soc >= BATTERY_FULL
+                and tank_safe
+            )
+            should_off = (
+                s.pv_surplus < PV_SURPLUS_OFF
+                or s.battery_soc < BATTERY_NOT_FULL
+                or not tank_safe
+            )
+            uc4b_source = (f"Heuristik (PV-Über {s.pv_surplus}W, "
+                           f"Bat {s.battery_soc}%, Tank {s.t300_tank_temp:.1f}°C)")
         heizstab_reason = ""
         if should_on and not s.t300_heizstab_on:
-            heizstab_reason = (f"Heizstab EIN (Überschuss {s.pv_surplus}W, "
-                               f"Bat {s.battery_soc}%, Tank {s.t300_tank_temp:.1f}°C)")
+            heizstab_reason = f"Heizstab EIN — {uc4b_source}"
             _LOGGER.info("E-%s", heizstab_reason)
             acted, act_desc = await self._try_act(
                 "uc4b", ENTITY_T300_HEIZSTAB, "on",
@@ -490,8 +517,7 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
                 s.uc_status["uc4b"] = act_desc
                 heizstab_reason = f"{heizstab_reason} (geblockt: {act_desc})"
         elif should_off and s.t300_heizstab_on:
-            heizstab_reason = (f"Heizstab AUS (Überschuss {s.pv_surplus}W, "
-                               f"Bat {s.battery_soc}%, Tank {s.t300_tank_temp:.1f}°C)")
+            heizstab_reason = f"Heizstab AUS — {uc4b_source}"
             _LOGGER.info("E-%s", heizstab_reason)
             acted, act_desc = await self._try_act(
                 "uc4b", ENTITY_T300_HEIZSTAB, "off",
@@ -506,8 +532,8 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
                 s.uc_status["uc4b"] = act_desc
                 heizstab_reason = f"{heizstab_reason} (geblockt: {act_desc})"
         else:
-            heizstab_reason = (f"Stabil ({'an' if s.t300_heizstab_on else 'aus'}, "
-                               f"Überschuss {s.pv_surplus}W, Bat {s.battery_soc}%)")
+            heizstab_reason = (f"Stabil ({'an' if s.t300_heizstab_on else 'aus'}) — "
+                               f"{uc4b_source}")
             s.uc_status.setdefault("uc4b", self._uc_idle_status("uc4b"))
         s.uc_reason["uc4b"] = heizstab_reason
 
@@ -708,9 +734,9 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
     async def _handle_uc10_discharge_lock(
         self, s: WattsonData, now: datetime, actions: list[str]
     ) -> None:
-        """UC10: Wenn aktuelle Stunde in cheapest_4h und Spread groß genug,
-        sperrt Discharge der E3DC-Batterie via idle_periods → Haus läuft aus
-        Netz (billig), Batterie hält SOC für teure Stunden."""
+        """UC10: Discharge der E3DC-Batterie sperren wenn günstig.
+        EMHASS-driven wenn verfügbar (folgt p_batt_forecast), sonst Heuristik
+        (cheapest_4h + spread + bypass)."""
         s.uc_status["uc10"] = self._uc_idle_status("uc10")
         s.uc_reason["uc10"] = ""
 
@@ -727,38 +753,56 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             s.uc_reason["uc10"] = f"user-override aktiv ({remaining}min Rest)"
             return
 
-        if not (s.cheapest_4h_avg is not None and s.expensive_4h_avg is not None
-                and s.cheapest_4h_start and s.cheapest_4h_end):
-            s.uc_reason["uc10"] = "kein Tibber-Forecast verfügbar"
-            return
-
-        spread = s.expensive_4h_avg - s.cheapest_4h_avg
-        s.uc10_spread_eur = spread
-        if spread < MIN_SPREAD_EUR:
-            s.uc_reason["uc10"] = (
-                f"spread {spread*100:.1f}ct < {MIN_SPREAD_EUR*100:.1f}ct "
-                f"(nicht wirtschaftlich)"
+        # Entscheidung: EMHASS-Plan vs Heuristik
+        if s.emhass_available:
+            should_lock = s.emhass_p_batt_plan < EMHASS_BATT_DISCHARGE_MIN_W
+            # Window: aktueller Slot (30min ab now) — EMHASS plant pro Slot neu
+            window_start = now
+            window_end = now + timedelta(minutes=30)
+            decision_source = f"EMHASS p_batt={s.emhass_p_batt_plan:.0f}W"
+        else:
+            if not (s.cheapest_4h_avg is not None and s.expensive_4h_avg is not None
+                    and s.cheapest_4h_start and s.cheapest_4h_end):
+                s.uc_reason["uc10"] = "kein EMHASS UND kein Tibber-Forecast"
+                return
+            spread = s.expensive_4h_avg - s.cheapest_4h_avg
+            s.uc10_spread_eur = spread
+            if spread < MIN_SPREAD_EUR:
+                s.uc_reason["uc10"] = (
+                    f"Heuristik: spread {spread*100:.1f}ct < "
+                    f"{MIN_SPREAD_EUR*100:.1f}ct (nicht wirtschaftlich)"
+                )
+                return
+            in_cheapest = is_in_window(now, s.cheapest_4h_start, s.cheapest_4h_end)
+            pv_bypass_threshold = BATTERIE_KAPAZITAT_KWH * PV_BYPASS_FACTOR
+            pv_bypass_active = s.pv_fc_tomorrow > pv_bypass_threshold
+            cooling_bypass = bool(
+                s.cooling_active and spread < SMART_SPREAD_THRESHOLD_EUR
             )
-            return
-
-        in_cheapest = is_in_window(now, s.cheapest_4h_start, s.cheapest_4h_end)
-
-        # Phase 2 Bypass: viel PV morgen → Batterie soll leer werden für Aufnahme
-        pv_bypass_threshold = BATTERIE_KAPAZITAT_KWH * PV_BYPASS_FACTOR
-        pv_bypass_active = s.pv_fc_tomorrow > pv_bypass_threshold
-
-        # Smart-Spread: bei laufender UC12-Kühlung lockt UC10 nur wenn Spread sehr groß
-        # (sonst trägt Batterie+Netz die Kühl-Last gemeinsam, Komfort vor 3ct Spread)
-        cooling_bypass = bool(
-            s.cooling_active and spread < SMART_SPREAD_THRESHOLD_EUR
-        )
-
-        should_lock = bool(
-            in_cheapest
-            and s.battery_soc >= SOC_BATTERY_RESERVE
-            and not pv_bypass_active
-            and not cooling_bypass
-        )
+            should_lock = bool(
+                in_cheapest
+                and s.battery_soc >= SOC_BATTERY_RESERVE
+                and not pv_bypass_active
+                and not cooling_bypass
+            )
+            window_start = s.cheapest_4h_start
+            window_end = s.cheapest_4h_end
+            bypass_parts = []
+            if pv_bypass_active:
+                bypass_parts.append(
+                    f"PV-bypass ({s.pv_fc_tomorrow:.1f}kWh > "
+                    f"{pv_bypass_threshold:.1f}kWh)"
+                )
+            if cooling_bypass:
+                bypass_parts.append(
+                    f"UC12-bypass (spread {spread*100:.1f}ct < "
+                    f"{SMART_SPREAD_THRESHOLD_EUR*100:.1f}ct)"
+                )
+            bypass_str = f" — {', '.join(bypass_parts)}" if bypass_parts else ""
+            decision_source = (
+                f"Heuristik (spread {spread*100:.1f}ct, "
+                f"SOC {s.battery_soc}%){bypass_str}"
+            )
         s.uc10_idle_active = should_lock
 
         # Aktuelles idle_periods holen
@@ -784,43 +828,29 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         target_periods = empty_periods_for_week()
         window_str = ""
         if should_lock:
-            weekday = s.cheapest_4h_start.weekday()  # 0=Montag
+            weekday = window_start.weekday()  # 0=Montag
             target_periods["idleDischarge"][weekday] = make_discharge_period(
                 weekday,
-                s.cheapest_4h_start.hour, s.cheapest_4h_start.minute,
-                s.cheapest_4h_end.hour, s.cheapest_4h_end.minute,
+                window_start.hour, window_start.minute,
+                window_end.hour, window_end.minute,
             )
-            window_str = (f"{s.cheapest_4h_start.strftime('%H:%M')}–"
-                          f"{s.cheapest_4h_end.strftime('%H:%M')}")
+            window_str = (f"{window_start.strftime('%H:%M')}–"
+                          f"{window_end.strftime('%H:%M')}")
 
         # Nur setzen wenn Änderung nötig
         target_json = json.dumps(target_periods, sort_keys=True)
         current_json = json.dumps(current_periods, sort_keys=True)
-        bypass_parts = []
-        if pv_bypass_active:
-            bypass_parts.append(
-                f"PV-bypass (morgen {s.pv_fc_tomorrow:.1f}kWh > "
-                f"{pv_bypass_threshold:.1f}kWh)"
-            )
-        if cooling_bypass:
-            bypass_parts.append(
-                f"UC12-bypass (Kühlung läuft, spread {spread*100:.1f}ct < "
-                f"{SMART_SPREAD_THRESHOLD_EUR*100:.1f}ct)"
-            )
-        bypass_str = f" — {', '.join(bypass_parts)}" if bypass_parts else ""
 
         if target_json == current_json:
             s.uc_reason["uc10"] = (
-                f"OK (spread {spread*100:.1f}ct, SOC {s.battery_soc}%, "
-                f"{'lock aktiv ' + window_str if should_lock else 'normal'})"
-                f"{bypass_str}"
+                f"OK ({'lock ' + window_str if should_lock else 'normal'}) — "
+                f"{decision_source}"
             )
             return
 
         reason = (
-            f"lock={'on ' + window_str if should_lock else 'off'} "
-            f"(spread {spread*100:.1f}ct, cheap-avg {s.cheapest_4h_avg*100:.1f}ct, "
-            f"SOC {s.battery_soc}%){bypass_str}"
+            f"lock={'on ' + window_str if should_lock else 'off'} — "
+            f"{decision_source}"
         )
         desc = f"e3dc.set_idle_periods({window_str or 'clear'})"
         _LOGGER.info("UC10: %s", reason)

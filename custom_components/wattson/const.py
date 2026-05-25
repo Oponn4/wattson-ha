@@ -42,6 +42,17 @@ ENTITY_BATTERY_SOC    = "sensor.e3dc_batterie_soc_in_prozent"
 ENTITY_PV_POWER       = "sensor.e3dc_photovoltaik_leistung_in_watt"
 ENTITY_SLEEP          = "input_boolean.sleepmode_helper"
 
+# EMHASS Sensors (publishes alle 5min via cron)
+ENTITY_EMHASS_OPTIM_STATUS    = "sensor.optim_status"
+ENTITY_EMHASS_P_BATT_FORECAST = "sensor.p_batt_forecast"     # W, positiv=Entladung
+ENTITY_EMHASS_P_DEFERRABLE0   = "sensor.p_deferrable0"       # W, T300-Heizstab Plan
+ENTITY_EMHASS_P_DEFERRABLE1   = "sensor.p_deferrable1"       # W, Wallbox Plan
+ENTITY_EMHASS_SOC_FORECAST    = "sensor.soc_batt_forecast"   # % (auch 24h-Plan im Attribut)
+
+EMHASS_OPTIM_OK            = "Optimal"
+EMHASS_BATT_DISCHARGE_MIN_W = 100   # > 100W = "darf entladen", sonst sperren
+EMHASS_DEFERRABLE_ON_MIN_W  = 500   # > 500W = "Heizstab/Wallbox sollte laufen"
+
 # forecast.solar (PV Forecast)
 ENTITY_PV_FC_NOW       = "sensor.power_production_now"               # W
 ENTITY_PV_FC_HOUR      = "sensor.energy_current_hour"                # kWh
