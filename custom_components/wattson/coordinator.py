@@ -70,6 +70,7 @@ from .const import (
     ENTITY_EMHASS_OPTIM_STATUS,
     ENTITY_EMHASS_P_BATT_FORECAST,
     ENTITY_EMHASS_P_DEFERRABLE0,
+    ENTITY_EMHASS_P_DEFERRABLE1,
     ENTITY_FRISCHLUFT,
     ENTITY_KLIMA_OFFICE,
     ENTITY_KLIMA_SCHLAFZIMMER,
@@ -197,6 +198,7 @@ class WattsonData:
     emhass_status: str = "unknown"           # "Optimal" wenn EMHASS bereit
     emhass_p_batt_plan: float = 0.0          # W, EMHASS-Plan für jetzt
     emhass_p_deferrable0_plan: float = 0.0   # W, T300-Heizstab Plan
+    emhass_p_deferrable1_plan: float = 0.0   # W, Wallbox Plan
     emhass_available: bool = False           # ob EMHASS-Daten nutzbar
 
     # UC11 — Klimaanlagen OG
@@ -392,6 +394,7 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         s.emhass_status = self._state(ENTITY_EMHASS_OPTIM_STATUS, "unknown") or "unknown"
         s.emhass_p_batt_plan = self._fval(ENTITY_EMHASS_P_BATT_FORECAST, 0.0)
         s.emhass_p_deferrable0_plan = self._fval(ENTITY_EMHASS_P_DEFERRABLE0, 0.0)
+        s.emhass_p_deferrable1_plan = self._fval(ENTITY_EMHASS_P_DEFERRABLE1, 0.0)
         s.emhass_available = s.emhass_status == EMHASS_OPTIM_OK
 
         # UC11 — Klima State
@@ -613,13 +616,9 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         # ── UC2: Kalender-basiertes Vorladen (vor UC6/7 weil setzt Plan-Mode-Hinweis) ──
         await self._handle_trip_planning(s, now, actions)
 
-        # ── UC6/UC7: evcc Modus vorausschauend ───────────────────────────────
+        # ── UC6/UC7: evcc Modus — EMHASS-driven mit Heuristik-Fallback ──────
         if s.car_connected:
             needs_charge = s.car_soc < SOC_TARGET
-            in_cheapest_4h = bool(
-                s.cheapest_4h_start
-                and is_in_window(now, s.cheapest_4h_start, s.cheapest_4h_end)
-            )
             if s.trip_plan_set:
                 # UC2-Plan aktiv → evcc soll planen, niemals "now" forcieren
                 target_mode = "pv"
@@ -627,24 +626,41 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
                           f"Ziel {s.trip_required_soc}% bis "
                           f"{s.trip_start.strftime('%d.%m %H:%M') if s.trip_start else '?'}) "
                           f"— pv-Mode damit Plan greift")
-            elif needs_charge and in_cheapest_4h:
-                target_mode = "now"
-                reason = (f"günstigste 4h "
-                          f"{s.cheapest_4h_start.strftime('%H:%M')}–{s.cheapest_4h_end.strftime('%H:%M')} "
-                          f"@ {s.cheapest_4h_avg * 100:.1f}ct (SOC {s.car_soc:.0f}%<{SOC_TARGET}%)")
-            elif not s.forecast_slots and s.price_level in CHEAP_LEVELS:
-                # Forecast nicht verfügbar, Tibber-Level sagt günstig
-                target_mode = "minpv"
-                reason = f"reaktiv günstig ({s.price_level}, kein Forecast)"
-            else:
-                target_mode = "pv"
-                if not needs_charge:
-                    reason = f"SOC {s.car_soc:.0f}% ≥ {SOC_TARGET}% (kein Forcieren nötig)"
-                elif s.cheapest_4h_start:
-                    reason = (f"warte auf günstigste 4h "
-                              f"{s.cheapest_4h_start.strftime('%H:%M')}")
+            elif s.emhass_available:
+                # EMHASS plant Wallbox als deferrable1
+                # > 500W → "now" (lade jetzt), sonst "pv" (warten auf Solar/günstig)
+                if s.emhass_p_deferrable1_plan >= EMHASS_DEFERRABLE_ON_MIN_W:
+                    target_mode = "now"
+                    reason = (f"EMHASS Wallbox-Plan {s.emhass_p_deferrable1_plan:.0f}W "
+                              f"≥ {EMHASS_DEFERRABLE_ON_MIN_W}W → now "
+                              f"(SOC {s.car_soc:.0f}%)")
                 else:
-                    reason = "Standard"
+                    target_mode = "pv"
+                    reason = (f"EMHASS Wallbox-Plan {s.emhass_p_deferrable1_plan:.0f}W "
+                              f"→ pv (SOC {s.car_soc:.0f}%)")
+            else:
+                # Fallback Heuristik (alte Logik)
+                in_cheapest_4h = bool(
+                    s.cheapest_4h_start
+                    and is_in_window(now, s.cheapest_4h_start, s.cheapest_4h_end)
+                )
+                if needs_charge and in_cheapest_4h:
+                    target_mode = "now"
+                    reason = (f"Heuristik: günstigste 4h "
+                              f"{s.cheapest_4h_start.strftime('%H:%M')}–{s.cheapest_4h_end.strftime('%H:%M')} "
+                              f"@ {s.cheapest_4h_avg * 100:.1f}ct (SOC {s.car_soc:.0f}%<{SOC_TARGET}%)")
+                elif not s.forecast_slots and s.price_level in CHEAP_LEVELS:
+                    target_mode = "minpv"
+                    reason = f"Heuristik: reaktiv günstig ({s.price_level}, kein Forecast)"
+                else:
+                    target_mode = "pv"
+                    if not needs_charge:
+                        reason = f"Heuristik: SOC {s.car_soc:.0f}% ≥ {SOC_TARGET}%"
+                    elif s.cheapest_4h_start:
+                        reason = (f"Heuristik: warte auf günstigste 4h "
+                                  f"{s.cheapest_4h_start.strftime('%H:%M')}")
+                    else:
+                        reason = "Heuristik: Standard pv"
 
             s.evcc_target = target_mode
             s.evcc_reason = reason

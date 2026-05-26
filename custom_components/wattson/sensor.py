@@ -25,6 +25,7 @@ async def async_setup_entry(
         WattsonCheapestWindowSensor(coordinator, entry, hours=4),
         WattsonExpensiveWindowSensor(coordinator, entry, hours=2),
         WattsonNextTripSensor(coordinator, entry),
+        WattsonTibberForecastSensor(coordinator, entry),
     ]
     for uc_id, slug, display, _ in UC_DEFINITIONS:
         entities.append(WattsonUCStatusSensor(coordinator, entry, uc_id, slug, display))
@@ -172,6 +173,34 @@ class WattsonExpensiveWindowSensor(WattsonBaseSensor):
             "start": start.isoformat(),
             "end": end.isoformat(),
             "avg_price_eur_kwh": round(avg, 4) if avg is not None else None,
+        }
+
+
+class WattsonTibberForecastSensor(WattsonBaseSensor):
+    """Aktueller Tibber-Preis + 'forecast' Attribut mit Slot-Liste (für Charts)."""
+
+    def __init__(self, coordinator, entry):
+        super().__init__(coordinator, entry, "tibber_forecast", "Tibber Preis Forecast")
+        self._attr_icon = "mdi:cash-clock"
+        self._attr_native_unit_of_measurement = "EUR/kWh"
+
+    @property
+    def native_value(self):
+        if self.coordinator.data is None:
+            return None
+        return round(self.coordinator.data.price, 4)
+
+    @property
+    def extra_state_attributes(self):
+        if self.coordinator.data is None:
+            return {}
+        slots = self.coordinator.data.forecast_slots
+        return {
+            "forecast": [
+                {"time": s.start.isoformat(), "price_ct": round(s.price * 100, 2)}
+                for s in slots
+            ],
+            "anzahl_slots": len(slots),
         }
 
 
