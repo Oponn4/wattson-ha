@@ -25,6 +25,7 @@ async def async_setup_entry(
 class WattsonDryRunSwitch(CoordinatorEntity[WattsonCoordinator], SwitchEntity):
     def __init__(self, coordinator: WattsonCoordinator, entry: ConfigEntry) -> None:
         super().__init__(coordinator)
+        self._entry = entry
         self._attr_unique_id = f"{entry.entry_id}_dry_run"
         self._attr_name = "Wattson Dry-Run"
         self._attr_icon = "mdi:test-tube"
@@ -34,13 +35,19 @@ class WattsonDryRunSwitch(CoordinatorEntity[WattsonCoordinator], SwitchEntity):
     def is_on(self) -> bool:
         return self.coordinator.dry_run
 
+    async def _persist(self, value: bool) -> None:
+        """Speichert dry_run in entry.options damit Toggle HA-Restart überlebt."""
+        self.coordinator.dry_run = value
+        new_options = {**self._entry.options, "dry_run": value}
+        self.hass.config_entries.async_update_entry(self._entry, options=new_options)
+
     async def async_turn_on(self, **kwargs) -> None:
-        self.coordinator.dry_run = True
+        await self._persist(True)
         self.async_write_ha_state()
         await self.coordinator.async_request_refresh()
 
     async def async_turn_off(self, **kwargs) -> None:
-        self.coordinator.dry_run = False
+        await self._persist(False)
         self.async_write_ha_state()
         await self.coordinator.async_request_refresh()
 
