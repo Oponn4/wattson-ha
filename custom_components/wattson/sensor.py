@@ -211,8 +211,10 @@ class WattsonNextTripSensor(WattsonBaseSensor):
     @property
     def native_value(self):
         d = self.coordinator.data
-        if d is None or not d.trip_title:
+        if d is None:
             return None
+        if not d.trip_title:
+            return "Keine Fahrt geplant"
         return d.trip_title
 
     @property
