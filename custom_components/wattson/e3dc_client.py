@@ -94,6 +94,22 @@ class E3DCClient:
     async def set_power_settings(self, settings: dict) -> bool:
         return await self._post("/api/power_settings", settings)
 
+    async def set_max_discharge_power(self, watts: int) -> bool:
+        """Setzt nur maxDischargePower; übernimmt aktuellen maxChargePower
+        und dischargeStartPower damit nichts unbeabsichtigt verändert wird.
+        Aktiviert auch powerLimitsUsed=True (sonst werden Limits ignoriert)."""
+        current = await self.get_power_settings()
+        if current is None:
+            _LOGGER.warning("E3DC: kann power_settings nicht lesen für set_max_discharge_power")
+            return False
+        payload = {
+            "powerLimitsUsed": True,
+            "maxChargePower": int(current.get("maxChargePower", 1500)),
+            "maxDischargePower": int(max(0, watts)),
+            "dischargeStartPower": int(current.get("dischargeStartPower", 65)),
+        }
+        return await self._post("/api/power_settings", payload)
+
 
 def make_discharge_period(weekday: int, start_h: int, start_m: int, end_h: int, end_m: int) -> dict:
     """Erstellt einen einzelnen idleDischarge-Eintrag im e3dc-rest Format."""

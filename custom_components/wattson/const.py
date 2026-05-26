@@ -162,6 +162,7 @@ SOC_BATTERY_RESERVE    = 20     # % — unter diesem SOC keine Discharge-Sperre 
 # PV-Aufnahme bleibt (verhindert Einspeisung @ 11.1ct statt Eigennutzung @ 30ct)
 BATTERIE_KAPAZITAT_KWH = 4.6
 PV_BYPASS_FACTOR       = 4.0    # pv_fc_tomorrow > 4.6 * 4.0 = 18.4 kWh → Bypass
+E3DC_MAX_DISCHARGE_W   = 1500   # Hardware-Max der S10E Batterie
 
 # UC12 — Proxon Kühlung
 COOL_ABLUFT_TRIGGER_C    = 24.0   # °C — wenn Abluft drüber → Kühlbedarf

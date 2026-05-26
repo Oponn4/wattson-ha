@@ -1,7 +1,6 @@
 """Wattson DataUpdateCoordinator — Entscheidungslogik."""
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -21,7 +20,7 @@ from .forecast import (
     parse_tibber_response,
 )
 from .gmaps import GoogleMapsClient
-from .e3dc_client import E3DCClient, empty_periods_for_week, make_discharge_period
+from .e3dc_client import E3DCClient
 from .override import OverrideManager, UCDefinition
 from .const import (
     BATTERY_FULL,
@@ -58,6 +57,7 @@ from .const import (
     AWAY_LONG_HOURS,
     BATTERIE_KAPAZITAT_KWH,
     CLIMATE_COOL_OFFSET_C,
+    E3DC_MAX_DISCHARGE_W,
     CLIMATE_ECO_OFFSET_C,
     CLIMATE_PEAK_OFFSET_C,
     CLIMATE_PRECOOL_OFFSET_C,
@@ -241,7 +241,7 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         self._e3dc = e3dc
         self._prev: WattsonData = WattsonData(dry_run=dry_run)
         self._planned_event_uid: str | None = None
-        self._last_idle_periods: dict | None = None  # für UC10 override-detection
+        self._last_max_discharge: int | None = None  # für UC10 override-detection
         self._all_away_since: datetime | None = None  # Tracking für UC11 v2
         self._override = OverrideManager(
             hass,
@@ -954,9 +954,9 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
     async def _handle_uc10_discharge_lock(
         self, s: WattsonData, now: datetime, actions: list[str]
     ) -> None:
-        """UC10: Discharge der E3DC-Batterie sperren wenn günstig.
-        EMHASS-driven wenn verfügbar (folgt p_batt_forecast), sonst Heuristik
-        (cheapest_4h + spread + bypass)."""
+        """UC10: E3DC-Batterie-Discharge granular steuern via maxDischargePower.
+        EMHASS-driven: setzt maxDischargePower = EMHASS p_batt_plan (clamped 0-1500).
+        Fallback Heuristik: lock=on → 0W, lock=off → 1500W."""
         s.uc_status["uc10"] = self._uc_idle_status("uc10")
         s.uc_reason["uc10"] = ""
 
@@ -973,123 +973,103 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             s.uc_reason["uc10"] = f"user-override aktiv ({remaining}min Rest)"
             return
 
-        # Entscheidung: EMHASS-Plan vs Heuristik
+        # Entscheidung: EMHASS-Plan vs Heuristik → target maxDischargePower
         if s.emhass_available:
-            should_lock = s.emhass_p_batt_plan < EMHASS_BATT_DISCHARGE_MIN_W
-            # Window: aktueller Slot (30min ab now) — EMHASS plant pro Slot neu
-            window_start = now
-            window_end = now + timedelta(minutes=30)
+            # EMHASS plant Discharge granular (z.B. 600W). Wir folgen direkt.
+            # Wenn Plan < threshold → 0W (Sperre), sonst clamp 0..1500
+            if s.emhass_p_batt_plan < EMHASS_BATT_DISCHARGE_MIN_W:
+                target_w = 0
+            else:
+                target_w = min(int(s.emhass_p_batt_plan), E3DC_MAX_DISCHARGE_W)
             decision_source = f"EMHASS p_batt={s.emhass_p_batt_plan:.0f}W"
+            should_lock = target_w == 0
         else:
+            # Fallback Heuristik (binary lock on/off)
             if not (s.cheapest_4h_avg is not None and s.expensive_4h_avg is not None
                     and s.cheapest_4h_start and s.cheapest_4h_end):
-                s.uc_reason["uc10"] = "kein EMHASS UND kein Tibber-Forecast"
-                return
-            spread = s.expensive_4h_avg - s.cheapest_4h_avg
-            s.uc10_spread_eur = spread
-            if spread < MIN_SPREAD_EUR:
-                s.uc_reason["uc10"] = (
-                    f"Heuristik: spread {spread*100:.1f}ct < "
-                    f"{MIN_SPREAD_EUR*100:.1f}ct (nicht wirtschaftlich)"
+                # Kein Forecast → kein Eingriff (Default Power-Limit setzen)
+                target_w = E3DC_MAX_DISCHARGE_W
+                decision_source = "kein EMHASS UND kein Tibber-Forecast → Default"
+                should_lock = False
+            else:
+                spread = s.expensive_4h_avg - s.cheapest_4h_avg
+                s.uc10_spread_eur = spread
+                in_cheapest = is_in_window(now, s.cheapest_4h_start, s.cheapest_4h_end)
+                pv_bypass_threshold = BATTERIE_KAPAZITAT_KWH * PV_BYPASS_FACTOR
+                pv_bypass_active = s.pv_fc_tomorrow > pv_bypass_threshold
+                cooling_bypass = bool(
+                    s.cooling_active and spread < SMART_SPREAD_THRESHOLD_EUR
                 )
-                return
-            in_cheapest = is_in_window(now, s.cheapest_4h_start, s.cheapest_4h_end)
-            pv_bypass_threshold = BATTERIE_KAPAZITAT_KWH * PV_BYPASS_FACTOR
-            pv_bypass_active = s.pv_fc_tomorrow > pv_bypass_threshold
-            cooling_bypass = bool(
-                s.cooling_active and spread < SMART_SPREAD_THRESHOLD_EUR
-            )
-            should_lock = bool(
-                in_cheapest
-                and s.battery_soc >= SOC_BATTERY_RESERVE
-                and not pv_bypass_active
-                and not cooling_bypass
-            )
-            window_start = s.cheapest_4h_start
-            window_end = s.cheapest_4h_end
-            bypass_parts = []
-            if pv_bypass_active:
-                bypass_parts.append(
-                    f"PV-bypass ({s.pv_fc_tomorrow:.1f}kWh > "
-                    f"{pv_bypass_threshold:.1f}kWh)"
+                should_lock = bool(
+                    spread >= MIN_SPREAD_EUR
+                    and in_cheapest
+                    and s.battery_soc >= SOC_BATTERY_RESERVE
+                    and not pv_bypass_active
+                    and not cooling_bypass
                 )
-            if cooling_bypass:
-                bypass_parts.append(
-                    f"UC12-bypass (spread {spread*100:.1f}ct < "
-                    f"{SMART_SPREAD_THRESHOLD_EUR*100:.1f}ct)"
+                target_w = 0 if should_lock else E3DC_MAX_DISCHARGE_W
+                bypass_parts = []
+                if pv_bypass_active:
+                    bypass_parts.append("PV-bypass")
+                if cooling_bypass:
+                    bypass_parts.append("UC12-bypass")
+                bypass_str = f" [{', '.join(bypass_parts)}]" if bypass_parts else ""
+                decision_source = (
+                    f"Heuristik (spread {spread*100:.1f}ct, SOC {s.battery_soc}%)"
+                    f"{bypass_str}"
                 )
-            bypass_str = f" — {', '.join(bypass_parts)}" if bypass_parts else ""
-            decision_source = (
-                f"Heuristik (spread {spread*100:.1f}ct, "
-                f"SOC {s.battery_soc}%){bypass_str}"
-            )
+
         s.uc10_idle_active = should_lock
 
-        # Aktuelles idle_periods holen
-        current_periods = await self._e3dc.get_idle_periods()
-        if current_periods is None:
+        # Aktuelle E3DC power_settings holen für Override-Detection
+        current_settings = await self._e3dc.get_power_settings()
+        if current_settings is None:
             s.uc_reason["uc10"] = "E3DC nicht erreichbar"
             return
+        current_max_discharge = int(current_settings.get("maxDischargePower", E3DC_MAX_DISCHARGE_W))
 
-        # Override-Detection: hat User idle_periods extern geändert?
-        if self._last_idle_periods is not None:
-            current_json = json.dumps(current_periods, sort_keys=True)
-            last_json = json.dumps(self._last_idle_periods, sort_keys=True)
-            if current_json != last_json:
+        # Override-Detection: hat User maxDischargePower extern geändert?
+        if self._last_max_discharge is not None:
+            # Toleranz 50W gegen Float-Rundung
+            if abs(current_max_discharge - self._last_max_discharge) > 50:
                 await self._override.async_record_override(
-                    "uc10", "e3dc_idle_periods", current_periods,
+                    "uc10", "e3dc_max_discharge_power", current_max_discharge,
                 )
                 remaining = self._override.cooldown_remaining_minutes("uc10")
                 s.uc_status["uc10"] = f"user-override neu erkannt ({remaining}min)"
-                s.uc_reason["uc10"] = "User hat E3DC idle_periods extern geändert"
+                s.uc_reason["uc10"] = (
+                    f"User hat maxDischargePower extern auf {current_max_discharge}W "
+                    f"gesetzt (war {self._last_max_discharge}W)"
+                )
                 return
 
-        # Ziel-Konfiguration berechnen
-        target_periods = empty_periods_for_week()
-        window_str = ""
-        if should_lock:
-            weekday = window_start.weekday()  # 0=Montag
-            target_periods["idleDischarge"][weekday] = make_discharge_period(
-                weekday,
-                window_start.hour, window_start.minute,
-                window_end.hour, window_end.minute,
-            )
-            window_str = (f"{window_start.strftime('%H:%M')}–"
-                          f"{window_end.strftime('%H:%M')}")
-
-        # Nur setzen wenn Änderung nötig
-        target_json = json.dumps(target_periods, sort_keys=True)
-        current_json = json.dumps(current_periods, sort_keys=True)
-
-        if target_json == current_json:
+        # Nur setzen wenn deutlich anders (>50W) — vermeidet unnötige Writes
+        if abs(target_w - current_max_discharge) <= 50:
             s.uc_reason["uc10"] = (
-                f"OK ({'lock ' + window_str if should_lock else 'normal'}) — "
-                f"{decision_source}"
+                f"OK ({target_w}W max-discharge) — {decision_source}"
             )
+            self._last_max_discharge = current_max_discharge
             return
 
-        reason = (
-            f"lock={'on ' + window_str if should_lock else 'off'} — "
-            f"{decision_source}"
-        )
-        desc = f"e3dc.set_idle_periods({window_str or 'clear'})"
+        desc = f"e3dc.set_max_discharge_power({target_w}W) ← war {current_max_discharge}W"
+        reason = f"{desc} — {decision_source}"
         _LOGGER.info("UC10: %s", reason)
 
         if self._dry_run:
-            _LOGGER.info("[DRY-RUN] %s | target=%s", desc, target_periods)
+            _LOGGER.info("[DRY-RUN] %s", desc)
             actions.append(f"DRY-RUN: {desc}")
             s.uc_status["uc10"] = "aktiv"
             s.uc_reason["uc10"] = reason
         else:
-            success = await self._e3dc.set_idle_periods(target_periods)
+            success = await self._e3dc.set_max_discharge_power(target_w)
             if success:
-                self._last_idle_periods = target_periods
+                self._last_max_discharge = target_w
                 actions.append(desc)
                 s.uc_status["uc10"] = "aktiv"
                 s.uc_reason["uc10"] = reason
             else:
                 s.uc_status["uc10"] = "fehler"
-                s.uc_reason["uc10"] = "E3DC POST set_idle_periods fehlgeschlagen"
+                s.uc_reason["uc10"] = "E3DC POST set_max_discharge_power fehlgeschlagen"
 
     async def _handle_trip_planning(
         self, s: WattsonData, now: datetime, actions: list[str]
