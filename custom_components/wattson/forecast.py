@@ -92,6 +92,33 @@ def is_in_window(now: datetime, start: datetime, end: datetime) -> bool:
     return start <= now < end
 
 
+def consecutive_cheap_minutes_from_now(
+    slots: list[PriceSlot], now: datetime, max_price_eur_kwh: float,
+) -> int:
+    """Wie viele Minuten ab `now` durchgängig unter `max_price_eur_kwh` bleiben.
+
+    Wenn der aktuelle (now-überdeckende) Slot bereits teurer ist: 0.
+    Stoppt beim ersten Slot, der den Schwellwert überschreitet. Verwendet für
+    UC14 Netzladen-Fenster-Detection.
+    """
+    sorted_slots = sorted(slots, key=lambda s: s.start)
+    consecutive = 0
+    started = False
+    for slot in sorted_slots:
+        if slot.end <= now:
+            continue
+        if slot.price > max_price_eur_kwh:
+            break
+        # Erster relevanter Slot: zähle nur den verbleibenden Teil bis end
+        if not started:
+            remaining = (slot.end - now).total_seconds() / 60
+            consecutive += max(0, int(remaining))
+            started = True
+        else:
+            consecutive += 15
+    return consecutive
+
+
 def next_relevant_event(
     events: list[dict], now: datetime, skip_keywords: tuple[str, ...]
 ) -> dict | None:

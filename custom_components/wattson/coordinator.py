@@ -14,10 +14,12 @@ from .forecast import (
     PriceSlot,
     calculate_required_soc,
     cheapest_window,
+    consecutive_cheap_minutes_from_now,
     is_in_window,
     most_expensive_window,
     next_relevant_event,
     parse_tibber_response,
+    upcoming_slots,
 )
 from .gmaps import GoogleMapsClient
 from .e3dc_client import E3DCClient
@@ -98,6 +100,14 @@ from .const import (
     T300_TEMP_MIN,
     T300_TEMP_NORMAL,
     T300_TEMP_TEUER,
+    UC6_MODE_HOLD_MINUTES,
+    UC14_BAT_CAPACITY_KWH,
+    UC14_CHARGE_POWER_KW,
+    UC14_FORCE_CHARGE_W,
+    UC14_MIN_SPREAD_CT_KWH,
+    UC14_MIN_WINDOW_MINUTES,
+    UC14_SOC_MAX_PCT,
+    UC14_TOPUP_OVERHEAD_FACTOR,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -188,6 +198,10 @@ class WattsonData:
     # UC10
     uc10_spread_eur: float = 0.0
     uc10_idle_active: bool = False
+    uc14_active: bool = False
+    uc14_spread_ct: float = 0.0
+    uc14_window_minutes: int = 0
+    uc14_needed_minutes: int = 0
 
     # UC12 — Kühlung
     cooling_active: bool = False    # ob UC12 die Freigabe gerade gegeben hat
@@ -245,6 +259,12 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         self._planned_event_uid: str | None = None
         self._last_max_discharge: int | None = None  # für UC10 override-detection
         self._all_away_since: datetime | None = None  # Tracking für UC11 v2
+        # UC6-Hysterese: verhindert 5-min-Mode-Oszillation
+        self._uc6_last_mode_change_utc: datetime | None = None
+        self._uc6_last_set_target: str | None = None
+        # UC14-Grid-Charge: Memo für POST-verify (nächster cycle prüft ob persistiert)
+        self._uc14_active: bool = False
+        self._last_max_charge: int | None = None
         self._override = OverrideManager(
             hass,
             [UCDefinition(uc_id, display, default)
@@ -254,6 +274,25 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
     @property
     def override(self) -> OverrideManager:
         return self._override
+
+    def on_uc_resume(self, uc_id: str) -> None:
+        """Hook: ein UC-Resume wurde gedrückt — Coordinator-Memory-State zurücksetzen
+        damit nächster Cycle nicht wieder "Override neu erkannt" detected.
+
+        Notwendig weil UC10/UC14 ihren Override-Detect über coordinator-Memory
+        (`_last_max_discharge`, `_last_max_charge`) machen, nicht über den
+        OverrideManager's `_actions` Dict.
+        """
+        if uc_id == "uc10":
+            self._last_max_discharge = None
+        if uc_id == "uc14":
+            self._last_max_charge = None
+            self._uc14_active = False
+        if uc_id == "uc6":
+            # Mode-Hysterese vergessen damit nächster Cycle sauber neu greift
+            self._uc6_last_mode_change_utc = None
+            self._uc6_last_set_target = None
+        _LOGGER.info("Coordinator state reset für UC %s nach Resume", uc_id)
 
     async def async_setup(self) -> None:
         """Wird vom __init__ vor first_refresh aufgerufen."""
@@ -329,6 +368,29 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             await self.hass.services.async_call(domain, service, kwargs, blocking=False)
             _LOGGER.info("Aktion: %s", desc)
         return desc
+
+    def _uc6_hysteresis_block(self, new_target: str, now: datetime) -> str | None:
+        """Returns block-reason wenn UC6-Mode-Switch wegen Hysterese unterdrückt wird,
+        sonst None (= darf wechseln).
+
+        Logik: nach Wattson-eigenem Mode-Set muss UC6_MODE_HOLD_MINUTES vergehen
+        bevor erneut gewechselt werden darf. Verhindert 5-min-Oszillation wenn
+        EMHASS-Plan an der Schwelle pendelt. Erzwungener Wechsel wird erst nach
+        Ablauf erlaubt — User-Override-Pfad (externe Änderung) bleibt unberührt.
+        """
+        if self._uc6_last_mode_change_utc is None:
+            return None
+        # neuer Target identisch zu zuletzt gesetztem → kein Wechsel, kein Block
+        if new_target == self._uc6_last_set_target:
+            return None
+        elapsed = dt_util.utcnow() - self._uc6_last_mode_change_utc
+        hold = timedelta(minutes=UC6_MODE_HOLD_MINUTES)
+        if elapsed >= hold:
+            return None
+        remaining = int((hold - elapsed).total_seconds() // 60) + 1
+        return (f"letzter Set {self._uc6_last_set_target!r} vor "
+                f"{int(elapsed.total_seconds()//60)} min, "
+                f"min-Halt {UC6_MODE_HOLD_MINUTES} min (Rest {remaining} min)")
 
     def _uc_idle_status(self, uc_id: str) -> str:
         """Status wenn UC im Tick aktiv geblieben ist aber keine Aktion nötig war."""
@@ -610,6 +672,9 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         # ── UC11: Klimaanlagen OG (Office + Schlafzimmer) ──
         await self._handle_uc11_klima(s, now, actions)
 
+        # ── UC14: Netzladen bei großem Spread (läuft VOR UC10, setzt s.uc14_active) ──
+        await self._handle_uc14_grid_charge(s, now, actions)
+
         # ── UC10: E3DC Discharge-Sperre in günstigen Stunden ──
         await self._handle_uc10_discharge_lock(s, now, actions)
 
@@ -665,19 +730,30 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             s.evcc_target = target_mode
             s.evcc_reason = reason
             if target_mode != s.evcc_mode:
-                _LOGGER.info("evcc: %s → %s (%s)", s.evcc_mode, target_mode, reason)
-                acted, act_desc = await self._try_act(
-                    "uc6", ENTITY_EVCC_MODE, target_mode,
-                    "select", "select_option",
-                    {"entity_id": ENTITY_EVCC_MODE, "option": target_mode},
-                )
-                if acted:
-                    actions.append(act_desc)
+                # Hysterese: nach Wattson-eigenem Mode-Set mindestens
+                # UC6_MODE_HOLD_MINUTES halten, verhindert 5-min-Oszillation
+                hold_block = self._uc6_hysteresis_block(target_mode, now)
+                if hold_block is not None:
+                    _LOGGER.info("evcc: %s → %s gehalten — %s",
+                                 s.evcc_mode, target_mode, hold_block)
                     s.uc_status["uc6"] = "aktiv"
+                    s.evcc_reason = f"{reason} (Hysterese: {hold_block})"
                 else:
-                    _LOGGER.info("UC6 übersprungen: %s", act_desc)
-                    s.uc_status["uc6"] = act_desc
-                    s.evcc_reason = f"{reason} (geblockt: {act_desc})"
+                    _LOGGER.info("evcc: %s → %s (%s)", s.evcc_mode, target_mode, reason)
+                    acted, act_desc = await self._try_act(
+                        "uc6", ENTITY_EVCC_MODE, target_mode,
+                        "select", "select_option",
+                        {"entity_id": ENTITY_EVCC_MODE, "option": target_mode},
+                    )
+                    if acted:
+                        actions.append(act_desc)
+                        s.uc_status["uc6"] = "aktiv"
+                        self._uc6_last_mode_change_utc = dt_util.utcnow()
+                        self._uc6_last_set_target = target_mode
+                    else:
+                        _LOGGER.info("UC6 übersprungen: %s", act_desc)
+                        s.uc_status["uc6"] = act_desc
+                        s.evcc_reason = f"{reason} (geblockt: {act_desc})"
             else:
                 _LOGGER.info("evcc: %s OK (%s)", s.evcc_mode, reason)
                 s.uc_status.setdefault("uc6", self._uc_idle_status("uc6"))
@@ -967,17 +1043,207 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             s.uc_status["uc12"] = act_desc
             s.uc_reason["uc12"] = f"{reason} (geblockt: {act_desc})"
 
+    async def _handle_uc14_grid_charge(
+        self, s: WattsonData, now: datetime, actions: list[str]
+    ) -> None:
+        """UC14: Batterie aus Netz laden bei Spread ≥ 11 ct + Fenster passend zum freien SOC-Platz.
+
+        Aktiv-Bedingungen (alle erfüllt):
+        - EMHASS verfügbar UND `p_batt < 0` (Plan sagt: laden)
+        - Aktueller Preis ≤ max_price_next_24h − 11 ct (großer Spread)
+        - SOC < 90%
+        - Genug zusammenhängende günstige Minuten ab now: max(30min, freier_SOC×4.6kWh/1.5kW×1.1)
+        - Override-aware (Sleep/Urlaub/manueller Eingriff)
+        """
+        s.uc_status["uc14"] = self._uc_idle_status("uc14")
+        s.uc_reason["uc14"] = ""
+
+        def _set_inactive(reason: str) -> None:
+            s.uc_reason["uc14"] = reason
+            s.uc14_active = False
+
+        if self._e3dc is None:
+            _set_inactive("deaktiviert (kein E3DC konfiguriert)")
+            return
+        if not self._override.is_enabled("uc14"):
+            s.uc_status["uc14"] = "disabled"
+            _set_inactive("disabled (per Switch)")
+            return
+        if self._override.in_cooldown("uc14"):
+            remaining = self._override.cooldown_remaining_minutes("uc14")
+            s.uc_status["uc14"] = f"user-override ({remaining}min Rest)"
+            _set_inactive(f"user-override aktiv ({remaining}min Rest)")
+            return
+        if s.sleep_mode:
+            await self._end_uc14_grid_charge_if_active(s, actions, "Schlafmodus")
+            _set_inactive("Schlafmodus aktiv")
+            return
+        if not s.emhass_available:
+            await self._end_uc14_grid_charge_if_active(s, actions, "EMHASS weg")
+            _set_inactive("EMHASS nicht verfügbar")
+            return
+        if s.emhass_p_batt_plan >= 0:
+            await self._end_uc14_grid_charge_if_active(s, actions, "EMHASS p_batt≥0")
+            _set_inactive(f"EMHASS will nicht laden (p_batt={s.emhass_p_batt_plan:.0f}W)")
+            return
+        if s.battery_soc >= UC14_SOC_MAX_PCT:
+            await self._end_uc14_grid_charge_if_active(s, actions, f"SOC≥{UC14_SOC_MAX_PCT}%")
+            _set_inactive(f"SOC {s.battery_soc}% ≥ {UC14_SOC_MAX_PCT}%")
+            return
+        if not s.forecast_slots:
+            await self._end_uc14_grid_charge_if_active(s, actions, "Forecast leer")
+            _set_inactive("kein Tibber-Forecast verfügbar")
+            return
+
+        # Spread-Check: Max-Preis nächste 24h finden
+        upcoming = upcoming_slots(s.forecast_slots, now, 24)
+        if not upcoming:
+            await self._end_uc14_grid_charge_if_active(s, actions, "keine Slots")
+            _set_inactive("keine Forecast-Slots in nächsten 24h")
+            return
+        max_price = max(sl.price for sl in upcoming)
+        spread_threshold_eur = UC14_MIN_SPREAD_CT_KWH / 100.0
+        trigger_price = max_price - spread_threshold_eur
+        current_price = s.price
+        spread_ct = (max_price - current_price) * 100
+        s.uc14_spread_ct = spread_ct
+
+        if current_price > trigger_price:
+            await self._end_uc14_grid_charge_if_active(s, actions, f"Spread {spread_ct:.1f}ct zu klein")
+            _set_inactive(
+                f"Preis {current_price*100:.1f}ct, Spread nur {spread_ct:.1f}ct "
+                f"< {UC14_MIN_SPREAD_CT_KWH:.0f}ct (Max heute {max_price*100:.1f}ct)"
+            )
+            return
+
+        # Fenster-Länge nach freiem SOC-Platz
+        free_pct = UC14_SOC_MAX_PCT - s.battery_soc
+        needed_kwh = free_pct / 100.0 * UC14_BAT_CAPACITY_KWH * UC14_TOPUP_OVERHEAD_FACTOR
+        needed_minutes = max(
+            UC14_MIN_WINDOW_MINUTES,
+            int(needed_kwh / UC14_CHARGE_POWER_KW * 60),
+        )
+        cheap_minutes = consecutive_cheap_minutes_from_now(
+            s.forecast_slots, now, trigger_price,
+        )
+        s.uc14_window_minutes = cheap_minutes
+        s.uc14_needed_minutes = needed_minutes
+
+        if cheap_minutes < needed_minutes:
+            await self._end_uc14_grid_charge_if_active(
+                s, actions, f"Fenster {cheap_minutes}min < {needed_minutes}min benötigt",
+            )
+            _set_inactive(
+                f"Fenster zu kurz: {cheap_minutes} min < {needed_minutes} min "
+                f"(SOC {s.battery_soc}%→{UC14_SOC_MAX_PCT}% braucht {needed_kwh:.2f} kWh)"
+            )
+            return
+
+        # → Bedingungen erfüllt, UC14 aktivieren
+        reason = (
+            f"Spread {spread_ct:.1f}ct (jetzt {current_price*100:.1f}ct vs Max "
+            f"{max_price*100:.1f}ct), Fenster {cheap_minutes} min "
+            f"(brauche {needed_minutes} min für SOC {s.battery_soc}%→{UC14_SOC_MAX_PCT}%)"
+        )
+
+        # Aktuelle Settings holen für Override-Detect
+        current_settings = await self._e3dc.get_power_settings()
+        if current_settings is None:
+            _set_inactive("E3DC nicht erreichbar")
+            return
+        current_max_charge = int(current_settings.get("maxChargePower", UC14_FORCE_CHARGE_W))
+
+        # Override-Detection: hat User maxChargePower extern geändert?
+        if self._last_max_charge is not None and self._uc14_active:
+            if abs(current_max_charge - self._last_max_charge) > 50:
+                prev = self._last_max_charge
+                await self._override.async_record_override(
+                    "uc14", "e3dc_max_charge_power", current_max_charge,
+                )
+                self._last_max_charge = None
+                self._uc14_active = False
+                remaining = self._override.cooldown_remaining_minutes("uc14")
+                s.uc_status["uc14"] = f"user-override neu erkannt ({remaining}min)"
+                s.uc_reason["uc14"] = (
+                    f"User hat maxChargePower extern auf {current_max_charge}W "
+                    f"gesetzt (war {prev}W)"
+                )
+                return
+
+        # Idempotenz: wenn schon aktiv und gesetzt, nichts tun
+        if (self._uc14_active
+                and abs(UC14_FORCE_CHARGE_W - current_max_charge) <= 50
+                and int(current_settings.get("maxDischargePower", 1500)) == 0):
+            s.uc14_active = True
+            s.uc_status["uc14"] = "aktiv"
+            s.uc_reason["uc14"] = f"aktiv — {reason}"
+            return
+
+        # Setzen: max_charge=1500 UND max_discharge=0 in einem Call
+        desc = (f"e3dc.set_power_limits(charge={UC14_FORCE_CHARGE_W}W, discharge=0W) "
+                f"← UC14 Netzladen")
+        _LOGGER.info("UC14: %s — %s", desc, reason)
+
+        if self._dry_run:
+            _LOGGER.info("[DRY-RUN] %s", desc)
+            actions.append(f"DRY-RUN: {desc}")
+            self._uc14_active = True
+            s.uc14_active = True
+            s.uc_status["uc14"] = "aktiv"
+            s.uc_reason["uc14"] = reason
+            return
+
+        success = await self._e3dc.set_power_limits(
+            max_charge_w=UC14_FORCE_CHARGE_W, max_discharge_w=0,
+        )
+        if success:
+            self._last_max_charge = UC14_FORCE_CHARGE_W
+            self._last_max_discharge = 0  # UC10 verlässt sich darauf
+            self._uc14_active = True
+            s.uc14_active = True
+            actions.append(desc)
+            s.uc_status["uc14"] = "aktiv"
+            s.uc_reason["uc14"] = reason
+        else:
+            s.uc_status["uc14"] = "fehler"
+            s.uc_reason["uc14"] = "E3DC POST set_power_limits fehlgeschlagen"
+
+    async def _end_uc14_grid_charge_if_active(
+        self, s: WattsonData, actions: list[str], suffix: str,
+    ) -> None:
+        """Beendet UC14 sauber: max_charge zurück auf Default (1500W), max_discharge
+        bleibt erstmal 0 — UC10 setzt im selben Cycle neu nach EMHASS-Plan."""
+        if not self._uc14_active:
+            return
+        desc = (f"e3dc.set_max_charge_power({UC14_FORCE_CHARGE_W}W default) "
+                f"← UC14 Ende ({suffix})")
+        _LOGGER.info("UC14: %s", desc)
+        if self._dry_run:
+            actions.append(f"DRY-RUN: {desc}")
+        else:
+            await self._e3dc.set_max_charge_power(UC14_FORCE_CHARGE_W)
+            actions.append(desc)
+        self._uc14_active = False
+        self._last_max_charge = None
+        # _last_max_discharge bleibt — UC10 übernimmt jetzt
+
     async def _handle_uc10_discharge_lock(
         self, s: WattsonData, now: datetime, actions: list[str]
     ) -> None:
         """UC10: E3DC-Batterie-Discharge granular steuern via maxDischargePower.
         EMHASS-driven: setzt maxDischargePower = EMHASS p_batt_plan (clamped 0-1500).
-        Fallback Heuristik: lock=on → 0W, lock=off → 1500W."""
+        Fallback Heuristik: lock=on → 0W, lock=off → 1500W.
+
+        Wenn UC14 (Netzladen) aktiv ist, hat UC14 bereits max_discharge=0 gesetzt
+        — UC10 macht dann nichts (kein eigener POST → kein doppelter Write)."""
         s.uc_status["uc10"] = self._uc_idle_status("uc10")
         s.uc_reason["uc10"] = ""
 
         if self._e3dc is None:
             s.uc_reason["uc10"] = "deaktiviert (kein E3DC konfiguriert)"
+            return
+        if s.uc14_active:
+            s.uc_reason["uc10"] = "UC14 Netzladen aktiv — UC10 pausiert"
             return
         if not self._override.is_enabled("uc10"):
             s.uc_status["uc10"] = "disabled"
@@ -1048,14 +1314,18 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         if self._last_max_discharge is not None:
             # Toleranz 50W gegen Float-Rundung
             if abs(current_max_discharge - self._last_max_discharge) > 50:
+                prev = self._last_max_discharge
                 await self._override.async_record_override(
                     "uc10", "e3dc_max_discharge_power", current_max_discharge,
                 )
+                # Memory zurücksetzen — sonst feuert der Detect direkt nach
+                # Cooldown-Ende oder Resume erneut (Race beobachtet 2026-05-27)
+                self._last_max_discharge = None
                 remaining = self._override.cooldown_remaining_minutes("uc10")
                 s.uc_status["uc10"] = f"user-override neu erkannt ({remaining}min)"
                 s.uc_reason["uc10"] = (
                     f"User hat maxDischargePower extern auf {current_max_discharge}W "
-                    f"gesetzt (war {self._last_max_discharge}W)"
+                    f"gesetzt (war {prev}W)"
                 )
                 return
 

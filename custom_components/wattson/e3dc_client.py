@@ -98,14 +98,30 @@ class E3DCClient:
         """Setzt nur maxDischargePower; übernimmt aktuellen maxChargePower
         und dischargeStartPower damit nichts unbeabsichtigt verändert wird.
         Aktiviert auch powerLimitsUsed=True (sonst werden Limits ignoriert)."""
+        return await self.set_power_limits(max_discharge_w=watts)
+
+    async def set_max_charge_power(self, watts: int) -> bool:
+        """Setzt nur maxChargePower (für UC14 Netzladen)."""
+        return await self.set_power_limits(max_charge_w=watts)
+
+    async def set_power_limits(
+        self, max_charge_w: int | None = None, max_discharge_w: int | None = None,
+    ) -> bool:
+        """Atomarer Set beider Power-Limits — vermeidet doppelten POST bei UC14.
+        Ungesetzte Parameter behalten aktuellen Wert. powerLimitsUsed wird immer
+        auf True gesetzt (sonst ignoriert die Anlage Limits)."""
         current = await self.get_power_settings()
         if current is None:
-            _LOGGER.warning("E3DC: kann power_settings nicht lesen für set_max_discharge_power")
+            _LOGGER.warning("E3DC: kann power_settings nicht lesen für set_power_limits")
             return False
         payload = {
             "powerLimitsUsed": True,
-            "maxChargePower": int(current.get("maxChargePower", 1500)),
-            "maxDischargePower": int(max(0, watts)),
+            "maxChargePower": int(max(0, max_charge_w))
+                if max_charge_w is not None
+                else int(current.get("maxChargePower", 1500)),
+            "maxDischargePower": int(max(0, max_discharge_w))
+                if max_discharge_w is not None
+                else int(current.get("maxDischargePower", 1500)),
             "dischargeStartPower": int(current.get("dischargeStartPower", 65)),
         }
         return await self._post("/api/power_settings", payload)

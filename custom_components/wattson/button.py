@@ -50,4 +50,5 @@ class WattsonUCResumeButton(ButtonEntity):
 
     async def async_press(self) -> None:
         await self._coordinator.override.async_resume(self._uc_id)
+        self._coordinator.on_uc_resume(self._uc_id)
         await self._coordinator.async_request_refresh()

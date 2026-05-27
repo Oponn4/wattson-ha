@@ -64,6 +64,18 @@ EMHASS_OPTIM_OK            = "Optimal"
 EMHASS_BATT_DISCHARGE_MIN_W = 100   # > 100W = "darf entladen", sonst sperren
 EMHASS_DEFERRABLE_ON_MIN_W  = 500   # > 500W = "Heizstab/Wallbox sollte laufen"
 
+# UC6 Hysterese: nach Mode-Switch mindestens N Minuten halten — verhindert 5-min-Oszillation
+UC6_MODE_HOLD_MINUTES = 15
+
+# UC14 Netzladen aus Netz (siehe project_wattson_uc14_netzladen.md)
+UC14_MIN_SPREAD_CT_KWH = 11.0      # Mindest-Spread günstigster vs teuerster Slot (User-Entscheidung)
+UC14_SOC_MAX_PCT       = 90        # Lade nur bis 90% — drüber ist's zu teuer für Last-Hop-Verlust
+UC14_BAT_CAPACITY_KWH  = 4.6       # E3DC S10E Akku-Kapazität (siehe reference_e3dc_spec.md)
+UC14_CHARGE_POWER_KW   = 1.5       # E3DC max-Charge-Power Hardware
+UC14_MIN_WINDOW_MINUTES = 30       # Floor — unter 30 min lohnt Setup nicht
+UC14_TOPUP_OVERHEAD_FACTOR = 1.1   # +10% Puffer für Lade-Verluste am Top
+UC14_FORCE_CHARGE_W = 1500         # max_charge_power während UC14 aktiv (Hardware-Max)
+
 # forecast.solar (PV Forecast)
 ENTITY_PV_FC_NOW       = "sensor.power_production_now"               # W
 ENTITY_PV_FC_HOUR      = "sensor.energy_current_hour"                # kWh
@@ -114,6 +126,7 @@ UC_DEFINITIONS = [
     ("uc10", "batterie_schoner",    "Batterie Schoner",          True),
     ("uc12", "kuhlung",             "Kühlung",                   True),
     ("uc11", "klima",               "Klimaanlagen OG",           True),
+    ("uc14", "netzladen",           "Netzladen Batterie",        True),
 ]
 
 # Mapping für Migration v1 → v2: alte unique_id-Suffixe → neue
