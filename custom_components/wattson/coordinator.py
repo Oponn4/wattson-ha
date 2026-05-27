@@ -15,6 +15,7 @@ from .forecast import (
     calculate_required_soc,
     cheapest_window,
     consecutive_cheap_minutes_from_now,
+    humidex,
     is_in_window,
     most_expensive_window,
     next_relevant_event,
@@ -101,6 +102,10 @@ from .const import (
     T300_TEMP_NORMAL,
     T300_TEMP_TEUER,
     UC6_MODE_HOLD_MINUTES,
+    UC11_AUTO_ACTION,
+    UC11_NOTIFY_COOLDOWN_MIN,
+    UC11_QUIET_END_H,
+    UC11_QUIET_START_H,
     UC14_BAT_CAPACITY_KWH,
     UC14_CHARGE_POWER_KW,
     UC14_FORCE_CHARGE_W,
@@ -108,6 +113,10 @@ from .const import (
     UC14_MIN_WINDOW_MINUTES,
     UC14_SOC_MAX_PCT,
     UC14_TOPUP_OVERHEAD_FACTOR,
+    HUMIDEX_INSIDE_OUTSIDE_MIN_DELTA,
+    HUMIDEX_UNCOMFORTABLE,
+    HUMIDEX_WARM_THRESHOLD,
+    ENTITY_HUMIDITY_PROXY,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -265,6 +274,8 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         # UC14-Grid-Charge: Memo für POST-verify (nächster cycle prüft ob persistiert)
         self._uc14_active: bool = False
         self._last_max_charge: int | None = None
+        # UC11-Advisor: Notify-Cooldown pro Raum
+        self._uc11_last_notify_utc: dict[str, datetime] = {}
         self._override = OverrideManager(
             hass,
             [UCDefinition(uc_id, display, default)
@@ -913,45 +924,122 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             modifier_parts.append("Tibber-Peak")
         modifier_str = (" + " + " + ".join(modifier_parts)) if modifier_parts else ""
 
-        # Entscheidung
-        if inside_temp > cool_target + CLIMATE_TARGET_HYSTERESE_C:
-            # Zu warm → cool
-            # Außen sollte warmer sein (sonst Fenster auf billiger)
-            if s.frischluft_temp < OUTDOOR_WARM_MIN_C:
-                # Cooling nicht effizient, lieber lüften
-                return
-            target_mode = "cool"
-            target_temp = cool_target
-        else:
-            # Komfort erreicht oder leicht zu kühl → kein Eingriff
-            # (nicht aus-schalten weil User vielleicht aus anderem Grund eingeschaltet)
+        # Komfort-Check via Humidex (gefühlte Temperatur, RH-Proxy aus Wohnzimmer)
+        rh_proxy = self._fval(ENTITY_HUMIDITY_PROXY, 50.0)
+        inside_hx = humidex(inside_temp, rh_proxy)
+        outside_hx = humidex(s.frischluft_temp, rh_proxy)  # RH-proxy auch außen (provisorisch)
+        delta_hx = inside_hx - outside_hx
+
+        # Trigger-Bedingung:
+        # - Innen ≥ 28 humidex → unbequem (egal Außen)
+        # - ODER Innen ≥ 26 humidex UND Innen ≥ Außen + 2°C (Klima besser als Lüften)
+        too_hot = inside_hx >= HUMIDEX_UNCOMFORTABLE
+        warm_and_outside_higher = (
+            inside_hx >= HUMIDEX_WARM_THRESHOLD
+            and delta_hx >= HUMIDEX_INSIDE_OUTSIDE_MIN_DELTA
+        )
+        if not (too_hot or warm_and_outside_higher):
             return
 
-        # Aktion: hvac_mode wenn anders
-        if current_hvac != target_mode:
-            acted, _ = await self._try_act(
-                "uc11", entity, target_mode,
-                "climate", "set_hvac_mode",
-                {"entity_id": entity, "hvac_mode": target_mode},
-            )
-            if acted:
-                actions.append(
-                    f"{room} → {target_mode} {target_temp:.1f}°C"
-                    f"{modifier_str}"
-                )
+        # Begründung für State
+        reason = (
+            f"{room}: T {inside_temp:.1f}°C/{rh_proxy:.0f}%RH (proxy), "
+            f"humidex {inside_hx:.1f}°C vs außen {outside_hx:.1f}°C "
+            f"({'unbequem' if too_hot else 'warm + Außen kühler'})"
+        )
 
-        # Sollwert setzen wenn deutlich abweicht
-        if abs(current_target - target_temp) >= 0.5:
-            acted, _ = await self._try_act(
-                "uc11", entity, target_temp,
-                "climate", "set_temperature",
-                {"entity_id": entity, "temperature": target_temp},
-            )
-            if acted:
-                actions.append(
-                    f"{room} Soll {current_target:.1f}→{target_temp:.1f}°C"
-                    f"{modifier_str}"
+        if UC11_AUTO_ACTION:
+            # Autonome Aktion (v0.15+, aktuell deaktiviert)
+            target_mode = "cool"
+            target_temp = cool_target
+            if current_hvac != target_mode:
+                acted, _ = await self._try_act(
+                    "uc11", entity, target_mode,
+                    "climate", "set_hvac_mode",
+                    {"entity_id": entity, "hvac_mode": target_mode},
                 )
+                if acted:
+                    actions.append(
+                        f"{room} → {target_mode} {target_temp:.1f}°C{modifier_str}"
+                    )
+            if abs(current_target - target_temp) >= 0.5:
+                acted, _ = await self._try_act(
+                    "uc11", entity, target_temp,
+                    "climate", "set_temperature",
+                    {"entity_id": entity, "temperature": target_temp},
+                )
+                if acted:
+                    actions.append(
+                        f"{room} Soll {current_target:.1f}→{target_temp:.1f}°C{modifier_str}"
+                    )
+        else:
+            # Advisor-Mode (v0.14.1 Default): Notify mit Empfehlung
+            await self._uc11_send_advisor_notify(
+                room, entity, inside_temp, inside_hx, outside_hx, cool_target,
+                actions, reason,
+            )
+
+    async def _uc11_send_advisor_notify(
+        self, room: str, entity: str, inside_temp: float, inside_hx: float,
+        outside_hx: float, cool_target: float, actions: list[str], reason: str,
+    ) -> None:
+        """UC11 Advisor: Sendet Push-Notify wenn Klima sinnvoll wäre. Respektiert
+        Quiet-Hours (22-7) und Cooldown (60 min pro Raum). v0.15+ wird das durch
+        Smart-Auto-Mode ersetzt."""
+        now = dt_util.now()
+        # Quiet-Hours: zwischen 22 und 7 Uhr nicht stören
+        hour = now.hour
+        if hour >= UC11_QUIET_START_H or hour < UC11_QUIET_END_H:
+            actions.append(f"UC11 {room}: Notify unterdrückt (Quiet-Hours)")
+            return
+        # Cooldown
+        last = self._uc11_last_notify_utc.get(room)
+        if last is not None:
+            elapsed_min = (now - last).total_seconds() / 60
+            if elapsed_min < UC11_NOTIFY_COOLDOWN_MIN:
+                remaining = UC11_NOTIFY_COOLDOWN_MIN - elapsed_min
+                actions.append(
+                    f"UC11 {room}: Notify unterdrückt ({remaining:.0f}min Cooldown)"
+                )
+                return
+
+        room_de = {"office": "Office", "schlaf": "Schlafzimmer"}.get(room, room)
+        title = f"Klima {room_de} sinnvoll?"
+        message = (
+            f"{inside_temp:.1f}°C, gefühlt {inside_hx:.1f}°C "
+            f"(außen {outside_hx:.1f}°C). "
+            f"Soll-Cool {cool_target:.0f}°C."
+        )
+        notify_data = {
+            "title": title,
+            "message": message,
+            "data": {
+                "tag": f"wattson_uc11_{room}",  # gruppiert + ersetzt vorherige
+                "actions": [
+                    {"action": f"WATTSON_KLIMA_{room.upper()}_ON",
+                     "title": f"{room_de} AN", "icon": "sfsymbols:snowflake"},
+                    {"action": f"WATTSON_KLIMA_{room.upper()}_OFF",
+                     "title": "Ignorieren", "icon": "sfsymbols:xmark"},
+                ],
+            },
+        }
+
+        if self._dry_run:
+            _LOGGER.info("[DRY-RUN] UC11 advisor notify %s: %s", room, message)
+            actions.append(f"DRY-RUN: notify({room}) {message}")
+        else:
+            try:
+                await self.hass.services.async_call(
+                    "notify",
+                    NOTIFY_SERVICE.split(".", 1)[1],
+                    notify_data,
+                    blocking=False,
+                )
+                self._uc11_last_notify_utc[room] = now
+                actions.append(f"UC11 {room}: Notify gesendet ({message})")
+                _LOGGER.info("UC11 advisor notify gesendet (%s): %s", room, message)
+            except Exception as ex:
+                _LOGGER.warning("UC11 notify fehlgeschlagen: %s", ex)
 
     async def _handle_uc12_cooling(
         self, s: WattsonData, now: datetime, actions: list[str]

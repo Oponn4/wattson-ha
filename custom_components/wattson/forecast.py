@@ -1,6 +1,7 @@
 """Wattson Forecast — Helpers zum Analysieren von Preis-/PV-Vorhersagen."""
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -90,6 +91,25 @@ def most_expensive_window(
 
 def is_in_window(now: datetime, start: datetime, end: datetime) -> bool:
     return start <= now < end
+
+
+def humidex(temp_c: float, rh_pct: float) -> float:
+    """Gefühlte-Temperatur nach Humidex (Kanada). Robust für 0-100% RH und alle T.
+
+    Formel: humidex = T + 0.5555 × (e − 10), e = 6.11 × exp(5417.7530 × (1/273.16 − 1/Td))
+    Mit Dewpoint Td aus Magnus-Approx.
+    """
+    if rh_pct <= 0 or temp_c < -40:
+        return temp_c
+    rh = max(1.0, min(100.0, rh_pct)) / 100.0
+    # Magnus dewpoint
+    a, b = 17.27, 237.7
+    alpha = (a * temp_c) / (b + temp_c) + math.log(rh)
+    td = (b * alpha) / (a - alpha)
+    # Wasserdampfdruck am Dewpoint (hPa)
+    td_k = td + 273.15
+    e = 6.11 * math.exp(5417.7530 * (1.0/273.16 - 1.0/td_k))
+    return temp_c + 0.5555 * (e - 10.0)
 
 
 def consecutive_cheap_minutes_from_now(
