@@ -26,7 +26,8 @@ CHEAP_LEVELS = ("very_cheap", "cheap")
 
 # HA Entity IDs
 ENTITY_PROXON_ABLUFT      = "sensor.proxon_t7_abluft"          # Innen-Temperatur (Abluft als Indikator)
-ENTITY_PROXON_COOL_ENABLE = "switch.proxon_kuehlung_freigabe" # Kühlung Freigabe (Modbus Reg 62)
+ENTITY_PROXON_COOL_ENABLE = "switch.proxon_freigabe_kuhlfunktion" # Kühlung Freigabe (Prod Modbus; bei Proxon-Migration → switch.proxon_fwt_kuhlung_freigabe)
+ENTITY_COOL_SNOOZE        = "input_datetime.wattson_kuhlung_snooze_bis" # UC12 Reminder-Snooze (von Action-Automation gesetzt)
 
 # UC11 — Klimaanlagen OG (Office + Schlafzimmer)
 ENTITY_KLIMA_OFFICE         = "climate.klimaanlage_office_air_conditioner"
@@ -182,6 +183,11 @@ COOL_ABLUFT_TRIGGER_C    = 24.0   # °C — wenn Abluft drüber → Kühlbedarf
 COOL_ABLUFT_HYSTERESE_C  = 1.0    # °C — Hysterese gegen Schwingen
 PV_COOLING_MIN_W         = 1500   # W — ab diesem PV-Überschuss darf gekühlt werden
 SMART_SPREAD_THRESHOLD_EUR = 0.15 # spread >= 15ct → UC10 gewinnt vs UC12, sonst Komfort wichtiger
+
+# UC12 Kühl-Reminder (während User-Override): erinnert ans Ausschalten wenn
+# kühl genug ODER Preis-Level ≥ expensive. Wattson schaltet NIE selbst — nur Notify.
+UC12_REMINDER_COOLDOWN_MIN = 60   # max 1 Reminder/h
+UC12_EXPENSIVE_LEVELS = ("expensive", "very_expensive")  # "viel teurer"-Trigger (User-Entscheidung)
 
 # UC11 — Klimaanlagen OG
 CLIMATE_COOL_OFFSET_C      = 2.0   # Klima-Cool-Sollwert = Proxon-Heiz-Soll + diese Offset

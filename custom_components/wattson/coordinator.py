@@ -70,6 +70,7 @@ from .const import (
     EMHASS_BATT_DISCHARGE_MIN_W,
     EMHASS_DEFERRABLE_ON_MIN_W,
     EMHASS_OPTIM_OK,
+    ENTITY_COOL_SNOOZE,
     ENTITY_EMHASS_OPTIM_STATUS,
     ENTITY_EMHASS_P_BATT_FORECAST,
     ENTITY_EMHASS_P_DEFERRABLE0,
@@ -106,6 +107,8 @@ from .const import (
     UC11_NOTIFY_COOLDOWN_MIN,
     UC11_QUIET_END_H,
     UC11_QUIET_START_H,
+    UC12_EXPENSIVE_LEVELS,
+    UC12_REMINDER_COOLDOWN_MIN,
     UC14_BAT_CAPACITY_KWH,
     UC14_CHARGE_POWER_KW,
     UC14_FORCE_CHARGE_W,
@@ -216,6 +219,7 @@ class WattsonData:
     cooling_active: bool = False    # ob UC12 die Freigabe gerade gegeben hat
     abluft_temp: float = 0.0
     cool_enable_on: bool = False    # tatsächlicher Switch-Status
+    cool_snooze_until: datetime | None = None  # Reminder-Snooze (aus Helper)
 
     # EMHASS — externer LP-Optimizer (v0.9.0)
     emhass_status: str = "unknown"           # "Optimal" wenn EMHASS bereit
@@ -276,6 +280,8 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         self._last_max_charge: int | None = None
         # UC11-Advisor: Notify-Cooldown pro Raum
         self._uc11_last_notify_utc: dict[str, datetime] = {}
+        # UC12-Kühl-Reminder: Notify-Cooldown
+        self._uc12_last_reminder_utc: datetime | None = None
         self._override = OverrideManager(
             hass,
             [UCDefinition(uc_id, display, default)
@@ -462,6 +468,13 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         s.low_soc_notified     = self._prev.low_soc_notified
         s.abluft_temp          = self._fval(ENTITY_PROXON_ABLUFT, 22.0)
         s.cool_enable_on       = self._state(ENTITY_PROXON_COOL_ENABLE) == "on"
+        snooze_ts = self._attr(ENTITY_COOL_SNOOZE, "timestamp", None)
+        try:
+            s.cool_snooze_until = (
+                dt_util.utc_from_timestamp(float(snooze_ts)) if snooze_ts else None
+            )
+        except (TypeError, ValueError):
+            s.cool_snooze_until = None
 
         # EMHASS State lesen — wenn nicht "Optimal" oder Sensor weg → fallback heuristik
         s.emhass_status = self._state(ENTITY_EMHASS_OPTIM_STATUS, "unknown") or "unknown"
@@ -1060,6 +1073,8 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             s.uc_status["uc12"] = f"user-override ({remaining}min Rest)"
             s.uc_reason["uc12"] = f"user-override aktiv ({remaining}min Rest)"
             s.cooling_active = s.cool_enable_on
+            # Reminder: User hat Kühlung von Hand an → erinnern wenn kühl genug / teuer
+            await self._uc12_send_reminder(s, now, actions)
             return
 
         # Entscheidung berechnen
@@ -1130,6 +1145,73 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         else:
             s.uc_status["uc12"] = act_desc
             s.uc_reason["uc12"] = f"{reason} (geblockt: {act_desc})"
+
+    async def _uc12_send_reminder(
+        self, s: WattsonData, now: datetime, actions: list[str]
+    ) -> None:
+        """UC12 Reminder: User hat Kühlung von Hand an (Override aktiv) und vergisst
+        evtl. das Ausschalten. Push wenn kühl genug (Abluft ≤ Trigger) ODER Preis-Level
+        ≥ expensive. Wattson schaltet NIE selbst — die Buttons entscheiden. Respektiert
+        Schlafmodus/Quiet-Hours, Snooze (Helper) und Cooldown (1/h)."""
+        if not s.cool_enable_on:
+            return  # Kühlung ist aus → nichts zu erinnern
+
+        cool_enough = s.abluft_temp <= COOL_ABLUFT_TRIGGER_C
+        expensive = s.price_level in UC12_EXPENSIVE_LEVELS
+        if not (cool_enough or expensive):
+            return
+
+        # Schlafmodus / Quiet-Hours: nicht stören (Frau leichter Schläfer)
+        if s.sleep_mode or now.hour >= UC11_QUIET_START_H or now.hour < UC11_QUIET_END_H:
+            actions.append("UC12 Reminder unterdrückt (Schlafmodus/Quiet-Hours)")
+            return
+
+        # Snooze aktiv?
+        if s.cool_snooze_until and now < s.cool_snooze_until:
+            return
+
+        # Cooldown — max 1 Reminder/h
+        if self._uc12_last_reminder_utc is not None:
+            elapsed_min = (now - self._uc12_last_reminder_utc).total_seconds() / 60
+            if elapsed_min < UC12_REMINDER_COOLDOWN_MIN:
+                return
+
+        if cool_enough and expensive:
+            grund = f"kühl genug (Abluft {s.abluft_temp:.1f}°C) + Strom teuer ({s.price_level})"
+        elif cool_enough:
+            grund = f"kühl genug — Abluft {s.abluft_temp:.1f}°C ≤ {COOL_ABLUFT_TRIGGER_C:.0f}°C"
+        else:
+            grund = f"Strom teuer ({s.price_level})"
+
+        notify_data = {
+            "title": "Proxon-Kühlung noch an",
+            "message": f"Du hast die Kühlung von Hand an. {grund}. Ausschalten?",
+            "data": {
+                "tag": "wattson_uc12_kuehlung",  # gruppiert + ersetzt vorherige
+                "actions": [
+                    {"action": "WATTSON_KUEHL_AUS", "title": "Aus",
+                     "icon": "sfsymbols:power"},
+                    {"action": "WATTSON_KUEHL_SNOOZE_30", "title": "30 min",
+                     "icon": "sfsymbols:clock"},
+                    {"action": "WATTSON_KUEHL_SNOOZE_60", "title": "1 h",
+                     "icon": "sfsymbols:clock"},
+                ],
+            },
+        }
+
+        if self._dry_run:
+            _LOGGER.info("[DRY-RUN] UC12 reminder: %s", grund)
+            actions.append(f"DRY-RUN: UC12 reminder ({grund})")
+            return
+        try:
+            await self.hass.services.async_call(
+                "notify", NOTIFY_SERVICE.split(".", 1)[1], notify_data, blocking=False,
+            )
+            self._uc12_last_reminder_utc = now
+            actions.append(f"UC12 Reminder gesendet ({grund})")
+            _LOGGER.info("UC12 reminder gesendet: %s", grund)
+        except Exception as ex:  # noqa: BLE001
+            _LOGGER.warning("UC12 reminder fehlgeschlagen: %s", ex)
 
     async def _handle_uc14_grid_charge(
         self, s: WattsonData, now: datetime, actions: list[str]
