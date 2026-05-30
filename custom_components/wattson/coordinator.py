@@ -1015,23 +1015,49 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
                 return
 
         room_de = {"office": "Office", "schlaf": "Schlafzimmer"}.get(room, room)
-        title = f"Klima {room_de} sinnvoll?"
-        message = (
-            f"{inside_temp:.1f}°C, gefühlt {inside_hx:.1f}°C "
-            f"(außen {outside_hx:.1f}°C). "
-            f"Soll-Cool {cool_target:.0f}°C."
+        delta_hx = inside_hx - outside_hx
+        # Fenster reicht, wenn Innen nicht extrem (≥ 35 = great discomfort) UND
+        # Außenluft spürbar kühler — dann Lüftungs-Vorschlag statt Klima.
+        fenster_reicht = (
+            inside_hx < HUMIDEX_UNCOMFORTABLE
+            and delta_hx >= HUMIDEX_INSIDE_OUTSIDE_MIN_DELTA
         )
+
+        if fenster_reicht:
+            title = f"Fenster {room_de} auf?"
+            message = (
+                f"Innen {inside_temp:.1f}°C / gefühlt {inside_hx:.1f}°C — "
+                f"außen Hx {outside_hx:.1f}°C (Δ {delta_hx:.1f}). "
+                f"Lüften reicht, Klima spart Strom."
+            )
+            button_actions = [
+                {"action": f"WATTSON_KLIMA_{room.upper()}_FENSTER",
+                 "title": "Fenster auf", "icon": "sfsymbols:wind"},
+                {"action": f"WATTSON_KLIMA_{room.upper()}_ON",
+                 "title": "Klima trotzdem", "icon": "sfsymbols:snowflake"},
+                {"action": f"WATTSON_KLIMA_{room.upper()}_OFF",
+                 "title": "Ignorieren", "icon": "sfsymbols:xmark"},
+            ]
+        else:
+            title = f"Klima {room_de} sinnvoll?"
+            message = (
+                f"{inside_temp:.1f}°C, gefühlt {inside_hx:.1f}°C "
+                f"(außen Hx {outside_hx:.1f}°C). "
+                f"Soll-Cool {cool_target:.0f}°C."
+            )
+            button_actions = [
+                {"action": f"WATTSON_KLIMA_{room.upper()}_ON",
+                 "title": f"{room_de} AN", "icon": "sfsymbols:snowflake"},
+                {"action": f"WATTSON_KLIMA_{room.upper()}_OFF",
+                 "title": "Ignorieren", "icon": "sfsymbols:xmark"},
+            ]
+
         notify_data = {
             "title": title,
             "message": message,
             "data": {
                 "tag": f"wattson_uc11_{room}",  # gruppiert + ersetzt vorherige
-                "actions": [
-                    {"action": f"WATTSON_KLIMA_{room.upper()}_ON",
-                     "title": f"{room_de} AN", "icon": "sfsymbols:snowflake"},
-                    {"action": f"WATTSON_KLIMA_{room.upper()}_OFF",
-                     "title": "Ignorieren", "icon": "sfsymbols:xmark"},
-                ],
+                "actions": button_actions,
             },
         }
 
