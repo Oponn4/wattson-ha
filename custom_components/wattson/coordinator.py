@@ -985,10 +985,17 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
                     )
         else:
             # Advisor-Mode (v0.14.1 Default): Notify mit Empfehlung
-            await self._uc11_send_advisor_notify(
-                room, entity, inside_temp, inside_hx, outside_hx, cool_target,
-                actions, reason,
-            )
+            # ...außer Proxon-Kühlung läuft eh schon und entfeuchtet die Innenluft.
+            # Dann würde Fenster-Auf das torpedieren und Klima wäre Doppelmoppel.
+            if s.cool_enable_on:
+                actions.append(
+                    f"UC11 {room}: Notify unterdrückt (Proxon-Kühlung läuft, entfeuchtet)"
+                )
+            else:
+                await self._uc11_send_advisor_notify(
+                    room, entity, inside_temp, inside_hx, outside_hx, cool_target,
+                    actions, reason,
+                )
 
     async def _uc11_send_advisor_notify(
         self, room: str, entity: str, inside_temp: float, inside_hx: float,
