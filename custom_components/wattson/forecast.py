@@ -186,3 +186,77 @@ def calculate_required_soc(
         soc_with_margin = 100
     # Aufrunden auf round_step
     return int(((soc_with_margin + round_step - 1) // round_step) * round_step)
+
+
+
+@dataclass(frozen=True)
+class DeferrableSlot:
+    """Ein EMHASS 30-min-Slot mit geplanter Deferrable-Leistung."""
+    start: datetime  # tz-aware
+    power: float     # W
+
+    @property
+    def end(self) -> datetime:
+        return self.start + timedelta(minutes=30)
+
+
+def parse_deferrable_schedule(
+    attr_data: list | None, key: str = "p_deferrable0",
+) -> list[DeferrableSlot]:
+    """Parse EMHASS `deferrables_schedule`-Attribut in typisierte Slot-Liste.
+
+    Eingabe: Liste von Dicts mit "date" (ISO-Datetime) + key (Power als String/Float).
+    Output: aufsteigend nach Startzeit sortierte DeferrableSlot-Liste.
+    """
+    if not attr_data:
+        return []
+    slots: list[DeferrableSlot] = []
+    for item in attr_data:
+        try:
+            start = datetime.fromisoformat(item["date"])
+            power = float(item[key])
+            slots.append(DeferrableSlot(start=start, power=power))
+        except (KeyError, ValueError, TypeError):
+            continue
+    slots.sort(key=lambda s: s.start)
+    return slots
+
+
+def deferrable_slot_at(
+    slots: list[DeferrableSlot], now: datetime,
+) -> DeferrableSlot | None:
+    """Slot der `now` enthält (start ≤ now < end), oder None."""
+    for s in slots:
+        if s.start <= now < s.end:
+            return s
+    return None
+
+
+def next_deferrable_on_block(
+    slots: list[DeferrableSlot], now: datetime, threshold_w: float,
+) -> tuple[datetime, datetime] | None:
+    """Findet das nächste oder aktuelle On-Block (start, end).
+
+    Ein Block ist eine Sequenz zusammenhängender Slots mit power ≥ threshold_w.
+    Returns None wenn kein On-Block im verbleibenden Plan existiert.
+    """
+    if not slots:
+        return None
+    # Filter: nur Slots ab/nach now relevant (laufender Slot zählt mit)
+    relevant = [s for s in slots if s.end > now]
+    if not relevant:
+        return None
+    block_start: datetime | None = None
+    block_end: datetime | None = None
+    for s in relevant:
+        if s.power >= threshold_w:
+            if block_start is None:
+                block_start = s.start
+            block_end = s.end
+        else:
+            if block_start is not None:
+                # Block abgeschlossen
+                return (block_start, block_end)  # type: ignore[return-value]
+    if block_start is not None:
+        return (block_start, block_end)  # type: ignore[return-value]
+    return None

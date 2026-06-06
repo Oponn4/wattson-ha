@@ -174,9 +174,19 @@ class OverrideManager:
     def detect_override(
         self, entity_id: str, current_value: Any, tolerance: float = FLOAT_TOLERANCE,
     ) -> bool:
-        """True wenn Wattson zuletzt einen anderen Wert gesetzt hat als jetzt da steht."""
+        """True wenn Wattson zuletzt einen anderen Wert gesetzt hat als jetzt da steht.
+
+        Wenn current_value None oder 'unavailable'/'unknown' ist, returns False —
+        Entity ist transient weg (z.B. Modbus-Reconnect, Coordinator-Refresh).
+        Entscheidung wird vertagt statt einen Phantom-Override auszulösen, der
+        Wattson sonst bis Mitternacht aussperrt.
+        """
         last = self._actions.get(entity_id)
         if last is None:
+            return False
+        if current_value is None or str(current_value).strip().lower() in (
+            "unavailable", "unknown", "none", ""
+        ):
             return False
         return not values_equal(last.value, current_value, tolerance)
 

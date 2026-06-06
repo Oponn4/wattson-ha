@@ -68,6 +68,11 @@ EMHASS_DEFERRABLE_ON_MIN_W  = 500   # > 500W = "Heizstab/Wallbox sollte laufen"
 # UC6 Hysterese: nach Mode-Switch mindestens N Minuten halten — verhindert 5-min-Oszillation
 UC6_MODE_HOLD_MINUTES = 15
 
+# UC4b Plan-aware Execution (v0.16.0) — Wattson liest EMHASS-Plan vorausschauend
+# statt Live-Werte reaktiv zu folgen. Anti-Replan-Jitter durch Confirmation-Cycles.
+UC4B_CONFIRMATION_CYCLES   = 2     # so viele Cycles in Folge "Plan=off" bis ausschalten
+UC4B_REMINDER_COOLDOWN_MIN = 60    # Safety-Reminder: max 1/h
+
 # UC14 Netzladen aus Netz (siehe project_wattson_uc14_netzladen.md)
 UC14_MIN_SPREAD_CT_KWH = 11.0      # Mindest-Spread günstigster vs teuerster Slot (User-Entscheidung)
 UC14_SOC_MAX_PCT       = 90        # Lade nur bis 90% — drüber ist's zu teuer für Last-Hop-Verlust

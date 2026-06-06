@@ -11,14 +11,18 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
 from .forecast import (
+    DeferrableSlot,
     PriceSlot,
     calculate_required_soc,
     cheapest_window,
     consecutive_cheap_minutes_from_now,
+    deferrable_slot_at,
     humidex,
     is_in_window,
     most_expensive_window,
+    next_deferrable_on_block,
     next_relevant_event,
+    parse_deferrable_schedule,
     parse_tibber_response,
     upcoming_slots,
 )
@@ -100,6 +104,8 @@ from .const import (
     T300_TEMP_MIN,
     T300_TEMP_NORMAL,
     T300_TEMP_TEUER,
+    UC4B_CONFIRMATION_CYCLES,
+    UC4B_REMINDER_COOLDOWN_MIN,
     UC6_MODE_HOLD_MINUTES,
     UC11_AUTO_ACTION,
     UC11_NOTIFY_COOLDOWN_MIN,
@@ -222,7 +228,8 @@ class WattsonData:
     # EMHASS — externer LP-Optimizer (v0.9.0)
     emhass_status: str = "unknown"           # "Optimal" wenn EMHASS bereit
     emhass_p_batt_plan: float = 0.0          # W, EMHASS-Plan für jetzt
-    emhass_p_deferrable0_plan: float = 0.0   # W, T300-Heizstab Plan
+    emhass_p_deferrable0_plan: float = 0.0   # W, T300-Heizstab Plan (current slot)
+    heizstab_schedule: list[DeferrableSlot] = field(default_factory=list)  # 24h Forward-Plan
     emhass_p_deferrable1_plan: float = 0.0   # W, Wallbox Plan
     emhass_available: bool = False           # ob EMHASS-Daten nutzbar
 
@@ -280,6 +287,9 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         self._uc11_last_notify_utc: dict[str, datetime] = {}
         # UC12-Kühl-Reminder: Notify-Cooldown
         self._uc12_last_reminder_utc: datetime | None = None
+        # UC4b plan-aware: Anti-Jitter-Counter + Safety-Reminder-Cooldown
+        self._uc4b_off_signal_count: int = 0
+        self._uc4b_last_reminder_utc: datetime | None = None
         self._override = OverrideManager(
             hass,
             [UCDefinition(uc_id, display, default)
@@ -478,6 +488,11 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         s.emhass_status = self._state(ENTITY_EMHASS_OPTIM_STATUS, "unknown") or "unknown"
         s.emhass_p_batt_plan = self._fval(ENTITY_EMHASS_P_BATT_FORECAST, 0.0)
         s.emhass_p_deferrable0_plan = self._fval(ENTITY_EMHASS_P_DEFERRABLE0, 0.0)
+        # UC4b: Forward-Plan aus EMHASS-Attribut (deferrables_schedule)
+        s.heizstab_schedule = parse_deferrable_schedule(
+            self._attr(ENTITY_EMHASS_P_DEFERRABLE0, "deferrables_schedule", []),
+            key="p_deferrable0",
+        )
         s.emhass_p_deferrable1_plan = self._fval(ENTITY_EMHASS_P_DEFERRABLE1, 0.0)
         s.emhass_available = s.emhass_status == EMHASS_OPTIM_OK
 
@@ -628,17 +643,60 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             s.uc_status.setdefault("uc4a", self._uc_idle_status("uc4a"))
             s.uc_reason["uc4a"] = reason
 
-        # ── UC4b: E-Heizstab ─────────────────────────────────────────────────
-        # EMHASS-driven wenn verfügbar, sonst Heuristik
-        # Sicherheits-Check (Tank-Temp) gilt IMMER, auch wenn EMHASS sagt "on"
+        # ── UC4b: E-Heizstab (vorausschauend, EMHASS-Plan-basiert) ──────────
+        # v0.16.0: liest deferrables_schedule (Forward-Plan) statt p_def0.state.
+        # Confirmation-Cycles gegen EMHASS-Replan-Jitter. Heuristik bleibt Fallback.
+        # Tank-Safety gilt IMMER.
         tank_safe = s.t300_tank_temp < T300_TANK_MAX
-        if s.emhass_available:
-            should_on = (s.emhass_p_deferrable0_plan >= EMHASS_DEFERRABLE_ON_MIN_W
-                         and tank_safe)
+        if s.emhass_available and s.heizstab_schedule:
+            current_slot = deferrable_slot_at(s.heizstab_schedule, now)
+            plan_says_on = (
+                current_slot is not None
+                and current_slot.power >= EMHASS_DEFERRABLE_ON_MIN_W
+            )
+            if plan_says_on and tank_safe:
+                # Im On-Block — Counter reset, Block-Ende für Logging
+                self._uc4b_off_signal_count = 0
+                should_on = True
+                block = next_deferrable_on_block(
+                    s.heizstab_schedule, now, EMHASS_DEFERRABLE_ON_MIN_W,
+                )
+                block_end_str = block[1].strftime("%H:%M") if block else "?"
+                uc4b_source = (
+                    f"EMHASS-Block bis {block_end_str} "
+                    f"(Slot {current_slot.power:.0f}W)"
+                )
+            elif not tank_safe:
+                self._uc4b_off_signal_count = 0
+                should_on = False
+                uc4b_source = (
+                    f"Tank-Limit ({s.t300_tank_temp:.1f}°C ≥ {T300_TANK_MAX}°C)"
+                )
+            else:
+                # Plan sagt off — Confirmation-Cycles bevor wirklich ausschalten
+                self._uc4b_off_signal_count += 1
+                if (self._uc4b_off_signal_count < UC4B_CONFIRMATION_CYCLES
+                        and s.t300_heizstab_on):
+                    should_on = True
+                    uc4b_source = (
+                        f"EMHASS off-Signal "
+                        f"{self._uc4b_off_signal_count}/{UC4B_CONFIRMATION_CYCLES} "
+                        f"— halte ON gegen Jitter"
+                    )
+                else:
+                    should_on = False
+                    next_block = next_deferrable_on_block(
+                        s.heizstab_schedule, now, EMHASS_DEFERRABLE_ON_MIN_W,
+                    )
+                    next_str = (
+                        f", nächster Block ab {next_block[0].strftime('%H:%M')}"
+                        if next_block else ""
+                    )
+                    uc4b_source = f"EMHASS Plan: jetzt kein Block{next_str}"
             should_off = not should_on
-            uc4b_source = (f"EMHASS p_def0={s.emhass_p_deferrable0_plan:.0f}W"
-                           f"{'(Tank-Limit)' if not tank_safe else ''}")
         else:
+            # Heuristik-Fallback (EMHASS nicht verfügbar / kein Schedule)
+            self._uc4b_off_signal_count = 0
             should_on = (
                 s.pv_surplus >= PV_SURPLUS_ON
                 and s.battery_soc >= BATTERY_FULL
@@ -687,6 +745,9 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
                                f"{uc4b_source}")
             s.uc_status.setdefault("uc4b", self._uc_idle_status("uc4b"))
         s.uc_reason["uc4b"] = heizstab_reason
+
+        # UC4b Safety-Reminder: Heizstab an UND Strompreis ≥ expensive → Push
+        await self._uc4b_send_safety_notify(s, now, actions)
 
         # ── UC12: Proxon Kühlung (läuft vor UC10 weil UC10 das Ergebnis braucht) ──
         await self._handle_uc12_cooling(s, now, actions)
@@ -821,6 +882,65 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
                 for ev in cal_data.get("events", []):
                     merged.append({**ev, "_calendar": cal_id})
         return merged
+
+    async def _uc4b_send_safety_notify(
+        self, s: WattsonData, now: datetime, actions: list[str]
+    ) -> None:
+        """UC4b Safety-Net: warnt wenn Heizstab läuft und Strompreis ≥ expensive.
+
+        Greift wenn EMHASS-Plan suboptimal entscheidet, ein User-Override den Stab
+        vergessen lässt oder Proxon-intern den Stab anwirft. Wattson schaltet nicht
+        selbst aus — der Button entscheidet. Respektiert Schlafmodus, Quiet-Hours
+        (22-7) und 60min-Cooldown.
+        """
+        if not s.t300_heizstab_on:
+            return
+        if s.price_level not in UC12_EXPENSIVE_LEVELS:
+            return
+        if s.sleep_mode or now.hour >= UC11_QUIET_START_H or now.hour < UC11_QUIET_END_H:
+            actions.append(
+                "UC4b Safety-Reminder unterdrückt (Schlafmodus/Quiet-Hours)"
+            )
+            return
+        if self._uc4b_last_reminder_utc is not None:
+            elapsed_min = (now - self._uc4b_last_reminder_utc).total_seconds() / 60
+            if elapsed_min < UC4B_REMINDER_COOLDOWN_MIN:
+                return
+
+        price_ct = s.price * 100 if s.price else 0
+        notify_data = {
+            "title": "Heizstab läuft bei teurem Strom",
+            "message": (
+                f"Tank {s.t300_tank_temp:.1f}°C, Strompreis {s.price_level} "
+                f"({price_ct:.1f} ct/kWh). Ausschalten?"
+            ),
+            "data": {
+                "tag": "wattson_uc4b_heizstab",  # gruppiert + ersetzt vorherige
+                "actions": [
+                    {"action": "WATTSON_HEIZSTAB_AUS", "title": "Aus",
+                     "icon": "sfsymbols:power"},
+                    {"action": "WATTSON_HEIZSTAB_IGNORE", "title": "Ignorieren",
+                     "icon": "sfsymbols:xmark"},
+                ],
+            },
+        }
+
+        if self._dry_run:
+            _LOGGER.info("[DRY-RUN] UC4b safety notify: %s", notify_data["message"])
+            actions.append(f"DRY-RUN: UC4b Safety-Reminder ({s.price_level})")
+            return
+        try:
+            await self.hass.services.async_call(
+                "notify", NOTIFY_SERVICE.split(".", 1)[1], notify_data, blocking=False,
+            )
+            self._uc4b_last_reminder_utc = now
+            actions.append(f"UC4b Safety-Reminder gesendet ({s.price_level})")
+            _LOGGER.info(
+                "UC4b safety reminder sent: heizstab on @ %s (%.1f ct/kWh)",
+                s.price_level, price_ct,
+            )
+        except Exception as ex:  # noqa: BLE001
+            _LOGGER.warning("UC4b safety reminder failed: %s", ex)
 
     async def _handle_uc11_klima(
         self, s: WattsonData, now: datetime, actions: list[str]
