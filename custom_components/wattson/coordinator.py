@@ -68,8 +68,15 @@ from .const import (
     CLIMATE_ECO_OFFSET_C,
     CLIMATE_PEAK_OFFSET_C,
     CLIMATE_PRECOOL_OFFSET_C,
+    COOL_ABLUFT_HEAT_C,
     COOL_ABLUFT_HYSTERESE_C,
     COOL_ABLUFT_TRIGGER_C,
+    COOL_HEAT_MAX_C,
+    COOL_HEAT_MIN_C,
+    COOL_OUTSIDE_REF_C,
+    COOL_OUTSIDE_SLOPE,
+    COOL_TRIGGER_MAX_C,
+    COOL_TRIGGER_MIN_C,
     EMHASS_BATT_DISCHARGE_MIN_W,
     EMHASS_DEFERRABLE_ON_MIN_W,
     EMHASS_OPTIM_OK,
@@ -112,6 +119,7 @@ from .const import (
     UC11_QUIET_END_H,
     UC11_QUIET_START_H,
     UC12_EXPENSIVE_LEVELS,
+    UC12_HEAT_NOTIFY_COOLDOWN_MIN,
     UC12_REMINDER_COOLDOWN_MIN,
     UC14_BAT_CAPACITY_KWH,
     UC14_CHARGE_POWER_KW,
@@ -285,8 +293,10 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         self._last_max_charge: int | None = None
         # UC11-Advisor: Notify-Cooldown pro Raum
         self._uc11_last_notify_utc: dict[str, datetime] = {}
-        # UC12-Kühl-Reminder: Notify-Cooldown
+        # UC12-Kühl-Reminder: Notify-Cooldown (Override-Pfad)
         self._uc12_last_reminder_utc: datetime | None = None
+        # UC12-Heat-Notify: Notify-Cooldown (Auto-Pfad, Force-Hitze v0.17)
+        self._uc12_last_heat_notify_utc: datetime | None = None
         # UC4b plan-aware: Anti-Jitter-Counter + Safety-Reminder-Cooldown
         self._uc4b_off_signal_count: int = 0
         self._uc4b_last_reminder_utc: datetime | None = None
@@ -1205,6 +1215,25 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             except Exception as ex:
                 _LOGGER.warning("UC11 notify fehlgeschlagen: %s", ex)
 
+    def _compute_cool_thresholds(self, s: WattsonData) -> tuple[float, float]:
+        """v0.17: Trigger- und Heat-Schwelle aus Außen-Forecast skalieren.
+
+        Heißer Tag draußen → Körper akzeptiert mehr drinnen, Schwellen rutschen
+        hoch (Komfort-Adaption nach EN 16798-1, vereinfacht). Kühler Tag drinnen
+        bei warmer Außenwerten → Schwellen sinken, früher Eingriff.
+        """
+        outside = float(s.forecast_max_temp_c or COOL_OUTSIDE_REF_C)
+        delta = COOL_OUTSIDE_SLOPE * (outside - COOL_OUTSIDE_REF_C)
+        trigger = max(
+            COOL_TRIGGER_MIN_C,
+            min(COOL_TRIGGER_MAX_C, COOL_ABLUFT_TRIGGER_C + delta),
+        )
+        heat = max(
+            COOL_HEAT_MIN_C,
+            min(COOL_HEAT_MAX_C, COOL_ABLUFT_HEAT_C + delta),
+        )
+        return trigger, heat
+
     async def _handle_uc12_cooling(
         self, s: WattsonData, now: datetime, actions: list[str]
     ) -> None:
@@ -1228,16 +1257,50 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             await self._uc12_send_reminder(s, now, actions)
             return
 
+        # v0.17: Adaptive Schwellen aus Outdoor-Forecast (A-Variante)
+        trigger_c, heat_c = self._compute_cool_thresholds(s)
+        off_c = trigger_c - COOL_ABLUFT_HYSTERESE_C
+        expensive = s.price_level in UC12_EXPENSIVE_LEVELS
+        hitze = s.abluft_temp >= heat_c
+        scale_info = (
+            f"Trigger {trigger_c:.1f}°C / Heat {heat_c:.1f}°C "
+            f"(Außen-Forecast max {s.forecast_max_temp_c:.1f}°C)"
+        )
+
         # Entscheidung berechnen
-        if s.sleep_mode:
+        if hitze:
+            # Force-Hitze: kühlt immer, selbst bei Sleep+expensive (mit Notify)
+            should_cool = True
+            grund_bruch = (
+                "Schlafmodus" if s.sleep_mode
+                else (f"expensive ({s.price_level})" if expensive else None)
+            )
+            if grund_bruch:
+                reason = (
+                    f"Hitze {s.abluft_temp:.1f}°C ≥ {heat_c:.1f}°C — "
+                    f"Kühlung trotz {grund_bruch} ({scale_info})"
+                )
+                await self._uc12_send_heat_notify(
+                    s, now, actions, heat_c, grund_bruch,
+                )
+            else:
+                reason = (
+                    f"Hitze {s.abluft_temp:.1f}°C ≥ {heat_c:.1f}°C ({scale_info})"
+                )
+        elif s.sleep_mode:
             should_cool = False
-            reason = f"Schlafmodus → Kühlung aus (Abluft {s.abluft_temp:.1f}°C)"
-        elif s.abluft_temp <= COOL_ABLUFT_TRIGGER_C:
+            reason = (
+                f"Schlafmodus → aus (Abluft {s.abluft_temp:.1f}°C, "
+                f"Heat-Schwelle {heat_c:.1f}°C nicht erreicht)"
+            )
+        elif s.abluft_temp <= off_c:
             should_cool = False
-            reason = (f"Abluft {s.abluft_temp:.1f}°C ≤ "
-                      f"{COOL_ABLUFT_TRIGGER_C}°C (kein Bedarf)")
+            reason = (
+                f"Abluft {s.abluft_temp:.1f}°C ≤ Off-Schwelle {off_c:.1f}°C "
+                f"({scale_info})"
+            )
         else:
-            # Innen zu warm — evaluiere ob freigeben
+            # Innen zwischen Off-Schwelle und Heat-Schwelle — evaluiere
             spread = (s.expensive_4h_avg - s.cheapest_4h_avg
                       if s.expensive_4h_avg and s.cheapest_4h_avg else 0)
             in_cheapest = bool(
@@ -1247,31 +1310,54 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
 
             if s.pv_surplus >= PV_COOLING_MIN_W:
                 should_cool = True
-                reason = (f"PV-Überschuss {s.pv_surplus}W ≥ {PV_COOLING_MIN_W}W "
-                          f"(Abluft {s.abluft_temp:.1f}°C)")
+                reason = (
+                    f"PV-Überschuss {s.pv_surplus}W ≥ {PV_COOLING_MIN_W}W "
+                    f"(Abluft {s.abluft_temp:.1f}°C, {scale_info})"
+                )
             elif in_cheapest and spread < SMART_SPREAD_THRESHOLD_EUR:
                 should_cool = True
-                reason = (f"cheapest_4h, spread {spread*100:.1f}ct < "
-                          f"{SMART_SPREAD_THRESHOLD_EUR*100:.1f}ct → UC12 Priorität "
-                          f"(Abluft {s.abluft_temp:.1f}°C)")
+                reason = (
+                    f"cheapest_4h, spread {spread*100:.1f}ct < "
+                    f"{SMART_SPREAD_THRESHOLD_EUR*100:.1f}ct → UC12 Priorität "
+                    f"(Abluft {s.abluft_temp:.1f}°C)"
+                )
+            elif (
+                s.cool_enable_on
+                and s.abluft_temp > trigger_c
+                and not expensive
+            ):
+                # Hysterese: läuft + noch über Trigger → weiter — aber nur bei
+                # nicht-teurem Strom (sonst macht sie unbegrenzt durch)
+                should_cool = True
+                reason = (
+                    f"Hysterese: läuft + Abluft {s.abluft_temp:.1f}°C > "
+                    f"Trigger {trigger_c:.1f}°C, Preis {s.price_level} ok"
+                )
+            elif (
+                s.cool_enable_on
+                and s.abluft_temp > trigger_c
+                and expensive
+            ):
+                should_cool = False
+                reason = (
+                    f"Hysterese gebrochen: expensive ({s.price_level}) ohne PV "
+                    f"(Abluft {s.abluft_temp:.1f}°C, Heat-Schwelle "
+                    f"{heat_c:.1f}°C nicht erreicht)"
+                )
             elif in_cheapest:
                 should_cool = False
-                reason = (f"cheapest_4h, aber spread {spread*100:.1f}ct ≥ "
-                          f"{SMART_SPREAD_THRESHOLD_EUR*100:.1f}ct → UC10 Priorität, "
-                          f"Kühlung warten (Abluft {s.abluft_temp:.1f}°C)")
+                reason = (
+                    f"cheapest_4h, aber spread {spread*100:.1f}ct ≥ "
+                    f"{SMART_SPREAD_THRESHOLD_EUR*100:.1f}ct → UC10 Priorität "
+                    f"(Abluft {s.abluft_temp:.1f}°C)"
+                )
             else:
                 should_cool = False
-                reason = (f"kein PV-Überschuss + nicht in cheapest_4h "
-                          f"(Abluft {s.abluft_temp:.1f}°C, "
-                          f"Preis-Level {s.price_level})")
-
-        # Hysterese gegen Schwingen — wenn Kühlung gerade läuft, erst bei Trigger-1 ausgehen
-        if s.cool_enable_on and not should_cool and s.abluft_temp > (
-            COOL_ABLUFT_TRIGGER_C - COOL_ABLUFT_HYSTERESE_C
-        ) and not s.sleep_mode:
-            should_cool = True
-            reason = (f"Hysterese: Kühlung läuft + Abluft {s.abluft_temp:.1f}°C noch "
-                      f"über {COOL_ABLUFT_TRIGGER_C - COOL_ABLUFT_HYSTERESE_C}°C")
+                reason = (
+                    f"kein PV-Überschuss + nicht in cheapest_4h "
+                    f"(Abluft {s.abluft_temp:.1f}°C, Preis {s.price_level}, "
+                    f"{scale_info})"
+                )
 
         s.cooling_active = should_cool
         s.uc_reason["uc12"] = reason
@@ -1363,6 +1449,70 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             _LOGGER.info("UC12 reminder gesendet: %s", grund)
         except Exception as ex:  # noqa: BLE001
             _LOGGER.warning("UC12 reminder fehlgeschlagen: %s", ex)
+
+    async def _uc12_send_heat_notify(
+        self, s: WattsonData, now: datetime, actions: list[str],
+        heat_c: float, grund_bruch: str,
+    ) -> None:
+        """v0.17: Push wenn Force-Hitze die Sleep- oder Expensive-Sperre bricht.
+
+        Wattson kühlt weiter (richtig!), informiert aber, warum: damit der User
+        nicht rätselt, wieso die Box im teuren Fenster oder nachts noch dreht.
+        Quiet-Hours (22-7) und Schlafmodus unterdrücken, 60min-Cooldown.
+        """
+        # Quiet-Hours / Schlafmodus: Sonja ist leichter Schläfer — kein Push
+        if (
+            s.sleep_mode
+            or now.hour >= UC11_QUIET_START_H
+            or now.hour < UC11_QUIET_END_H
+        ):
+            actions.append(
+                f"UC12 Heat-Notify unterdrückt (Quiet-Hours, "
+                f"Abluft {s.abluft_temp:.1f}°C ≥ {heat_c:.1f}°C)"
+            )
+            return
+
+        # Cooldown
+        if self._uc12_last_heat_notify_utc is not None:
+            elapsed_min = (
+                now - self._uc12_last_heat_notify_utc
+            ).total_seconds() / 60
+            if elapsed_min < UC12_HEAT_NOTIFY_COOLDOWN_MIN:
+                return
+
+        notify_data = {
+            "title": f"Hitze {s.abluft_temp:.1f}°C — Kühlung läuft",
+            "message": (
+                f"Trotz {grund_bruch}: Außen-Forecast max "
+                f"{s.forecast_max_temp_c:.1f}°C → Heat-Schwelle "
+                f"{heat_c:.1f}°C überschritten."
+            ),
+            "data": {
+                "tag": "wattson_uc12_heat",
+            },
+        }
+
+        if self._dry_run:
+            _LOGGER.info("[DRY-RUN] UC12 heat notify: %s", grund_bruch)
+            actions.append(f"DRY-RUN: UC12 heat-notify ({grund_bruch})")
+            return
+
+        try:
+            await self.hass.services.async_call(
+                "notify", NOTIFY_SERVICE.split(".", 1)[1], notify_data,
+                blocking=False,
+            )
+            self._uc12_last_heat_notify_utc = now
+            actions.append(
+                f"UC12 Heat-Notify gesendet ({grund_bruch}, "
+                f"Abluft {s.abluft_temp:.1f}°C)"
+            )
+            _LOGGER.info(
+                "UC12 heat notify gesendet: %s (Abluft %.1f°C)",
+                grund_bruch, s.abluft_temp,
+            )
+        except Exception as ex:  # noqa: BLE001
+            _LOGGER.warning("UC12 heat notify fehlgeschlagen: %s", ex)
 
     async def _handle_uc14_grid_charge(
         self, s: WattsonData, now: datetime, actions: list[str]

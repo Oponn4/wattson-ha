@@ -184,14 +184,26 @@ PV_BYPASS_FACTOR       = 4.0    # pv_fc_tomorrow > 4.6 * 4.0 = 18.4 kWh → Bypa
 E3DC_MAX_DISCHARGE_W   = 1500   # Hardware-Max der S10E Batterie
 
 # UC12 — Proxon Kühlung
-COOL_ABLUFT_TRIGGER_C    = 24.0   # °C — wenn Abluft drüber → Kühlbedarf
-COOL_ABLUFT_HYSTERESE_C  = 1.0    # °C — Hysterese gegen Schwingen
-PV_COOLING_MIN_W         = 1500   # W — ab diesem PV-Überschuss darf gekühlt werden
-SMART_SPREAD_THRESHOLD_EUR = 0.15 # spread >= 15ct → UC10 gewinnt vs UC12, sonst Komfort wichtiger
+# Trigger/Heat sind ab v0.17 *Basis*-Werte; effektiv skaliert per Outdoor-Forecast
+# in coordinator._compute_cool_thresholds(). Bei outside_max == COOL_OUTSIDE_REF_C
+# kommen Trigger=BASE_C bzw. Heat=HEAT_BASE_C heraus. Slope > 0 hebt beide bei
+# Hitzewelle an (Komfort-Adaption); Min/Max sind harte Grenzen.
+COOL_ABLUFT_TRIGGER_C      = 24.0   # °C — Basis-Kühlbedarf bei outside_max ≈ Ref
+COOL_ABLUFT_HYSTERESE_C    = 1.0    # °C — Hysterese gegen Schwingen
+COOL_ABLUFT_HEAT_C         = 25.5   # °C — Basis-„echte Hitze" (bricht Sleep+expensive)
+COOL_OUTSIDE_REF_C         = 20.0   # °C — Außen-Forecast-Referenz
+COOL_OUTSIDE_SLOPE         = 0.15   # +0.15 °C Schwelle pro 1 °C Außen-Surplus über Ref
+COOL_TRIGGER_MIN_C         = 23.5
+COOL_TRIGGER_MAX_C         = 25.0
+COOL_HEAT_MIN_C            = 25.5
+COOL_HEAT_MAX_C            = 27.0
+PV_COOLING_MIN_W           = 1500   # W — ab diesem PV-Überschuss darf gekühlt werden
+SMART_SPREAD_THRESHOLD_EUR = 0.15   # spread >= 15ct → UC10 gewinnt vs UC12, sonst Komfort wichtiger
 
 # UC12 Kühl-Reminder (während User-Override): erinnert ans Ausschalten wenn
 # kühl genug ODER Preis-Level ≥ expensive. Wattson schaltet NIE selbst — nur Notify.
-UC12_REMINDER_COOLDOWN_MIN = 60   # max 1 Reminder/h
+UC12_REMINDER_COOLDOWN_MIN    = 60   # max 1 Reminder/h
+UC12_HEAT_NOTIFY_COOLDOWN_MIN = 60   # max 1 Heat-Notify/h (Auto-Pfad, Force-Hitze)
 UC12_EXPENSIVE_LEVELS = ("expensive", "very_expensive")  # "viel teurer"-Trigger (User-Entscheidung)
 
 # UC11 — Klimaanlagen OG
