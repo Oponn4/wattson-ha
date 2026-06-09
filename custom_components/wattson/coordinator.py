@@ -32,7 +32,6 @@ from .override import OverrideManager, UCDefinition
 from .const import (
     BATTERY_FULL,
     BATTERY_NOT_FULL,
-    CHEAP_LEVELS,
     DOMAIN,
     EVCC_PLAN_BUFFER_MINUTES,
     SKIP_LOCATION_KEYWORDS,
