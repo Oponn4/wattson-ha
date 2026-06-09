@@ -113,7 +113,11 @@ from .const import (
     T300_TEMP_TEUER,
     UC4B_CONFIRMATION_CYCLES,
     UC4B_REMINDER_COOLDOWN_MIN,
+    UC6_DOWNSHIFT_CONFIRMATION_CYCLES,
+    UC6_MINPV_PRICE_LEVELS,
     UC6_MODE_HOLD_MINUTES,
+    UC6_NOW_SOC_THRESHOLD_PCT,
+    UC6_NOW_TRIP_URGENT_HOURS,
     UC11_AUTO_ACTION,
     UC11_NOTIFY_COOLDOWN_MIN,
     UC11_QUIET_END_H,
@@ -239,6 +243,7 @@ class WattsonData:
     emhass_p_deferrable0_plan: float = 0.0   # W, T300-Heizstab Plan (current slot)
     heizstab_schedule: list[DeferrableSlot] = field(default_factory=list)  # 24h Forward-Plan
     emhass_p_deferrable1_plan: float = 0.0   # W, Wallbox Plan
+    wallbox_schedule: list[DeferrableSlot] = field(default_factory=list)  # 24h Forward-Plan
     emhass_available: bool = False           # ob EMHASS-Daten nutzbar
 
     # UC11 — Klimaanlagen OG
@@ -299,6 +304,8 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         self._uc12_last_heat_notify_utc: datetime | None = None
         # UC4b plan-aware: Anti-Jitter-Counter + Safety-Reminder-Cooldown
         self._uc4b_off_signal_count: int = 0
+        # UC6 plan-aware: Downshift-Confirmation-Counter (v0.17.1)
+        self._uc6_downshift_count: int = 0
         self._uc4b_last_reminder_utc: datetime | None = None
         self._override = OverrideManager(
             hass,
@@ -504,6 +511,10 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             key="p_deferrable0",
         )
         s.emhass_p_deferrable1_plan = self._fval(ENTITY_EMHASS_P_DEFERRABLE1, 0.0)
+        s.wallbox_schedule = parse_deferrable_schedule(
+            self._attr(ENTITY_EMHASS_P_DEFERRABLE1, "deferrables_schedule", []),
+            key="p_deferrable1",
+        )
         s.emhass_available = s.emhass_status == EMHASS_OPTIM_OK
 
         # UC11 — Klima State
@@ -774,51 +785,127 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         # ── UC2: Kalender-basiertes Vorladen (vor UC6/7 weil setzt Plan-Mode-Hinweis) ──
         await self._handle_trip_planning(s, now, actions)
 
-        # ── UC6/UC7: evcc Modus — EMHASS-driven mit Heuristik-Fallback ──────
+        # ── UC6/UC7: evcc Modus — v0.17.1: 3-Level + plan-aware ──────────
+        # 3-phasig + 5.2 kWp PV → pv lädt selten autonom; minpv ist Workhorse.
+        # now nur bei echtem Notfall (SOC<50 + Trip urgent). Downshift
+        # (Richtung weniger laden) braucht Confirmation gegen Replan-Jitter.
         if s.car_connected:
             needs_charge = s.car_soc < SOC_TARGET
-            if s.trip_plan_set:
-                # UC2-Plan aktiv → evcc soll planen, niemals "now" forcieren
-                target_mode = "pv"
-                reason = (f"Trip-Plan aktiv ({s.trip_title}, "
-                          f"Ziel {s.trip_required_soc}% bis "
-                          f"{s.trip_start.strftime('%d.%m %H:%M') if s.trip_start else '?'}) "
-                          f"— pv-Mode damit Plan greift")
-            elif s.emhass_available:
-                # EMHASS plant Wallbox als deferrable1
-                # > 500W → "now" (lade jetzt), sonst "pv" (warten auf Solar/günstig)
-                if s.emhass_p_deferrable1_plan >= EMHASS_DEFERRABLE_ON_MIN_W:
-                    target_mode = "now"
-                    reason = (f"EMHASS Wallbox-Plan {s.emhass_p_deferrable1_plan:.0f}W "
-                              f"≥ {EMHASS_DEFERRABLE_ON_MIN_W}W → now "
-                              f"(SOC {s.car_soc:.0f}%)")
+            trip_urgent = bool(
+                s.trip_plan_set and s.trip_start is not None
+                and (s.trip_start - now)
+                    <= timedelta(hours=UC6_NOW_TRIP_URGENT_HOURS)
+            )
+            socsoc_critical = s.car_soc < UC6_NOW_SOC_THRESHOLD_PCT
+
+            # Plan-aware: aktueller Wallbox-Slot aus Forward-Plan (24h × 30min)
+            wb_slot = (
+                deferrable_slot_at(s.wallbox_schedule, now)
+                if s.wallbox_schedule else None
+            )
+            in_wb_block = (
+                wb_slot is not None
+                and wb_slot.power >= EMHASS_DEFERRABLE_ON_MIN_W
+            )
+
+            # raw_target: Wunschmode pro Cycle (vor Confirmation)
+            if socsoc_critical and (trip_urgent or in_wb_block):
+                raw_target = "now"
+                raw_reason = (
+                    f"Notfall: SOC {s.car_soc:.0f}% < "
+                    f"{UC6_NOW_SOC_THRESHOLD_PCT}% "
+                    + ("+ Trip in <"
+                       f"{UC6_NOW_TRIP_URGENT_HOURS}h" if trip_urgent
+                       else f"+ EMHASS-Plan {wb_slot.power:.0f}W")
+                )
+            elif trip_urgent and s.trip_required_soc and s.car_soc < s.trip_required_soc:
+                raw_target = "now"
+                raw_reason = (
+                    f"Trip in <{UC6_NOW_TRIP_URGENT_HOURS}h "
+                    f"({s.trip_title}, Ziel {s.trip_required_soc}% > "
+                    f"{s.car_soc:.0f}%)"
+                )
+            elif s.trip_plan_set:
+                # UC2-Plan aktiv, aber nicht urgent → minpv damit Plan greifen
+                # kann (now würde Plan ignorieren). pv wäre zu konservativ.
+                raw_target = "minpv"
+                raw_reason = (
+                    f"Trip-Plan aktiv ({s.trip_title}, Ziel "
+                    f"{s.trip_required_soc}% bis "
+                    f"{s.trip_start.strftime('%d.%m %H:%M') if s.trip_start else '?'}) "
+                    f"— minpv, Plan greift"
+                )
+            elif s.emhass_available and s.wallbox_schedule:
+                if in_wb_block:
+                    raw_target = "minpv"
+                    raw_reason = (
+                        f"EMHASS Plan-Slot {wb_slot.power:.0f}W "
+                        f"(SOC {s.car_soc:.0f}%, Preis {s.price_level})"
+                    )
+                elif s.price_level in UC6_MINPV_PRICE_LEVELS and needs_charge:
+                    raw_target = "minpv"
+                    raw_reason = (
+                        f"kein Plan-Slot, Preis {s.price_level} ok "
+                        f"(SOC {s.car_soc:.0f}% < {SOC_TARGET}%)"
+                    )
                 else:
-                    target_mode = "pv"
-                    reason = (f"EMHASS Wallbox-Plan {s.emhass_p_deferrable1_plan:.0f}W "
-                              f"→ pv (SOC {s.car_soc:.0f}%)")
+                    raw_target = "pv"
+                    raw_reason = (
+                        f"kein Plan-Slot, Preis {s.price_level} "
+                        f"({'SOC voll' if not needs_charge else 'expensive ohne Plan'})"
+                    )
             else:
-                # Fallback Heuristik (alte Logik)
+                # Fallback Heuristik (kein EMHASS / Plan leer)
                 in_cheapest_4h = bool(
                     s.cheapest_4h_start
-                    and is_in_window(now, s.cheapest_4h_start, s.cheapest_4h_end)
+                    and is_in_window(
+                        now, s.cheapest_4h_start, s.cheapest_4h_end,
+                    )
                 )
-                if needs_charge and in_cheapest_4h:
-                    target_mode = "now"
-                    reason = (f"Heuristik: günstigste 4h "
-                              f"{s.cheapest_4h_start.strftime('%H:%M')}–{s.cheapest_4h_end.strftime('%H:%M')} "
-                              f"@ {s.cheapest_4h_avg * 100:.1f}ct (SOC {s.car_soc:.0f}%<{SOC_TARGET}%)")
-                elif not s.forecast_slots and s.price_level in CHEAP_LEVELS:
-                    target_mode = "minpv"
-                    reason = f"Heuristik: reaktiv günstig ({s.price_level}, kein Forecast)"
+                if needs_charge and (
+                    in_cheapest_4h or s.price_level in UC6_MINPV_PRICE_LEVELS
+                ):
+                    raw_target = "minpv"
+                    raw_reason = (
+                        f"Heuristik: günstig ({s.price_level}"
+                        + (", cheapest_4h" if in_cheapest_4h else "")
+                        + f", SOC {s.car_soc:.0f}%)"
+                    )
                 else:
-                    target_mode = "pv"
-                    if not needs_charge:
-                        reason = f"Heuristik: SOC {s.car_soc:.0f}% ≥ {SOC_TARGET}%"
-                    elif s.cheapest_4h_start:
-                        reason = (f"Heuristik: warte auf günstigste 4h "
-                                  f"{s.cheapest_4h_start.strftime('%H:%M')}")
-                    else:
-                        reason = "Heuristik: Standard pv"
+                    raw_target = "pv"
+                    raw_reason = (
+                        f"Heuristik: SOC {s.car_soc:.0f}%, "
+                        f"Preis {s.price_level} → pv default"
+                    )
+
+            # Downshift-Confirmation: minpv→pv, now→minpv, now→pv brauchen
+            # UC6_DOWNSHIFT_CONFIRMATION_CYCLES Cycles in Folge, damit kurze
+            # EMHASS-Replan-Dips (0W mid-Slot) keinen Mode-Wechsel auslösen.
+            mode_rank = {"now": 3, "minpv": 2, "pv": 1, "off": 0}
+            current_rank = mode_rank.get(s.evcc_mode, 1)
+            target_rank = mode_rank.get(raw_target, 1)
+            if target_rank < current_rank:
+                # Downshift → counter hochzählen, erst bei N Cycles freigeben
+                self._uc6_downshift_count += 1
+                if self._uc6_downshift_count < UC6_DOWNSHIFT_CONFIRMATION_CYCLES:
+                    target_mode = s.evcc_mode
+                    reason = (
+                        f"{raw_reason} — Downshift bestätigen "
+                        f"({self._uc6_downshift_count}/"
+                        f"{UC6_DOWNSHIFT_CONFIRMATION_CYCLES})"
+                    )
+                else:
+                    target_mode = raw_target
+                    reason = (
+                        f"{raw_reason} — Downshift nach "
+                        f"{self._uc6_downshift_count} Cycles bestätigt"
+                    )
+                    self._uc6_downshift_count = 0
+            else:
+                # Upshift oder same → Counter resetten, sofort übernehmen
+                self._uc6_downshift_count = 0
+                target_mode = raw_target
+                reason = raw_reason
 
             s.evcc_target = target_mode
             s.evcc_reason = reason

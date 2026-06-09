@@ -66,7 +66,16 @@ EMHASS_BATT_DISCHARGE_MIN_W = 100   # > 100W = "darf entladen", sonst sperren
 EMHASS_DEFERRABLE_ON_MIN_W  = 500   # > 500W = "Heizstab/Wallbox sollte laufen"
 
 # UC6 Hysterese: nach Mode-Switch mindestens N Minuten halten — verhindert 5-min-Oszillation
-UC6_MODE_HOLD_MINUTES = 15
+UC6_MODE_HOLD_MINUTES = 10  # v0.17.1: gesenkt von 15 — Confirmation übernimmt Anti-Jitter
+
+# UC6 3-Level-Mode (v0.17.1) — 3-phasig fest + 5.2 kWp PV:
+# pv-Mode lädt selten autonom (Min 4.14 kW Überschuss nötig), Default ist deshalb
+# minpv für "günstig laden auch ohne Vollüberschuss", now nur bei echtem Notfall.
+UC6_NOW_SOC_THRESHOLD_PCT     = 50     # SOC < X% + Trip-Termin → now
+UC6_NOW_TRIP_URGENT_HOURS     = 12     # Trip in < X h → now
+UC6_MINPV_PRICE_LEVELS        = ("very_cheap", "cheap", "normal")
+# Downshift (Richtung "weniger laden") braucht Confirmation gegen Replan-Jitter
+UC6_DOWNSHIFT_CONFIRMATION_CYCLES = 2  # 2 Cycles in Folge "kein Bedarf mehr"
 
 # UC4b Plan-aware Execution (v0.16.0) — Wattson liest EMHASS-Plan vorausschauend
 # statt Live-Werte reaktiv zu folgen. Anti-Replan-Jitter durch Confirmation-Cycles.
