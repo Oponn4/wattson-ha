@@ -1,6 +1,6 @@
 # Use Cases
 
-Stand: v0.17.1 (2026-06-10). Alle live außer UC9 (Hardware-blocked).
+Stand: v0.17.2 (2026-06-10). Alle live außer UC9 (Hardware-blocked).
 
 | UC | Was | Seit |
 |---|---|---|
@@ -81,14 +81,21 @@ Max 1 Notify/h pro Raum, nicht 22–7 Uhr.
 
 ## UC12 — Proxon-Kühlung
 
-Adaptive Schwellen aus `weather.forecast_home` Tages-Max:
+Adaptive Schwellen, drei Korrektur-Ebenen (A: v0.17.0, B+C: v0.17.2):
 
 ```
-delta   = 0.15 × (outside_max − 20)
-trigger = clamp(24.0 + delta, 23.5, 25.0)
-heat    = clamp(25.5 + delta, 25.5, 27.0)
-off     = trigger − 1.0 (Hysterese)
+A  delta   = 0.15 × (outside_max − 20)        # weather.forecast_home Tages-Max
+   trigger = clamp(24.0 + delta, 23.5, 25.0)
+   heat    = clamp(25.5 + delta, 25.5, 27.0)
+B  RH-Proxy ≥ 60% (TP357 Wohnzimmer)  → trigger −0.5   # schwül fühlt sich wärmer an
+C  Abluft-Trend ≥ +0.3°C/h            → heat −0.5      # Hitze kommt, früher forcen
+   heat    = max(heat, trigger + 0.5)                   # Heat nie unter Trigger
+   off     = trigger − 1.0 (Hysterese)
 ```
+
+Trend-Quelle: in-memory Sample-Buffer der Abluft (60-min-Fenster, gültig ab
+20 min Spanne — nach HA-Restart kurz kein Trend). Aktive Korrekturen erscheinen
+im `begruendung`-Attribut von `sensor.wattson_kuhlung`.
 
 Entscheidung in vier Stufen:
 1. Abluft ≥ heat → **kühlen, immer** (auch Sleep + expensive) + Push

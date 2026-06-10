@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from collections import deque
 from datetime import datetime, timedelta
 
 from homeassistant.core import HomeAssistant
@@ -72,8 +73,12 @@ from .const import (
     COOL_ABLUFT_TRIGGER_C,
     COOL_HEAT_MAX_C,
     COOL_HEAT_MIN_C,
+    COOL_HUMIDEX_RH_PCT,
+    COOL_HUMIDEX_TRIGGER_DELTA,
     COOL_OUTSIDE_REF_C,
     COOL_OUTSIDE_SLOPE,
+    COOL_TREND_HEAT_DELTA,
+    COOL_TREND_RISE_C_PER_H,
     COOL_TRIGGER_MAX_C,
     COOL_TRIGGER_MIN_C,
     EMHASS_BATT_DISCHARGE_MIN_W,
@@ -110,6 +115,8 @@ from .const import (
     T300_TEMP_MIN,
     T300_TEMP_NORMAL,
     T300_TEMP_TEUER,
+    TREND_MIN_SPAN_MINUTES,
+    TREND_WINDOW_MINUTES,
     UC4B_CONFIRMATION_CYCLES,
     UC4B_REMINDER_COOLDOWN_MIN,
     UC6_DOWNSHIFT_CONFIRMATION_CYCLES,
@@ -233,6 +240,8 @@ class WattsonData:
     # UC12 — Kühlung
     cooling_active: bool = False    # ob UC12 die Freigabe gerade gegeben hat
     abluft_temp: float = 0.0
+    abluft_trend_c_per_h: float | None = None  # v0.17.2 Trend-Tracker (None = zu wenig Samples)
+    humidity_proxy_pct: float = 50.0           # TP357 Wohnzimmer RH (Proxy, v0.17.2 UC12 B)
     cool_enable_on: bool = False    # tatsächlicher Switch-Status
     cool_snooze_until: datetime | None = None  # Reminder-Snooze (aus Helper)
 
@@ -301,6 +310,9 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         self._uc12_last_reminder_utc: datetime | None = None
         # UC12-Heat-Notify: Notify-Cooldown (Auto-Pfad, Force-Hitze v0.17)
         self._uc12_last_heat_notify_utc: datetime | None = None
+        # v0.17.2 Trend-Tracker: Abluft-Samples (ts, °C) der letzten Stunde.
+        # In-Memory — nach Restart liefert der Trend None bis genug Spanne da ist.
+        self._abluft_samples: deque[tuple[datetime, float]] = deque(maxlen=24)
         # UC4b plan-aware: Anti-Jitter-Counter + Safety-Reminder-Cooldown
         self._uc4b_off_signal_count: int = 0
         # UC6 plan-aware: Downshift-Confirmation-Counter (v0.17.1)
@@ -491,6 +503,8 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         s.sleep_mode           = self._state(ENTITY_SLEEP) == "on"
         s.low_soc_notified     = self._prev.low_soc_notified
         s.abluft_temp          = self._fval(ENTITY_PROXON_ABLUFT, 22.0)
+        s.abluft_trend_c_per_h = self._track_abluft_trend(s.abluft_temp)
+        s.humidity_proxy_pct   = self._fval(ENTITY_HUMIDITY_PROXY, 50.0)
         s.cool_enable_on       = self._state(ENTITY_PROXON_COOL_ENABLE) == "on"
         snooze_ts = self._attr(ENTITY_COOL_SNOOZE, "timestamp", None)
         try:
@@ -1301,12 +1315,37 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             except Exception as ex:
                 _LOGGER.warning("UC11 notify fehlgeschlagen: %s", ex)
 
-    def _compute_cool_thresholds(self, s: WattsonData) -> tuple[float, float]:
-        """v0.17: Trigger- und Heat-Schwelle aus Außen-Forecast skalieren.
+    def _track_abluft_trend(self, abluft_c: float) -> float | None:
+        """v0.17.2 Trend-Tracker: Abluft-Steigung in °C/h über das letzte Fenster.
 
-        Heißer Tag draußen → Körper akzeptiert mehr drinnen, Schwellen rutschen
-        hoch (Komfort-Adaption nach EN 16798-1, vereinfacht). Kühler Tag drinnen
-        bei warmer Außenwerten → Schwellen sinken, früher Eingriff.
+        Sample-Buffer ist in-memory — nach HA-Restart gibt es erst wieder einen
+        Trend, wenn TREND_MIN_SPAN_MINUTES an Spanne zusammengekommen ist.
+        """
+        now = dt_util.utcnow()
+        self._abluft_samples.append((now, abluft_c))
+        cutoff = now - timedelta(minutes=TREND_WINDOW_MINUTES)
+        while self._abluft_samples and self._abluft_samples[0][0] < cutoff:
+            self._abluft_samples.popleft()
+        first_ts, first_val = self._abluft_samples[0]
+        span_h = (now - first_ts).total_seconds() / 3600
+        if span_h * 60 < TREND_MIN_SPAN_MINUTES:
+            return None
+        return (abluft_c - first_val) / span_h
+
+    def _compute_cool_thresholds(
+        self, s: WattsonData
+    ) -> tuple[float, float, list[str]]:
+        """Trigger- und Heat-Schwelle dynamisch berechnen.
+
+        A (v0.17): Skalierung mit Außen-Forecast — heißer Tag draußen → Körper
+        akzeptiert mehr drinnen, Schwellen rutschen hoch (Komfort-Adaption nach
+        EN 16798-1, vereinfacht).
+        B (v0.17.2): Schwüle — RH-Proxy ≥ COOL_HUMIDEX_RH_PCT → Trigger sinkt,
+        weil sich dieselbe Abluft wärmer anfühlt.
+        C (v0.17.2): Trend — Abluft steigt ≥ COOL_TREND_RISE_C_PER_H → Heat
+        sinkt, Force-Kühlung greift früher bevor es wirklich heiß ist.
+
+        Returns (trigger, heat, korrektur-notizen für reason-Strings).
         """
         outside = float(s.forecast_max_temp_c or COOL_OUTSIDE_REF_C)
         delta = COOL_OUTSIDE_SLOPE * (outside - COOL_OUTSIDE_REF_C)
@@ -1318,7 +1357,22 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             COOL_HEAT_MIN_C,
             min(COOL_HEAT_MAX_C, COOL_ABLUFT_HEAT_C + delta),
         )
-        return trigger, heat
+        notes: list[str] = []
+        if s.humidity_proxy_pct >= COOL_HUMIDEX_RH_PCT:
+            trigger += COOL_HUMIDEX_TRIGGER_DELTA
+            notes.append(
+                f"schwül {s.humidity_proxy_pct:.0f}%RH → "
+                f"Trigger {COOL_HUMIDEX_TRIGGER_DELTA:+.1f}"
+            )
+        trend = s.abluft_trend_c_per_h
+        if trend is not None and trend >= COOL_TREND_RISE_C_PER_H:
+            heat += COOL_TREND_HEAT_DELTA
+            notes.append(
+                f"Trend +{trend:.1f}°C/h → Heat {COOL_TREND_HEAT_DELTA:+.1f}"
+            )
+        # Heat darf nie auf/unter Trigger fallen — sonst force-kühlt UC12 dauernd
+        heat = max(heat, trigger + 0.5)
+        return trigger, heat, notes
 
     async def _handle_uc12_cooling(
         self, s: WattsonData, now: datetime, actions: list[str]
@@ -1343,14 +1397,16 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             await self._uc12_send_reminder(s, now, actions)
             return
 
-        # v0.17: Adaptive Schwellen aus Outdoor-Forecast (A-Variante)
-        trigger_c, heat_c = self._compute_cool_thresholds(s)
+        # Adaptive Schwellen: A Outdoor-Forecast (v0.17), B Schwüle + C Trend (v0.17.2)
+        trigger_c, heat_c, korrekturen = self._compute_cool_thresholds(s)
         off_c = trigger_c - COOL_ABLUFT_HYSTERESE_C
         expensive = s.price_level in UC12_EXPENSIVE_LEVELS
         hitze = s.abluft_temp >= heat_c
         scale_info = (
             f"Trigger {trigger_c:.1f}°C / Heat {heat_c:.1f}°C "
-            f"(Außen-Forecast max {s.forecast_max_temp_c:.1f}°C)"
+            f"(Außen-Forecast max {s.forecast_max_temp_c:.1f}°C"
+            + (", " + ", ".join(korrekturen) if korrekturen else "")
+            + ")"
         )
 
         # Entscheidung berechnen

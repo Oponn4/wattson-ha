@@ -1,6 +1,6 @@
 # Roadmap
 
-Stand: 2026-06-10, v0.17.1.
+Stand: 2026-06-10, v0.17.2.
 
 ## Plan-Reife pro UC
 
@@ -11,18 +11,11 @@ vorausgeplant statt reaktiv.
 |---|---|---|
 | UC2, UC4b, UC6, UC10, UC14 | ✅ vorausgeplant | — |
 | UC4a | ⚠️ Forecast-Heuristik | nicht EMHASS-integriert |
-| UC12 | ⚠️ forecast-skalierte Schwellen | Einschalten zustandsgetrieben, kein geplantes Pre-Cooling |
+| UC12 | ⚠️ forecast-/schwüle-/trend-skalierte Schwellen | Einschalten zustandsgetrieben, kein geplantes Pre-Cooling |
 | UC11 | ⚠️ bewusst reaktiv (Advisor) | Smart-UC11 fehlt |
 | UC1 | ✅ reaktiv gewollt | Sicherheitsnetz |
 
 ## Geplante Versionen
-
-### v0.17.2 — Trend-Tracker + UC12 B/C *(vorgeschlagen, nicht freigegeben)*
-
-Keine Hardware-Abhängigkeit:
-- **Trend-Tracker** im Coordinator (~30 Zeilen): ΔTemp/h aus History
-- **UC12 B — Humidex-Korrektur**: RH > 60% (TP357 Wohnzimmer) → trigger −0.5°C
-- **UC12 C — Trend-Korrektur**: Anstieg > 0.3°C/h → heat −0.5°C
 
 ### v0.17.x — UC4a → EMHASS *(Kandidat, neu identifiziert 2026-06-10)*
 
@@ -83,3 +76,4 @@ User-Aufgabe: HT-Sensoren reparieren oder TP357 für Office + Schlafzimmer.
 | v0.16.0 | **UC4b plan-aware** + Safety-Reminder + Override-Unavailable-Guard |
 | v0.17.0 | **UC12 adaptive Schwellen** + Force-Hitze |
 | v0.17.1 | **UC6 plan-aware 3-Level-Mode** + Downshift-Confirmation |
+| v0.17.2 | **Trend-Tracker + UC12 B (Schwüle) + C (Trend)** |

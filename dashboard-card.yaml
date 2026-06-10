@@ -1,0 +1,241 @@
+# Wattson + EMHASS Dashboard Card
+# Einfügen via Dashboard → Edit → "+ ADD CARD" → "Manual" → diesen YAML
+
+type: vertical-stack
+title: ⚡ Wattson + EMHASS
+cards:
+  # ── Header: Status-Chips ─────────────────────────────────────────────
+  - type: custom:mushroom-chips-card
+    alignment: justify
+    chips:
+      - type: entity
+        entity: sensor.wattson_status
+        icon: mdi:lightning-bolt
+        icon_color: amber
+        content_info: state
+      - type: entity
+        entity: switch.wattson_dry_run
+        icon: mdi:test-tube
+        content_info: state
+        tap_action:
+          action: toggle
+      - type: entity
+        entity: sensor.optim_status
+        icon: mdi:brain
+        icon_color: |-
+          {% if states('sensor.optim_status') == 'Optimal' %}green{% else %}orange{% endif %}
+        content_info: state
+      - type: entity
+        entity: input_boolean.wattson_urlaub_modus
+        icon: mdi:airplane-takeoff
+        tap_action:
+          action: toggle
+      - type: entity
+        entity: input_boolean.sleepmode_helper
+        icon: mdi:bed
+        tap_action:
+          action: toggle
+
+  # ── Last Action Banner ────────────────────────────────────────────────
+  - type: custom:mushroom-template-card
+    primary: 'Letzte Aktion'
+    secondary: '{{ states("sensor.wattson_letzte_aktion") }}'
+    icon: mdi:history
+    icon_color: blue
+
+  # ── Chart 1: Battery SOC 24h-Plan (EMHASS) ────────────────────────────
+  - type: custom:apexcharts-card
+    header:
+      show: true
+      title: '🔋 Batterie 24h-Plan (EMHASS) vs IST'
+      show_states: true
+    graph_span: 24h
+    span:
+      start: hour
+    apex_config:
+      legend:
+        show: true
+      stroke:
+        width: [3, 2]
+        curve: smooth
+    series:
+      - entity: sensor.soc_batt_forecast
+        name: 'EMHASS-Plan'
+        color: '#03a9f4'
+        type: line
+        stroke_width: 3
+        data_generator: |
+          return entity.attributes.battery_scheduled_soc.map((p) => {
+            return [new Date(p.date).getTime(), parseFloat(p.soc_batt_forecast)];
+          });
+      - entity: sensor.e3dc_batterie_soc_in_prozent
+        name: 'IST (E3DC)'
+        color: '#4caf50'
+        type: line
+        stroke_width: 2
+        statistics:
+          type: mean
+          period: hour
+
+  # ── Chart 2: Tibber-Preise heute ──────────────────────────────────────
+  - type: custom:apexcharts-card
+    header:
+      show: true
+      title: '💰 Tibber-Preise + EMHASS-Plan'
+      show_states: false
+    graph_span: 24h
+    span:
+      start: hour
+    apex_config:
+      legend:
+        show: true
+      yaxis:
+        - title:
+            text: 'ct/kWh'
+          decimals: 1
+        - opposite: true
+          title:
+            text: 'Watt'
+          decimals: 0
+    series:
+      - entity: sensor.electricity_price_haus
+        name: 'Tibber-Preis'
+        color: '#ff5722'
+        type: column
+        transform: 'return x * 100;'
+        stroke_width: 0
+      - entity: sensor.p_deferrable0
+        name: 'Heizstab Plan'
+        color: '#e91e63'
+        type: line
+        yaxis_id: '1'
+        stroke_width: 2
+      - entity: sensor.p_batt_forecast
+        name: 'Batterie Plan'
+        color: '#03a9f4'
+        type: line
+        yaxis_id: '1'
+        stroke_width: 2
+
+  # ── UC-Status Grid ────────────────────────────────────────────────────
+  - type: custom:mushroom-title-card
+    title: Use Cases
+    subtitle: Wattson Status pro UC
+
+  - type: grid
+    columns: 2
+    square: false
+    cards:
+      - type: custom:mushroom-entity-card
+        entity: sensor.wattson_warmwasser_soll
+        name: UC4a — Warmwasser Soll
+        secondary_info: state
+        icon: mdi:thermometer
+      - type: custom:mushroom-entity-card
+        entity: sensor.wattson_warmwasser_heizstab
+        name: UC4b — Heizstab
+        secondary_info: state
+        icon: mdi:fire
+      - type: custom:mushroom-entity-card
+        entity: sensor.wattson_eauto_modus
+        name: UC6 — E-Auto Modus
+        secondary_info: state
+        icon: mdi:car-electric
+      - type: custom:mushroom-entity-card
+        entity: sensor.wattson_eauto_fahrplan
+        name: UC2 — E-Auto Fahrplan
+        secondary_info: state
+        icon: mdi:calendar-clock
+      - type: custom:mushroom-entity-card
+        entity: sensor.wattson_batterie_schoner
+        name: UC10 — Batterie Schoner
+        secondary_info: state
+        icon: mdi:battery-arrow-down
+      - type: custom:mushroom-entity-card
+        entity: sensor.wattson_kuhlung
+        name: UC12 — Proxon Kühlung
+        secondary_info: state
+        icon: mdi:snowflake
+      - type: custom:mushroom-entity-card
+        entity: sensor.wattson_klimaanlagen_og
+        name: UC11 — Klima OG
+        secondary_info: state
+        icon: mdi:air-conditioner
+
+  # ── Nächste Fahrt + Tibber Windows ────────────────────────────────────
+  - type: entities
+    title: Forecast-Details
+    show_header_toggle: false
+    entities:
+      - entity: sensor.wattson_naechste_fahrt
+        name: Nächste Fahrt
+        icon: mdi:map-marker-path
+      - entity: sensor.wattson_warmwasser_ziel
+        name: T300 Zieltemperatur
+      - entity: sensor.wattson_eauto_ziel
+        name: E-Auto Zielmodus
+      - entity: sensor.wattson_gunstigste_2h
+        name: Günstigste 2h
+        icon: mdi:cash-clock
+      - entity: sensor.wattson_gunstigste_4h
+        name: Günstigste 4h
+        icon: mdi:cash-clock
+      - entity: sensor.wattson_teuerste_2h
+        name: Teuerste 2h
+        icon: mdi:cash-remove
+
+  # ── Resume Buttons ────────────────────────────────────────────────────
+  - type: custom:mushroom-title-card
+    title: Manual Resume Override-Cooldowns
+  - type: grid
+    columns: 2
+    square: false
+    cards:
+      - type: button
+        entity: button.wattson_zyklus_ausfuhren
+        name: 🔄 Cycle now
+        tap_action:
+          action: call-service
+          service: button.press
+          target:
+            entity_id: button.wattson_zyklus_ausfuhren
+      - type: button
+        entity: button.wattson_batterie_schoner
+        name: ▶ Batterie Schoner
+        tap_action:
+          action: call-service
+          service: button.press
+          target:
+            entity_id: button.wattson_batterie_schoner
+      - type: button
+        entity: button.wattson_warmwasser_heizstab
+        name: ▶ Heizstab
+        tap_action:
+          action: call-service
+          service: button.press
+          target:
+            entity_id: button.wattson_warmwasser_heizstab
+      - type: button
+        entity: button.wattson_eauto_modus
+        name: ▶ evcc Modus
+        tap_action:
+          action: call-service
+          service: button.press
+          target:
+            entity_id: button.wattson_eauto_modus
+      - type: button
+        entity: button.wattson_kuhlung
+        name: ▶ Kühlung
+        tap_action:
+          action: call-service
+          service: button.press
+          target:
+            entity_id: button.wattson_kuhlung
+      - type: button
+        entity: button.wattson_klimaanlagen_og
+        name: ▶ Klima OG
+        tap_action:
+          action: call-service
+          service: button.press
+          target:
+            entity_id: button.wattson_klimaanlagen_og

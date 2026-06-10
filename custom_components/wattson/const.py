@@ -209,6 +209,18 @@ COOL_HEAT_MAX_C            = 27.0
 PV_COOLING_MIN_W           = 1500   # W — ab diesem PV-Überschuss darf gekühlt werden
 SMART_SPREAD_THRESHOLD_EUR = 0.15   # spread >= 15ct → UC10 gewinnt vs UC12, sonst Komfort wichtiger
 
+# UC12 v0.17.2 — B: Humidex-Korrektur (Schwüle), C: Trend-Korrektur.
+# Beide korrigieren die v0.17-Schwellen nach unten: bei Schwüle fühlt sich
+# dieselbe Abluft wärmer an (Trigger früher), bei steigendem Trend kommt die
+# Hitze ohnehin (Heat/Force früher). RH-Quelle: TP357 Wohnzimmer als Proxy
+# (ENTITY_HUMIDITY_PROXY) bis pro-Raum-RH-Sensoren da sind.
+COOL_HUMIDEX_RH_PCT        = 60.0   # % RH ab der "schwül" gilt
+COOL_HUMIDEX_TRIGGER_DELTA = -0.5   # °C auf Trigger bei Schwüle
+COOL_TREND_RISE_C_PER_H    = 0.3    # °C/h Abluft-Anstieg ab dem Heat sinkt
+COOL_TREND_HEAT_DELTA      = -0.5   # °C auf Heat bei steigendem Trend
+TREND_WINDOW_MINUTES       = 60     # Fenster für Trend-Berechnung
+TREND_MIN_SPAN_MINUTES     = 20     # Mindest-Datenspanne bevor Trend gilt
+
 # UC12 Kühl-Reminder (während User-Override): erinnert ans Ausschalten wenn
 # kühl genug ODER Preis-Level ≥ expensive. Wattson schaltet NIE selbst — nur Notify.
 UC12_REMINDER_COOLDOWN_MIN    = 60   # max 1 Reminder/h
