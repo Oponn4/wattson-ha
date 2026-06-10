@@ -1,0 +1,110 @@
+# Use Cases
+
+Stand: v0.17.1 (2026-06-10). Alle live außer UC9 (Hardware-blocked).
+
+| UC | Was | Seit |
+|---|---|---|
+| [UC1](#uc1--soc-warnung) | SOC-Warnung <20% | früh |
+| [UC2](#uc2--kalender-vorladen) | Kalender-Trip → required SOC → evcc-Plan | v0.11 |
+| [UC4a](#uc4a--t300-solltemperatur) | T300-Soll nach Tibber-Fenster | früh |
+| [UC4b](#uc4b--e-heizstab-plan-aware) | Heizstab plan-aware (EMHASS deferrable0) | v0.16.0 |
+| [UC6](#uc6--e-auto-lademodus-3-level) | E-Auto 3-Level pv/minpv/now (EMHASS deferrable1) | v0.17.1 |
+| [UC9](#uc9--1p3p-umschaltung) | 1P/3P-Umschaltung | ⛔ blocked |
+| [UC10](#uc10--e3dc-discharge-steuerung) | E3DC maxDischargePower = EMHASS p_batt | v0.12/0.13 |
+| [UC11](#uc11--klima-og-advisor) | Klima OG Advisor (Notify statt Aktion) | v0.14.1 |
+| [UC12](#uc12--proxon-kühlung) | Proxon-Kühlung, adaptive Schwellen | v0.17.0 |
+| [UC14](#uc14--netzladen) | E3DC-Netzladen bei großem Spread | v0.14.0 |
+
+## UC1 — SOC-Warnung
+
+Push bei Auto-SOC < 20%. Bewusst reaktiv (Sicherheitsnetz).
+
+## UC2 — Kalender-Vorladen
+
+Nächstes relevantes Event aus `calendar.amazone` (Location vorhanden, kein
+Teams/Patchday) → Google Distance Matrix (gecacht, 7 Tage TTL) →
+`required_soc = (km × 2) × Verbrauch / 63 kWh + 25% Marge` →
+`evcc_intg.set_vehicle_plan` (startdate = Event − 30 min, evcc plant die
+günstigsten Stunden selbst). Sensor: `sensor.wattson_naechste_fahrt`.
+Erbt UC6-Override: hat der User den Mode manuell gesetzt, greift UC2 nicht ein.
+
+## UC4a — T300-Solltemperatur
+
+Günstigste 2h-Phase der nächsten 12h: jetzt günstig → 55°C, teuer → 45°C,
+sonst 52°C. **Noch nicht EMHASS-integriert** (siehe roadmap.md).
+
+## UC4b — E-Heizstab plan-aware
+
+Liest EMHASS-Forward-Plan (`deferrables_schedule`, deferrable0, Slots ≥ 500W).
+Off nur nach 2-Cycle-Confirmation (`UC4B_CONFIRMATION_CYCLES`). Tank-Safety
+bleibt. Fallback ohne EMHASS: PV-Surplus-Heuristik mit eigener Hysterese.
+
+**Safety-Reminder:** Heizstab an + `price_level ∈ {expensive, very_expensive}`
+→ Push mit [Aus]/[Ignorieren], 60min-Cooldown, Quiet-Hours-Suppress.
+Action-Automation: `automation.wattson_heizstab_safety_action`.
+
+## UC6 — E-Auto-Lademodus (3-Level)
+
+| Mode | Bedingung |
+|---|---|
+| `now` | SOC < 50% **und** (Trip < 12h **oder** EMHASS-Plan-Slot ≥ 500W), oder Trip-Plan mit Required-SOC nicht erreicht + Trip < 12h |
+| `minpv` | Trip-Plan aktiv (Plan greifen lassen), oder im EMHASS-Plan-Slot, oder `price_level ∈ {very_cheap, cheap, normal}` + SOC < Target |
+| `pv` | Default — SOC voll oder expensive ohne Plan |
+
+Plan-aware via `deferrables_schedule` (deferrable1). Anti-Jitter:
+`mode_rank = {now:3, minpv:2, pv:1, off:0}` — Upshift sofort, Downshift erst
+nach 2 Cycles Confirmation. `UC6_MODE_HOLD_MINUTES = 10`.
+Design-Präferenz: lieber länger `minpv` als pv↔now-Pendeln.
+
+## UC9 — 1P/3P-Umschaltung
+
+Shelly-Lasttrenner soll L2+L3 abklemmen für 1P-PV-Laden (5.2 kWp liefert nie
+4.14 kW 3P-Floor). **Blocked:** 4mm-Kabel + Shelly Pro 3EM nicht verkabelt.
+
+## UC10 — E3DC Discharge-Steuerung
+
+`maxDischargePower` = EMHASS `p_batt_forecast` (clamp 0–1500W; < Threshold → 0W
+Sperre) via `e3dc.set_power_limits`. Fallback-Heuristik: binäres Lock über
+cheapest/expensive-4h-Fenster. Pausiert wenn UC14 aktiv (kein Doppel-POST).
+
+## UC11 — Klima OG Advisor
+
+Kein `set_hvac_mode` — stattdessen mobile-app Notify mit Action-Buttons
+(„Office AN" / „Schlaf AN" / „30min Lüften" / „Ignorieren").
+Trigger: `humidex_inside ≥ 26 ∧ Δinnen-außen ≥ +2°C` oder `humidex ≥ 28`.
+Max 1 Notify/h pro Raum, nicht 22–7 Uhr.
+- v0.15.1: Fenster-auf-Empfehlung statt Klima bei Δ-Humidex ≥ 3
+- v0.15.2: Notify unterdrückt wenn Proxon-Kühlung (UC12) bereits läuft
+- v2: Personen-basierter Eco-Mode + Long-Away-Detection
+
+`switch.wattson_klimaanlagen_og` = Auto-Mode-Toggle (Auto erst mit Smart-UC11).
+
+## UC12 — Proxon-Kühlung
+
+Adaptive Schwellen aus `weather.forecast_home` Tages-Max:
+
+```
+delta   = 0.15 × (outside_max − 20)
+trigger = clamp(24.0 + delta, 23.5, 25.0)
+heat    = clamp(25.5 + delta, 25.5, 27.0)
+off     = trigger − 1.0 (Hysterese)
+```
+
+Entscheidung in vier Stufen:
+1. Abluft ≥ heat → **kühlen, immer** (auch Sleep + expensive) + Push
+   (`_uc12_send_heat_notify`, 60min-Cooldown)
+2. Sleep-Mode ohne Hitze → aus
+3. Abluft ≤ off → aus
+4. dazwischen: PV ≥ 1500W → an; cheapest_4h + Spread < 15ct → an; Hysterese
+   hält an, **bricht aber bei expensive ohne PV**; sonst aus
+
+Zusätzlich Kühl-Reminder bei manuellem Override in teurem Fenster (v0.15.0).
+
+## UC14 — Netzladen
+
+Alle Bedingungen nötig: EMHASS `p_batt < 0` ∧ Spread ≥ 11 ct/kWh zum teuersten
+Slot 24h ∧ Fensterlänge ≥ dynamisch nach freiem Akku-Platz ∧ SOC < 90%.
+Aktion: `set_power_limits(charge=1500, discharge=0)`. Ende: charge zurück auf
+Default, discharge bleibt 0 — UC10 übernimmt im selben Cycle. POST-Verify im
+Folge-Cycle (E3DC-Self-Reset-Problematik).
+Why 11 ct: ~15% Round-Trip-Verlust + Marge, EEG-Vergütung als Opportunity-Cost.

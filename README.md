@@ -25,15 +25,25 @@ Wärmepumpe basierend auf Tibber-Forecast koordiniert.
 
 ## Was Wattson tut
 
-Alle 5 Minuten:
+Alle 5 Minuten: liest Tibber-Preise/-Forecast, EMHASS-Plan, PV, Speicher-SOC,
+T300, Auto-SOC, Kalender — und entscheidet je Use Case **plan-aware** (aus dem
+Forward-Plan, nicht reaktiv auf Momentanwerte). Kurzfassung:
 
-1. Liest Tibber-Preise, PV-Power, Speicher-SOC, T300-Temp, Auto-SOC, evcc-Modus
-2. Ruft `tibber.get_prices` und berechnet die günstigsten/teuersten Fenster
-3. Entscheidet je Use Case:
-   - **UC4a** T300-Solltemperatur: 55°C bei günstigem Tibber, 45°C bei teurem
-   - **UC4b** E-Heizstab: an bei PV-Überschuss > 1.7 kW
-   - **UC6/7** evcc-Modus: `minpv` bei günstigem Strom, sonst `pv`
-   - **UC1** Push bei Auto-SOC < 20%
+- **UC2** Kalender-Trip → Distanz → required SOC → evcc-Ladeplan
+- **UC4a** T300-Solltemperatur nach günstigstem Tibber-Fenster
+- **UC4b** E-Heizstab nach EMHASS-Forward-Plan + Safety-Reminder
+- **UC6** evcc-Modus 3-Level `pv`/`minpv`/`now` nach EMHASS-Plan + Trip
+- **UC10** E3DC-Discharge granular nach EMHASS `p_batt`
+- **UC11** Klima OG: Advisor-Notifications mit Action-Buttons
+- **UC12** Proxon-Kühlung mit forecast-adaptiven Schwellen
+- **UC14** E3DC-Netzladen bei großem Preis-Spread
+- **UC1** Push bei Auto-SOC < 20%
+
+## Dokumentation
+
+- [docs/architektur.md](docs/architektur.md) — Leitprinzip, EMHASS-Hybrid, Patterns, Datenquellen
+- [docs/use-cases.md](docs/use-cases.md) — alle UCs im Detail
+- [docs/roadmap.md](docs/roadmap.md) — Plan-Reife, geplante Versionen, Historie
 
 ## Entities
 
