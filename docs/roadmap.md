@@ -1,6 +1,6 @@
 # Roadmap
 
-Stand: 2026-06-10, v0.17.2.
+Stand: 2026-06-11, v0.17.3.
 
 ## Plan-Reife pro UC
 
@@ -77,3 +77,4 @@ User-Aufgabe: HT-Sensoren reparieren oder TP357 für Office + Schlafzimmer.
 | v0.17.0 | **UC12 adaptive Schwellen** + Force-Hitze |
 | v0.17.1 | **UC6 plan-aware 3-Level-Mode** + Downshift-Confirmation |
 | v0.17.2 | **Trend-Tracker + UC12 B (Schwüle) + C (Trend)** |
+| v0.17.3 | Trend-Buffer-Seed aus Recorder-Historie nach Restart |

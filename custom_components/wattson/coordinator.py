@@ -311,8 +311,9 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         # UC12-Heat-Notify: Notify-Cooldown (Auto-Pfad, Force-Hitze v0.17)
         self._uc12_last_heat_notify_utc: datetime | None = None
         # v0.17.2 Trend-Tracker: Abluft-Samples (ts, °C) der letzten Stunde.
-        # In-Memory — nach Restart liefert der Trend None bis genug Spanne da ist.
+        # v0.17.3: wird nach Restart einmalig aus der Recorder-Historie geseedet.
         self._abluft_samples: deque[tuple[datetime, float]] = deque(maxlen=24)
+        self._trend_seeded: bool = False
         # UC4b plan-aware: Anti-Jitter-Counter + Safety-Reminder-Cooldown
         self._uc4b_off_signal_count: int = 0
         # UC6 plan-aware: Downshift-Confirmation-Counter (v0.17.1)
@@ -485,6 +486,9 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
 
     async def _async_update_data(self) -> WattsonData:
         s = WattsonData(dry_run=self._dry_run)
+
+        if not self._trend_seeded:
+            await self._seed_abluft_trend_from_history()
 
         # Zustand lesen
         s.price         = self._fval(ENTITY_PRICE)
@@ -1315,11 +1319,54 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             except Exception as ex:
                 _LOGGER.warning("UC11 notify fehlgeschlagen: %s", ex)
 
+    async def _seed_abluft_trend_from_history(self) -> None:
+        """v0.17.3: Trend-Buffer nach Restart aus der Recorder-Historie befüllen,
+        damit UC12 C nicht erst TREND_MIN_SPAN_MINUTES blind ist."""
+        self._trend_seeded = True
+        try:
+            from homeassistant.components.recorder import get_instance, history
+
+            start = dt_util.utcnow() - timedelta(minutes=TREND_WINDOW_MINUTES)
+            states = await get_instance(self.hass).async_add_executor_job(
+                history.state_changes_during_period,
+                self.hass, start, None, ENTITY_PROXON_ABLUFT,
+            )
+        except Exception as ex:  # Recorder fehlt/Query-Fehler → Buffer füllt live
+            _LOGGER.debug("UC12 Trend-Seed aus Historie nicht möglich: %s", ex)
+            return
+        samples: list[tuple[datetime, float]] = []
+        last_ts: datetime | None = None
+        for st in states.get(ENTITY_PROXON_ABLUFT, []):
+            try:
+                val = float(st.state)
+            except (TypeError, ValueError):
+                continue  # unavailable/unknown
+            ts = st.last_updated
+            # Downsampling aufs Tick-Raster: Modbus aktualisiert deutlich öfter
+            # als 5 min — ungesampelt würde der maxlen-Deque die ältesten
+            # Einträge verdrängen und das Trend-Fenster stauchen
+            if last_ts is not None and (
+                (ts - last_ts).total_seconds() < SCAN_INTERVAL_SECONDS
+            ):
+                continue
+            samples.append((ts, val))
+            last_ts = ts
+        # Platz für das Live-Sample des aktuellen Ticks lassen
+        keep = (self._abluft_samples.maxlen or 24) - 1
+        self._abluft_samples.extend(samples[-keep:])
+        if samples:
+            _LOGGER.info(
+                "UC12 Trend-Buffer aus Historie geseedet: %d Samples "
+                "(%.1f→%.1f°C über %d min)",
+                len(samples), samples[0][1], samples[-1][1],
+                int((samples[-1][0] - samples[0][0]).total_seconds() // 60),
+            )
+
     def _track_abluft_trend(self, abluft_c: float) -> float | None:
         """v0.17.2 Trend-Tracker: Abluft-Steigung in °C/h über das letzte Fenster.
 
-        Sample-Buffer ist in-memory — nach HA-Restart gibt es erst wieder einen
-        Trend, wenn TREND_MIN_SPAN_MINUTES an Spanne zusammengekommen ist.
+        Buffer wird nach Restart aus der Recorder-Historie geseedet (v0.17.3);
+        ohne Recorder gilt weiterhin: Trend erst ab TREND_MIN_SPAN_MINUTES.
         """
         now = dt_util.utcnow()
         self._abluft_samples.append((now, abluft_c))

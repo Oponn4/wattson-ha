@@ -1,6 +1,6 @@
 # Use Cases
 
-Stand: v0.17.2 (2026-06-10). Alle live außer UC9 (Hardware-blocked).
+Stand: v0.17.3 (2026-06-11). Alle live außer UC9 (Hardware-blocked).
 
 | UC | Was | Seit |
 |---|---|---|
@@ -94,8 +94,11 @@ C  Abluft-Trend ≥ +0.3°C/h            → heat −0.5      # Hitze kommt, fr�
 ```
 
 Trend-Quelle: in-memory Sample-Buffer der Abluft (60-min-Fenster, gültig ab
-20 min Spanne — nach HA-Restart kurz kein Trend). Aktive Korrekturen erscheinen
-im `begruendung`-Attribut von `sensor.wattson_kuhlung`.
+20 min Spanne). Nach HA-Restart wird der Buffer einmalig aus der
+Recorder-Historie geseedet (v0.17.3, downgesampelt aufs 5-min-Tick-Raster) —
+der Trend ist damit sofort wieder da; ohne Recorder füllt er sich live.
+Aktive Korrekturen erscheinen im `begruendung`-Attribut von
+`sensor.wattson_kuhlung`.
 
 Entscheidung in vier Stufen:
 1. Abluft ≥ heat → **kühlen, immer** (auch Sleep + expensive) + Push

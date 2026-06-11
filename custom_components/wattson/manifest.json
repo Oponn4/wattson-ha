@@ -4,8 +4,9 @@
   "codeowners": ["@Oponn4"],
   "config_flow": true,
   "dependencies": [],
+  "after_dependencies": ["recorder"],
   "documentation": "https://github.com/Oponn4/wattson-ha",
   "iot_class": "local_polling",
   "requirements": [],
-  "version": "0.17.2"
+  "version": "0.17.3"
 }
