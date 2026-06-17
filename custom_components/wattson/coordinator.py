@@ -124,7 +124,8 @@ from .const import (
     UC6_MODE_HOLD_MINUTES,
     UC6_NOW_SOC_THRESHOLD_PCT,
     UC6_NOW_TRIP_URGENT_HOURS,
-    UC11_AUTO_ACTION,
+    UC11_AUTO_ACTION_OFFICE,
+    UC11_AUTO_ACTION_SCHLAF,
     UC11_NOTIFY_COOLDOWN_MIN,
     UC11_QUIET_END_H,
     UC11_QUIET_START_H,
@@ -142,6 +143,10 @@ from .const import (
     HUMIDEX_UNCOMFORTABLE,
     HUMIDEX_WARM_THRESHOLD,
     ENTITY_HUMIDITY_PROXY,
+    ENTITY_HT_OFFICE_TEMP,
+    ENTITY_HT_OFFICE_HUMIDITY,
+    ENTITY_HT_SCHLAFZIMMER_TEMP,
+    ENTITY_HT_SCHLAFZIMMER_HUMIDITY,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -241,7 +246,11 @@ class WattsonData:
     cooling_active: bool = False    # ob UC12 die Freigabe gerade gegeben hat
     abluft_temp: float = 0.0
     abluft_trend_c_per_h: float | None = None  # v0.17.2 Trend-Tracker (None = zu wenig Samples)
-    humidity_proxy_pct: float = 50.0           # TP357 Wohnzimmer RH (Proxy, v0.17.2 UC12 B)
+    humidity_proxy_pct: float = 50.0           # OG max(HT-Office, HT-Schlaf) oder TP357-Fallback (UC12 B)
+    ht_office_temp: float | None = None        # v0.18: Shelly BLU H&T Office
+    ht_office_rh: float | None = None
+    ht_schlaf_temp: float | None = None        # v0.18: BTHome H&T Schlafzimmer
+    ht_schlaf_rh: float | None = None
     cool_enable_on: bool = False    # tatsächlicher Switch-Status
     cool_snooze_until: datetime | None = None  # Reminder-Snooze (aus Helper)
 
@@ -380,6 +389,15 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         except (TypeError, ValueError):
             return default
 
+    def _fval_or_none(self, entity_id: str) -> float | None:
+        raw = self._state(entity_id)
+        if raw is None:
+            return None
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return None
+
     def _ival(self, entity_id: str, default: int = 0) -> int:
         return int(self._fval(entity_id, default))
 
@@ -508,7 +526,12 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         s.low_soc_notified     = self._prev.low_soc_notified
         s.abluft_temp          = self._fval(ENTITY_PROXON_ABLUFT, 22.0)
         s.abluft_trend_c_per_h = self._track_abluft_trend(s.abluft_temp)
-        s.humidity_proxy_pct   = self._fval(ENTITY_HUMIDITY_PROXY, 50.0)
+        s.ht_office_temp = self._fval_or_none(ENTITY_HT_OFFICE_TEMP)
+        s.ht_office_rh   = self._fval_or_none(ENTITY_HT_OFFICE_HUMIDITY)
+        s.ht_schlaf_temp = self._fval_or_none(ENTITY_HT_SCHLAFZIMMER_TEMP)
+        s.ht_schlaf_rh   = self._fval_or_none(ENTITY_HT_SCHLAFZIMMER_HUMIDITY)
+        og_rhs = [v for v in (s.ht_office_rh, s.ht_schlaf_rh) if v is not None]
+        s.humidity_proxy_pct = max(og_rhs) if og_rhs else self._fval(ENTITY_HUMIDITY_PROXY, 50.0)
         s.cool_enable_on       = self._state(ENTITY_PROXON_COOL_ENABLE) == "on"
         snooze_ts = self._attr(ENTITY_COOL_SNOOZE, "timestamp", None)
         try:
@@ -1123,14 +1146,18 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             entity = ENTITY_KLIMA_OFFICE
             proxon_soll = s.proxon_soll_office
             current_hvac = s.klima_office_hvac
-            inside_temp = s.klima_office_current
             current_target = s.klima_office_target
+            inside_temp = s.ht_office_temp if s.ht_office_temp is not None else s.klima_office_current
+            inside_rh   = s.ht_office_rh   if s.ht_office_rh   is not None else self._fval(ENTITY_HUMIDITY_PROXY, 50.0)
+            auto_action = UC11_AUTO_ACTION_OFFICE
         else:
             entity = ENTITY_KLIMA_SCHLAFZIMMER
             proxon_soll = s.proxon_soll_schlaf
             current_hvac = s.klima_schlaf_hvac
-            inside_temp = s.klima_schlaf_current
             current_target = s.klima_schlaf_target
+            inside_temp = s.ht_schlaf_temp if s.ht_schlaf_temp is not None else s.klima_schlaf_current
+            inside_rh   = s.ht_schlaf_rh   if s.ht_schlaf_rh   is not None else self._fval(ENTITY_HUMIDITY_PROXY, 50.0)
+            auto_action = UC11_AUTO_ACTION_SCHLAF
 
         # Forced-off (Urlaub)
         if forced_off:
@@ -1169,10 +1196,9 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             modifier_parts.append("Tibber-Peak")
         modifier_str = (" + " + " + ".join(modifier_parts)) if modifier_parts else ""
 
-        # Komfort-Check via Humidex (gefühlte Temperatur, RH-Proxy aus Wohnzimmer)
-        rh_proxy = self._fval(ENTITY_HUMIDITY_PROXY, 50.0)
-        inside_hx = humidex(inside_temp, rh_proxy)
-        outside_hx = humidex(s.frischluft_temp, rh_proxy)  # RH-proxy auch außen (provisorisch)
+        # Komfort-Check via Humidex (gefühlte Temperatur, pro-Raum RH ab v0.18)
+        inside_hx = humidex(inside_temp, inside_rh)
+        outside_hx = humidex(s.frischluft_temp, inside_rh)
         delta_hx = inside_hx - outside_hx
 
         # Trigger-Bedingung:
@@ -1186,14 +1212,17 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         if not (too_hot or warm_and_outside_higher):
             return
 
-        # Begründung für State
+        ht_label = "HT" if (
+            (room == "office" and s.ht_office_rh is not None)
+            or (room != "office" and s.ht_schlaf_rh is not None)
+        ) else "proxy"
         reason = (
-            f"{room}: T {inside_temp:.1f}°C/{rh_proxy:.0f}%RH (proxy), "
+            f"{room}: T {inside_temp:.1f}°C/{inside_rh:.0f}%RH ({ht_label}), "
             f"humidex {inside_hx:.1f}°C vs außen {outside_hx:.1f}°C "
             f"({'unbequem' if too_hot else 'warm + Außen kühler'})"
         )
 
-        if UC11_AUTO_ACTION:
+        if auto_action:
             # Autonome Aktion (v0.15+, aktuell deaktiviert)
             target_mode = "cool"
             target_temp = cool_target

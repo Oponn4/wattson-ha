@@ -1,6 +1,6 @@
 # Use Cases
 
-Stand: v0.17.3 (2026-06-11). Alle live außer UC9 (Hardware-blocked).
+Stand: v0.18.0 (2026-06-17). Alle live außer UC9 (Hardware-blocked).
 
 | UC | Was | Seit |
 |---|---|---|
@@ -69,15 +69,23 @@ cheapest/expensive-4h-Fenster. Pausiert wenn UC14 aktiv (kein Doppel-POST).
 
 ## UC11 — Klima OG Advisor
 
-Kein `set_hvac_mode` — stattdessen mobile-app Notify mit Action-Buttons
-(„Office AN" / „Schlaf AN" / „30min Lüften" / „Ignorieren").
-Trigger: `humidex_inside ≥ 26 ∧ Δinnen-außen ≥ +2°C` oder `humidex ≥ 28`.
-Max 1 Notify/h pro Raum, nicht 22–7 Uhr.
+**v0.18 — Smart-UC11:** Pro-Raum Humidex aus Shelly BLU H&T-Sensoren (Office EE37, Schlaf 757E).
+
+| Raum | Modus | Begründung |
+|------|-------|------------|
+| Office | Auto (`set_hvac_mode`) | eigener HT-Sensor, tagsüber kein Schlafrisiko |
+| Schlafzimmer | Advisor (Notify) | Sonja leichter Schläfer → keine autonome Nacht-Aktion |
+
+Trigger: `humidex_innen ≥ 30` (some discomfort) ∧ Δinnen−außen ≥ +3°C
+— **oder** `humidex ≥ 35` (great discomfort, egal Außen). Max 1 Notify/h, nicht 22–7 Uhr.
+
+UC12 B Schwüle: `humidity_proxy_pct` = max(HT-Office, HT-Schlaf) statt TP357 Wohnzimmer.
+
 - v0.15.1: Fenster-auf-Empfehlung statt Klima bei Δ-Humidex ≥ 3
 - v0.15.2: Notify unterdrückt wenn Proxon-Kühlung (UC12) bereits läuft
-- v2: Personen-basierter Eco-Mode + Long-Away-Detection
+- v0.18.0: echte pro-Raum RH + Office Auto-Mode
 
-`switch.wattson_klimaanlagen_og` = Auto-Mode-Toggle (Auto erst mit Smart-UC11).
+`switch.wattson_klimaanlagen_og` = UC11 Enable-Toggle.
 
 ## UC12 — Proxon-Kühlung
 

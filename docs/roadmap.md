@@ -1,6 +1,6 @@
 # Roadmap
 
-Stand: 2026-06-11, v0.17.3.
+Stand: 2026-06-17, v0.18.0.
 
 ## Plan-Reife pro UC
 
@@ -17,33 +17,15 @@ vorausgeplant statt reaktiv.
 
 ## Geplante Versionen
 
-### v0.17.x — UC4a → EMHASS *(Kandidat, neu identifiziert 2026-06-10)*
+### v0.18.x — UC12 D *(Kandidat)*
 
-T300-Solltemperatur als deferrable/thermisches Modell in EMHASS statt eigener
-Tibber-Fenster-Heuristik — analog UC4b-Pattern (Forward-Plan + Confirmation).
+Schlafzimmer-eigene Schwellen (Proxon-Schlafraum-Soll statt OG-Mittel) +
+evtl. Schlafzimmer-Klima Auto-Mode wenn Sonja zustimmt.
 
-### v0.18 — Smart-UC11 *(Task #62, blocked)*
+### v0.19 — UC4a → EMHASS *(Kandidat)*
 
-Auto-Mode für Klima OG. Braucht alle Signale, nicht nur Snapshot-Temp:
-Humidex pro Raum + außen, Trend, 24h-Prognose, Tür/Fenster-Sprünge,
-Kosten/Komfort-Ratio, Koexistenz mit UC12 (Proxon entfeuchtet Zentralluft).
-
-Logik-Skizze:
-```
-if innen_humidex < 24: nichts
-if außen_humidex < innen − 3: notify "Fenster auf"
-if kosten ≤ 0.20 OR pv ≥ 800W: klima freigeben
-if trend > +0.5°C/h AND forecast_peak > 28: pre-cool 1h vorher
-if klima_kosten_pro_h > 0.30 AND comfort_gewinn < 1: stopp
-```
-
-**Blocker — RH-Sensorik (Stand 2026-06-09):**
-- HT-Schlafzimmer unavailable (Batterie?)
-- Klimaanlage Schlafzimmer meldet indoor_humidity = 0.0
-- Office hat keinen RH-Sensor
-- Nur TP357 Wohnzimmer (`sensor.tp357_27f5_humidity`) liefert
-
-User-Aufgabe: HT-Sensoren reparieren oder TP357 für Office + Schlafzimmer.
+T300-Solltemperatur als deferrable in EMHASS — analog UC4b-Pattern
+(Forward-Plan + Confirmation). Schließt die letzte Lücke zum Leitprinzip.
 
 ### Welle 5/6 — UC9 Hardware *(User-blocked)*
 
@@ -78,3 +60,4 @@ User-Aufgabe: HT-Sensoren reparieren oder TP357 für Office + Schlafzimmer.
 | v0.17.1 | **UC6 plan-aware 3-Level-Mode** + Downshift-Confirmation |
 | v0.17.2 | **Trend-Tracker + UC12 B (Schwüle) + C (Trend)** |
 | v0.17.3 | Trend-Buffer-Seed aus Recorder-Historie nach Restart |
+| v0.18.0 | **Smart-UC11**: pro-Raum HT-Sensoren (Shelly BLU H&T), Office Auto-Mode aktiv |

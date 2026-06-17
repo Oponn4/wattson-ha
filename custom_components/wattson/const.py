@@ -232,17 +232,21 @@ CLIMATE_COOL_OFFSET_C      = 2.0   # Klima-Cool-Sollwert = Proxon-Heiz-Soll + di
 CLIMATE_PRECOOL_OFFSET_C   = -2.0  # bei Pre-Cool: zusätzlicher Offset zum Cool-Sollwert
 CLIMATE_PEAK_OFFSET_C      = 1.0   # bei Tibber-Peak: zusätzlicher Offset (höher = sparen)
 
-# UC11 Advisor-Modus (v0.14.1) — siehe project_wattson_uc11_redesign.md
-# True = autonom set_hvac_mode (v0.15+ wenn Smarts da), False = nur Push-Notify
-UC11_AUTO_ACTION           = False
+# UC11 Auto-Aktion (v0.18) — pro Raum; Office hat jetzt echte RH-Sensoren
+# Schlafzimmer: Advisor-Mode (Sonja leichter Schläfer — keine autonome Nacht-Aktion)
+UC11_AUTO_ACTION_OFFICE    = True
+UC11_AUTO_ACTION_SCHLAF    = False
 UC11_NOTIFY_COOLDOWN_MIN   = 60     # max 1 Notify/h pro Raum
 UC11_QUIET_START_H         = 22     # ab 22 Uhr keine Notifies (Schlaf)
 UC11_QUIET_END_H           = 7      # bis 7 Uhr keine Notifies
 HUMIDEX_WARM_THRESHOLD     = 30.0   # ab humidex 30 = "some discomfort" → Notify wenn Spread passt
 HUMIDEX_UNCOMFORTABLE      = 35.0   # ab 35 = "great discomfort", Notify auch ohne Außen-Spread
 HUMIDEX_INSIDE_OUTSIDE_MIN_DELTA = 3.0  # Innen muss mindestens diese °C-Humidex über Außen liegen
-ENTITY_HUMIDITY_PROXY      = "sensor.tp357_27f5_humidity"  # Wohnzimmer-RH als Proxy für alle Räume
-                                                            # bis pro-Raum-RH-Sensoren da sind
+ENTITY_HUMIDITY_PROXY      = "sensor.tp357_27f5_humidity"  # Wohnzimmer-RH (Fallback falls OG-HT unavailable)
+ENTITY_HT_OFFICE_TEMP        = "sensor.shelly_blu_h_t_ee37_temperature"
+ENTITY_HT_OFFICE_HUMIDITY    = "sensor.shelly_blu_h_t_ee37_humidity"
+ENTITY_HT_SCHLAFZIMMER_TEMP  = "sensor.bthome_sensor_757e_temperature"
+ENTITY_HT_SCHLAFZIMMER_HUMIDITY = "sensor.bthome_sensor_757e_humidity"
 PV_KLIMA_MIN_W             = 2000  # PV-Überschuss-Schwelle für aktives Klima-Triggern
 HOT_FORECAST_THRESHOLD_C   = 30.0  # Tagesforecast > X°C → Pre-Cooling sinnvoll
 OUTDOOR_WARM_MIN_C         = 24.0  # Außen > X°C → Klima cooling sinnvoll (sonst Fenster auf)
