@@ -61,3 +61,4 @@ T300-Solltemperatur als deferrable in EMHASS — analog UC4b-Pattern
 | v0.17.2 | **Trend-Tracker + UC12 B (Schwüle) + C (Trend)** |
 | v0.17.3 | Trend-Buffer-Seed aus Recorder-Historie nach Restart |
 | v0.18.0 | **Smart-UC11**: pro-Raum HT-Sensoren (Shelly BLU H&T), Office Auto-Mode aktiv |
+| v0.18.1 | UC11 Window-Guard: Office-Fenster offen (Tala) → kein Auto-Klima, läuft Klima schon → aus |

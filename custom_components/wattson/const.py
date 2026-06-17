@@ -247,6 +247,7 @@ ENTITY_HT_OFFICE_TEMP        = "sensor.shelly_blu_h_t_ee37_temperature"
 ENTITY_HT_OFFICE_HUMIDITY    = "sensor.shelly_blu_h_t_ee37_humidity"
 ENTITY_HT_SCHLAFZIMMER_TEMP  = "sensor.bthome_sensor_757e_temperature"
 ENTITY_HT_SCHLAFZIMMER_HUMIDITY = "sensor.bthome_sensor_757e_humidity"
+ENTITY_WINDOW_OFFICE_LINKS   = "binary_sensor.office_doof_window_office_links_window"
 PV_KLIMA_MIN_W             = 2000  # PV-Überschuss-Schwelle für aktives Klima-Triggern
 HOT_FORECAST_THRESHOLD_C   = 30.0  # Tagesforecast > X°C → Pre-Cooling sinnvoll
 OUTDOOR_WARM_MIN_C         = 24.0  # Außen > X°C → Klima cooling sinnvoll (sonst Fenster auf)

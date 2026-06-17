@@ -147,6 +147,7 @@ from .const import (
     ENTITY_HT_OFFICE_HUMIDITY,
     ENTITY_HT_SCHLAFZIMMER_TEMP,
     ENTITY_HT_SCHLAFZIMMER_HUMIDITY,
+    ENTITY_WINDOW_OFFICE_LINKS,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -1169,6 +1170,19 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
                 )
                 if acted:
                     actions.append(f"{room} off ({reason_prefix})")
+            return
+
+        # Window guard (office only): Fenster offen → kein Auto-Klima (Tala-Fenster)
+        if room == "office" and self._state(ENTITY_WINDOW_OFFICE_LINKS) == "on":
+            if auto_action and current_hvac == "cool":
+                # Wattson hatte Klima an; Fenster jetzt offen → abschalten
+                await self._try_act(
+                    "uc11", entity, "off",
+                    "climate", "set_hvac_mode",
+                    {"entity_id": entity, "hvac_mode": "off"},
+                )
+                actions.append("UC11 office: Fenster offen → Klima aus")
+            s.uc_reason["uc11"] = "Office-Fenster offen → kein Auto-Klima"
             return
 
         # Cool-Sollwert berechnen

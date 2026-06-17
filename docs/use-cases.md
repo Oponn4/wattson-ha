@@ -1,6 +1,6 @@
 # Use Cases
 
-Stand: v0.18.0 (2026-06-17). Alle live außer UC9 (Hardware-blocked).
+Stand: v0.18.1 (2026-06-17). Alle live außer UC9 (Hardware-blocked).
 
 | UC | Was | Seit |
 |---|---|---|
@@ -84,6 +84,7 @@ UC12 B Schwüle: `humidity_proxy_pct` = max(HT-Office, HT-Schlaf) statt TP357 Wo
 - v0.15.1: Fenster-auf-Empfehlung statt Klima bei Δ-Humidex ≥ 3
 - v0.15.2: Notify unterdrückt wenn Proxon-Kühlung (UC12) bereits läuft
 - v0.18.0: echte pro-Raum RH + Office Auto-Mode
+- v0.18.1: Window-Guard `binary_sensor.office_doof_window_office_links_window` → kein Auto-Klima-Start; läuft Klima schon → abschalten
 
 `switch.wattson_klimaanlagen_og` = UC11 Enable-Toggle.
 
