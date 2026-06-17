@@ -96,8 +96,8 @@ from .const import (
     ENTITY_PERSON_SONJA,
     ENTITY_PROXON_ABLUFT,
     ENTITY_PROXON_COOL_ENABLE,
-    ENTITY_PROXON_SOLL_OFFICE,
-    ENTITY_PROXON_SOLL_SCHLAFZIMMER,
+    ENTITY_PROXON_CLIMATE_OFFICE,
+    ENTITY_PROXON_CLIMATE_SCHLAFZIMMER,
     ENTITY_URLAUB_MODE,
     ENTITY_WEATHER_FORECAST,
     HOT_FORECAST_THRESHOLD_C,
@@ -561,8 +561,8 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         # UC11 — Klima State
         s.urlaub_mode = self._state(ENTITY_URLAUB_MODE) == "on"
         s.frischluft_temp = self._fval(ENTITY_FRISCHLUFT, 20.0)
-        s.proxon_soll_office = self._fval(ENTITY_PROXON_SOLL_OFFICE, 21.0)
-        s.proxon_soll_schlaf = self._fval(ENTITY_PROXON_SOLL_SCHLAFZIMMER, 21.0)
+        s.proxon_soll_office = float(self._attr(ENTITY_PROXON_CLIMATE_OFFICE, "temperature", 21.0) or 21.0)
+        s.proxon_soll_schlaf = float(self._attr(ENTITY_PROXON_CLIMATE_SCHLAFZIMMER, "temperature", 21.0) or 21.0)
         s.klima_office_hvac = self._state(ENTITY_KLIMA_OFFICE, "off") or "off"
         s.klima_office_current = float(self._attr(ENTITY_KLIMA_OFFICE, "current_temperature", 22.0) or 22.0)
         s.klima_office_target = float(self._attr(ENTITY_KLIMA_OFFICE, "temperature", 23.0) or 23.0)

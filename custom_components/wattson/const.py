@@ -25,17 +25,17 @@ SOC_TARGET   = 80  # % → unter diesem SOC wird in günstigste 4h forciert
 CHEAP_LEVELS = ("very_cheap", "cheap")
 
 # HA Entity IDs
-ENTITY_PROXON_ABLUFT      = "sensor.proxon_t7_abluft"          # Innen-Temperatur (Abluft als Indikator)
-ENTITY_PROXON_COOL_ENABLE = "switch.proxon_freigabe_kuhlfunktion" # Kühlung Freigabe (Prod Modbus; bei Proxon-Migration → switch.proxon_fwt_kuhlung_freigabe)
+ENTITY_PROXON_ABLUFT      = "sensor.proxon_fwt_t7_abluft"
+ENTITY_PROXON_COOL_ENABLE = "switch.proxon_fwt_kuhlung_freigabe"
 ENTITY_COOL_SNOOZE        = "input_datetime.wattson_kuhlung_snooze_bis" # UC12 Reminder-Snooze (von Action-Automation gesetzt)
 
 # UC11 — Klimaanlagen OG (Office + Schlafzimmer)
 ENTITY_KLIMA_OFFICE         = "climate.klimaanlage_office_air_conditioner"
 ENTITY_KLIMA_SCHLAFZIMMER   = "climate.klimaanlage_schlafzimmer_air_conditioner"
-ENTITY_PROXON_SOLL_OFFICE   = "sensor.proxon_solltemperatur_kreativzimmer"  # Office = Kreativzimmer
-ENTITY_PROXON_SOLL_SCHLAFZIMMER = "sensor.proxon_solltemperatur_schlafzimmer"
+ENTITY_PROXON_CLIMATE_OFFICE        = "climate.proxon_fwt_office"
+ENTITY_PROXON_CLIMATE_SCHLAFZIMMER  = "climate.proxon_fwt_schlafen"
 ENTITY_URLAUB_MODE          = "input_boolean.wattson_urlaub_modus"
-ENTITY_FRISCHLUFT           = "sensor.proxon_t3_frischluft"    # Außentemp via Proxon-Frischluft
+ENTITY_FRISCHLUFT           = "sensor.proxon_fwt_t3_frischluft"
 ENTITY_WEATHER_FORECAST     = "weather.forecast_home"           # Für Hitze-Forecast morgen
 ENTITY_PERSON_CHRISTIAN     = "person.christian"
 ENTITY_PERSON_SONJA         = "person.sonja"
@@ -43,9 +43,9 @@ ENTITY_PRICE          = "sensor.electricity_price_haus"   # state in EUR/kWh
 ENTITY_PRICE_RANKING  = "sensor.electricity_price_haus"   # attr: intraday_price_ranking (float 0.0-1.0)
 ENTITY_PRICE_LEVEL    = "sensor.haus_current_hour_price_level"
 ENTITY_PV_SURPLUS     = "sensor.pv_uberschuss_der_letzen_15_minuten"
-ENTITY_T300_TANK      = "sensor.proxon_t300_t21_behalter_mitte"
-ENTITY_T300_SOLL      = "input_number.t300_solltemperatur"
-ENTITY_T300_HEIZSTAB  = "switch.proxon_t300_e_heizstab"
+ENTITY_T300_TANK      = "sensor.proxon_fwt_t300_t21_behalter_mitte"
+ENTITY_T300_SOLL      = "number.proxon_fwt_t300_solltemperatur"
+ENTITY_T300_HEIZSTAB  = "switch.proxon_fwt_t300_e_heizstab"
 ENTITY_EVCC_MODE      = "select.evcc_auto_mode"
 ENTITY_EVCC_CONNECTED = "binary_sensor.evcc_auto_connected"
 ENTITY_EVCC_SOC       = "sensor.evcc_auto_vehicle_soc"
