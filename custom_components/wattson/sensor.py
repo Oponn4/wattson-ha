@@ -182,13 +182,13 @@ class WattsonTibberForecastSensor(WattsonBaseSensor):
     def __init__(self, coordinator, entry):
         super().__init__(coordinator, entry, "tibber_forecast", "Tibber Preis Forecast")
         self._attr_icon = "mdi:cash-clock"
-        self._attr_native_unit_of_measurement = "EUR/kWh"
+        self._attr_native_unit_of_measurement = "ct/kWh"
 
     @property
     def native_value(self):
         if self.coordinator.data is None:
             return None
-        return round(self.coordinator.data.price, 4)
+        return round(self.coordinator.data.price * 100, 2)
 
     @property
     def extra_state_attributes(self):
