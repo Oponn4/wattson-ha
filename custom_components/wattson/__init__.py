@@ -6,15 +6,11 @@ import logging
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.device_registry import DeviceInfo
 
 from .const import (
     CONF_AUTO_CALENDARS,
     CONF_CALENDAR_ENTITY,
-    CONF_E3DC_PASSWORD,
-    CONF_E3DC_URL,
-    CONF_E3DC_USER,
     CONF_EVCC_VEHICLE_NAME,
     CONF_EVENT_LOOKAHEAD,
     CONF_GMAPS_KEY,
@@ -23,9 +19,6 @@ from .const import (
     CONF_VEHICLE_CAPACITY,
     CONF_VEHICLE_CONSUMPTION,
     DEFAULT_AUTO_CALENDARS,
-    DEFAULT_E3DC_PASSWORD,
-    DEFAULT_E3DC_URL,
-    DEFAULT_E3DC_USER,
     DEFAULT_EVCC_VEHICLE_NAME,
     DEFAULT_EVENT_LOOKAHEAD,
     DEFAULT_HOME_ADDRESS,
@@ -135,15 +128,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         lookahead_hours=int(_opt(entry, CONF_EVENT_LOOKAHEAD, DEFAULT_EVENT_LOOKAHEAD)),
     )
 
-    e3dc_url = _opt(entry, CONF_E3DC_URL, DEFAULT_E3DC_URL) or ""
-    e3dc = None
-    if e3dc_url.strip():
-        e3dc = E3DCClient(
-            e3dc_url.strip(),
-            _opt(entry, CONF_E3DC_USER, DEFAULT_E3DC_USER) or "",
-            _opt(entry, CONF_E3DC_PASSWORD, DEFAULT_E3DC_PASSWORD) or "",
-            async_get_clientsession(hass),
-        )
+    e3dc = E3DCClient(hass)
 
     coordinator = WattsonCoordinator(
         hass, dry_run=dry_run, trip_cfg=trip_cfg, e3dc=e3dc,
