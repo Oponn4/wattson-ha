@@ -83,6 +83,7 @@ from .const import (
     COOL_TRIGGER_MIN_C,
     EMHASS_BATT_DISCHARGE_MIN_W,
     EMHASS_DEFERRABLE_ON_MIN_W,
+    EMHASS_MAX_PLAN_AGE_H,
     EMHASS_OPTIM_OK,
     ENTITY_COOL_SNOOZE,
     ENTITY_EMHASS_OPTIM_STATUS,
@@ -316,6 +317,8 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         self._last_max_charge: int | None = None
         # UC11-Advisor: Notify-Cooldown pro Raum
         self._uc11_last_notify_utc: dict[str, datetime] = {}
+        # EMHASS-Staleness: Notify einmal pro Stale-Phase
+        self._emhass_stale_notified: bool = False
         # UC12-Kühl-Reminder: Notify-Cooldown (Override-Pfad)
         self._uc12_last_reminder_utc: datetime | None = None
         # UC12-Heat-Notify: Notify-Cooldown (Auto-Pfad, Force-Hitze v0.17)
@@ -513,7 +516,7 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         s.price         = self._fval(ENTITY_PRICE)
         s.price_ranking = float(self._attr(ENTITY_PRICE_RANKING, "intraday_price_ranking", 0.5) or 0.5)
         s.price_level   = self._state(ENTITY_PRICE_LEVEL, "normal") or "normal"
-        s.pv_power      = self._ival(ENTITY_PV_POWER)
+        s.pv_power      = round(self._fval(ENTITY_PV_POWER) * 1000)  # kW → W
         s.battery_soc   = self._ival(ENTITY_BATTERY_SOC)
         s.pv_surplus    = self._ival(ENTITY_PV_SURPLUS)
         s.t300_tank_temp       = self._fval(ENTITY_T300_TANK, 50.0)
@@ -557,6 +560,30 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             key="p_deferrable1",
         )
         s.emhass_available = s.emhass_status == EMHASS_OPTIM_OK
+        if s.emhass_available:
+            bsp = self._attr(ENTITY_EMHASS_P_BATT_FORECAST, "battery_scheduled_power", [])
+            if bsp:
+                try:
+                    from homeassistant.util import dt as dt_util
+                    plan_dt = dt_util.parse_datetime(bsp[0]["date"])
+                    age_h = (dt_util.utcnow() - plan_dt.astimezone(dt_util.UTC)).total_seconds() / 3600
+                    if age_h > EMHASS_MAX_PLAN_AGE_H:
+                        s.emhass_available = False
+                        _LOGGER.warning("EMHASS-Plan veraltet (%.1fh) — Heuristik-Fallback", age_h)
+                        if not self._emhass_stale_notified and not self._dry_run:
+                            self._emhass_stale_notified = True
+                            await self._hass.services.async_call(
+                                "notify", NOTIFY_SERVICE.split(".", 1)[1],
+                                {"title": "Wattson ⚠️ EMHASS-Plan veraltet",
+                                 "message": f"EMHASS liefert {age_h:.0f}h alten Plan — optimize.sh prüfen!"},
+                                blocking=False,
+                            )
+                except Exception:
+                    pass
+            else:
+                s.emhass_available = False
+        if s.emhass_available:
+            self._emhass_stale_notified = False
 
         # UC11 — Klima State
         s.urlaub_mode = self._state(ENTITY_URLAUB_MODE) == "on"

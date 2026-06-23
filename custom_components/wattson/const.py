@@ -50,8 +50,8 @@ ENTITY_EVCC_MODE      = "select.evcc_auto_mode"
 ENTITY_EVCC_CONNECTED = "binary_sensor.evcc_auto_connected"
 ENTITY_EVCC_SOC       = "sensor.evcc_auto_vehicle_soc"
 ENTITY_EVCC_RANGE     = "sensor.evcc_auto_vehicle_range"
-ENTITY_BATTERY_SOC    = "sensor.e3dc_batterie_soc_in_prozent"
-ENTITY_PV_POWER       = "sensor.e3dc_photovoltaik_leistung_in_watt"
+ENTITY_BATTERY_SOC    = "sensor.s10e_state_of_charge"   # % via e3dc_rscp
+ENTITY_PV_POWER       = "sensor.s10e_solar_production"   # kW via e3dc_rscp
 ENTITY_SLEEP          = "input_boolean.sleepmode_helper"
 
 # EMHASS Sensors (publishes alle 5min via cron)
@@ -64,6 +64,7 @@ ENTITY_EMHASS_SOC_FORECAST    = "sensor.soc_batt_forecast"   # % (auch 24h-Plan 
 EMHASS_OPTIM_OK            = "Optimal"
 EMHASS_BATT_DISCHARGE_MIN_W = 100   # > 100W = "darf entladen", sonst sperren
 EMHASS_DEFERRABLE_ON_MIN_W  = 500   # > 500W = "Heizstab/Wallbox sollte laufen"
+EMHASS_MAX_PLAN_AGE_H      = 2      # Plan älter als 2h → unavailable + notify
 
 # UC6 Hysterese: nach Mode-Switch mindestens N Minuten halten — verhindert 5-min-Oszillation
 UC6_MODE_HOLD_MINUTES = 10  # v0.17.1: gesenkt von 15 — Confirmation übernimmt Anti-Jitter
