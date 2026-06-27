@@ -564,7 +564,6 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             bsp = self._attr(ENTITY_EMHASS_P_BATT_FORECAST, "battery_scheduled_power", [])
             if bsp:
                 try:
-                    from homeassistant.util import dt as dt_util
                     plan_dt = dt_util.parse_datetime(bsp[0]["date"])
                     age_h = (dt_util.utcnow() - plan_dt.astimezone(dt_util.UTC)).total_seconds() / 3600
                     if age_h > EMHASS_MAX_PLAN_AGE_H:
