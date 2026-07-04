@@ -26,7 +26,7 @@ cards:
           {% if states('sensor.optim_status') == 'Optimal' %}green{% else %}orange{% endif %}
         content_info: state
       - type: entity
-        entity: input_boolean.wattson_urlaub_modus
+        entity: input_boolean.urlaubsmodus
         icon: mdi:airplane-takeoff
         tap_action:
           action: toggle
