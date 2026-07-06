@@ -109,12 +109,14 @@ der Trend ist damit sofort wieder da; ohne Recorder füllt er sich live.
 Aktive Korrekturen erscheinen im `begruendung`-Attribut von
 `sensor.wattson_kuhlung`.
 
-Entscheidung in vier Stufen:
-1. Abluft ≥ heat → **kühlen, immer** (auch Sleep + expensive) + Push
+Entscheidung in fünf Stufen (v0.18.7):
+1. Urlaubsmodus → **aus, immer** (auch bei Hitze — niemand zu Hause)
+2. Sleep-Mode → aus, **auch bei Hitze** (Kühlung treibt Lüfterstufe auf max;
+   seit v0.18.7 bricht Force-Hitze den Schlaf nicht mehr, kühlt nach Sleep-Ende)
+3. Abluft ≥ heat → kühlen, auch bei expensive + Push
    (`_uc12_send_heat_notify`, 60min-Cooldown)
-2. Sleep-Mode ohne Hitze → aus
-3. Abluft ≤ off → aus
-4. dazwischen: PV ≥ 1500W → an; cheapest_4h + Spread < 15ct → an; Hysterese
+4. Abluft ≤ off → aus
+5. dazwischen: PV ≥ 1500W → an; cheapest_4h + Spread < 15ct → an; Hysterese
    hält an, **bricht aber bei expensive ohne PV**; sonst aus
 
 Zusätzlich Kühl-Reminder bei manuellem Override in teurem Fenster (v0.15.0).

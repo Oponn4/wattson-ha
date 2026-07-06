@@ -20,10 +20,18 @@ MIN_COOLDOWN_HOURS = 2        # nicht weniger als 2h Cooldown, selbst spätabend
 
 @dataclass
 class ActionRecord:
-    """Eine vom Coordinator durchgeführte Aktion (für Override-Detection)."""
+    """Eine vom Coordinator durchgeführte Aktion (für Override-Detection).
+
+    prev_value = Ist-Zustand unmittelbar vor der Aktion. confirmed wird True,
+    sobald der Zielwert einmal beobachtet wurde — erst ab dann gilt eine
+    spätere Abweichung als User-Override. Vorher gilt Ist==prev_value als
+    fehlgeschlagener Write (Modbus-Glitch), nicht als Eingriff.
+    """
     value: Any
     set_at: datetime
     uc_id: str
+    prev_value: Any = None
+    confirmed: bool = False
 
 
 @dataclass
@@ -97,6 +105,10 @@ class OverrideManager:
                     value=raw["value"],
                     set_at=datetime.fromisoformat(raw["set_at"]),
                     uc_id=raw.get("uc_id", ""),
+                    prev_value=raw.get("prev_value"),
+                    # Legacy-Records (vor v0.18.7) haben kein confirmed-Feld →
+                    # True annehmen, damit sie sich wie bisher verhalten
+                    confirmed=bool(raw.get("confirmed", True)),
                 )
             except (KeyError, ValueError, TypeError) as e:
                 _LOGGER.warning("Action-Record für %s ignoriert: %s", ent_id, e)
@@ -122,6 +134,8 @@ class OverrideManager:
                     "value": rec.value,
                     "set_at": rec.set_at.isoformat(),
                     "uc_id": rec.uc_id,
+                    "prev_value": rec.prev_value,
+                    "confirmed": rec.confirmed,
                 }
                 for ent, rec in self._actions.items()
             },
@@ -159,36 +173,62 @@ class OverrideManager:
 
     # ── Action recording ─────────────────────────────────────────────────────
 
-    async def async_record_action(self, uc_id: str, entity_id: str, value: Any) -> None:
+    async def async_record_action(
+        self, uc_id: str, entity_id: str, value: Any, prev_value: Any = None,
+    ) -> None:
         """Wattson hat (real, kein dry-run) entity_id auf value gesetzt."""
         self._actions[entity_id] = ActionRecord(
             value=value, set_at=dt_util.now(), uc_id=uc_id,
+            prev_value=prev_value, confirmed=False,
         )
         await self._async_persist()
 
     def get_last_action(self, entity_id: str) -> ActionRecord | None:
         return self._actions.get(entity_id)
 
+    async def async_drop_action(self, entity_id: str) -> None:
+        """Action-Record verwerfen (z.B. nach erkanntem Write-Fehlschlag)."""
+        if self._actions.pop(entity_id, None) is not None:
+            await self._async_persist()
+
     # ── Override detection ───────────────────────────────────────────────────
 
-    def detect_override(
+    async def async_check_action(
         self, entity_id: str, current_value: Any, tolerance: float = FLOAT_TOLERANCE,
-    ) -> bool:
-        """True wenn Wattson zuletzt einen anderen Wert gesetzt hat als jetzt da steht.
+    ) -> str:
+        """Verdikt über die letzte Wattson-Aktion vs. Ist-Zustand.
 
-        Wenn current_value None oder 'unavailable'/'unknown' ist, returns False —
+        Returns:
+          "ok"           — kein Record, Entity transient weg, oder Ist == Zielwert
+          "failed_write" — Zielwert kam nie an, Ist == Zustand vor der Aktion
+                           (z.B. Modbus-Glitch); Caller darf erneut schreiben
+          "override"     — jemand hat den Wert verstellt → User-Eingriff
+
+        Wenn current_value None oder 'unavailable'/'unknown' ist → "ok":
         Entity ist transient weg (z.B. Modbus-Reconnect, Coordinator-Refresh).
         Entscheidung wird vertagt statt einen Phantom-Override auszulösen, der
         Wattson sonst bis Mitternacht aussperrt.
+
+        Ein unbestätigter Record, dessen Ist wieder dem prev_value entspricht,
+        gilt als fehlgeschlagener Write und NICHT als Override — das war die
+        Phantom-Override-Quelle (uc12/uc4b, 2026-07-06 00:06). Kehrt der Wert
+        NACH einmaliger Bestätigung zum alten Zustand zurück, ist es ein User.
         """
         last = self._actions.get(entity_id)
         if last is None:
-            return False
+            return "ok"
         if current_value is None or str(current_value).strip().lower() in (
             "unavailable", "unknown", "none", ""
         ):
-            return False
-        return not values_equal(last.value, current_value, tolerance)
+            return "ok"
+        if values_equal(last.value, current_value, tolerance):
+            if not last.confirmed:
+                last.confirmed = True
+                await self._async_persist()
+            return "ok"
+        if not last.confirmed and values_equal(last.prev_value, current_value, tolerance):
+            return "failed_write"
+        return "override"
 
     async def async_record_override(
         self, uc_id: str, entity_id: str, observed_value: Any,

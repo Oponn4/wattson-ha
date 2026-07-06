@@ -60,8 +60,17 @@ einem Tag, gefixt v0.17.1). Daher gilt für **jeden** EMHASS-Konsumenten:
 
 User-Eingriffe haben Vorrang: erkennt ein UC eine manuelle Änderung an seiner
 Ziel-Entity, geht er in `user-override` mit Cooldown statt zurückzusetzen.
-`detect_override` behandelt `None`/`unavailable`/`unknown` als „keine Meinung"
-(kein Phantom-Override durch transient unavailable Entities).
+`async_check_action` (v0.18.7, ersetzt `detect_override`) liefert ein
+dreiwertiges Verdikt:
+
+- `ok` — Ist == Zielwert (Record wird als `confirmed` markiert), kein Record,
+  oder Entity transient `unavailable`/`unknown` („keine Meinung")
+- `failed_write` — Zielwert kam nie an, Ist == Zustand vor der Aktion
+  (z.B. Modbus-Glitch): kein Override, Wattson schreibt erneut.
+  Vorher wurde ein eigener fehlgeschlagener Write als User-Eingriff
+  fehlgedeutet (Phantom-Override uc12/uc4b, 2026-07-06)
+- `override` — Wert weicht ab, nachdem er einmal bestätigt war (oder auf einen
+  dritten Wert): echter User-Eingriff → Cooldown bis Mitternacht
 
 ## Rahmenbedingungen
 

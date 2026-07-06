@@ -489,12 +489,21 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             remaining = self._override.cooldown_remaining_minutes(uc_id)
             return False, f"user-override ({remaining}min Rest)"
 
-        # User-Eingriff seit letzter Wattson-Aktion?
+        # User-Eingriff seit letzter Wattson-Aktion? (v0.18.7: dreiwertig —
+        # ein nie angekommener Write ist KEIN Override, sondern Retry-Fall)
         current = self._state(entity_id)
-        if self._override.detect_override(entity_id, current):
+        verdict = await self._override.async_check_action(entity_id, current)
+        if verdict == "override":
             await self._override.async_record_override(uc_id, entity_id, current)
             remaining = self._override.cooldown_remaining_minutes(uc_id)
             return False, f"user-override neu erkannt ({remaining}min Rest)"
+        if verdict == "failed_write":
+            last = self._override.get_last_action(entity_id)
+            _LOGGER.warning(
+                "UC %s: Write auf %s kam nicht an (Ist=%s, gewollt=%s) — Retry",
+                uc_id, entity_id, current, last.value if last else "?",
+            )
+            await self._override.async_drop_action(entity_id)
 
         desc = f"{domain}.{service}({service_data})"
         if self._dry_run:
@@ -502,7 +511,9 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             return True, f"DRY-RUN: {desc}"
 
         await self.hass.services.async_call(domain, service, service_data, blocking=False)
-        await self._override.async_record_action(uc_id, entity_id, value_for_track)
+        await self._override.async_record_action(
+            uc_id, entity_id, value_for_track, prev_value=current,
+        )
         _LOGGER.info("Aktion: %s", desc)
         return True, desc
 
@@ -1526,13 +1537,24 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         )
 
         # Entscheidung berechnen
-        if hitze:
-            # Force-Hitze: kühlt immer, selbst bei Sleep+expensive (mit Notify)
-            should_cool = True
-            grund_bruch = (
-                "Schlafmodus" if s.sleep_mode
-                else (f"expensive ({s.price_level})" if expensive else None)
+        if s.urlaub_mode:
+            # v0.18.7: niemand zu Hause — leeres Haus kühlen ist Verschwendung,
+            # auch bei Hitze nicht (UC11 schaltet die Klimas im Urlaub genauso ab)
+            should_cool = False
+            reason = f"Urlaubsmodus → aus (Abluft {s.abluft_temp:.1f}°C)"
+        elif hitze and s.sleep_mode:
+            # v0.18.7: Force-Hitze bricht den Schlafmodus NICHT mehr — aktive
+            # Kühlung treibt die Lüfterstufe auf max (Sonja leichter Schläfer).
+            # Kühlung startet dann nach Sleep-Ende.
+            should_cool = False
+            reason = (
+                f"Hitze {s.abluft_temp:.1f}°C ≥ {heat_c:.1f}°C, aber Schlafmodus → "
+                f"aus (Lüfter-Max nachts unerwünscht; kühlt nach Sleep-Ende)"
             )
+        elif hitze:
+            # Force-Hitze: kühlt trotz expensive (mit Notify)
+            should_cool = True
+            grund_bruch = f"expensive ({s.price_level})" if expensive else None
             if grund_bruch:
                 reason = (
                     f"Hitze {s.abluft_temp:.1f}°C ≥ {heat_c:.1f}°C — "
@@ -1712,10 +1734,12 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         self, s: WattsonData, now: datetime, actions: list[str],
         heat_c: float, grund_bruch: str,
     ) -> None:
-        """v0.17: Push wenn Force-Hitze die Sleep- oder Expensive-Sperre bricht.
+        """v0.17: Push wenn Force-Hitze die Expensive-Sperre bricht.
 
+        (Seit v0.18.7 bricht Force-Hitze den Schlafmodus nicht mehr — der
+        Sleep-Pfad hierher ist entfallen.)
         Wattson kühlt weiter (richtig!), informiert aber, warum: damit der User
-        nicht rätselt, wieso die Box im teuren Fenster oder nachts noch dreht.
+        nicht rätselt, wieso die Box im teuren Fenster noch dreht.
         Quiet-Hours (22-7) und Schlafmodus unterdrücken, 60min-Cooldown.
         """
         # Quiet-Hours / Schlafmodus: Sonja ist leichter Schläfer — kein Push
