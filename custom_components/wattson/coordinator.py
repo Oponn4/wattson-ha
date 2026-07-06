@@ -61,6 +61,10 @@ from .const import (
     NOTIFY_SERVICE,
     PV_SURPLUS_OFF,
     PV_SURPLUS_ON,
+    HEIZSTAB_MAX_CONTINUOUS_H,
+    HEIZSTAB_FAILSAFE_NOTIFY_COOLDOWN_MIN,
+    LEGIONELLA_INTERVAL_DAYS,
+    LEGIONELLA_TARGET_C,
     AWAY_LONG_HOURS,
     BATTERIE_KAPAZITAT_KWH,
     CLIMATE_COOL_OFFSET_C,
@@ -332,6 +336,9 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         # UC6 plan-aware: Downshift-Confirmation-Counter (v0.17.1)
         self._uc6_downshift_count: int = 0
         self._uc4b_last_reminder_utc: datetime | None = None
+        # v0.18.8: Heizstab-Failsafe-Push-Cooldown + laufende Legionellen-Aufheizung
+        self._heizstab_failsafe_notify_utc: datetime | None = None
+        self._legionella_active: bool = False
         self._override = OverrideManager(
             hass,
             [UCDefinition(uc_id, display, default)
@@ -742,111 +749,8 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             s.uc_status.setdefault("uc4a", self._uc_idle_status("uc4a"))
             s.uc_reason["uc4a"] = reason
 
-        # ── UC4b: E-Heizstab (vorausschauend, EMHASS-Plan-basiert) ──────────
-        # v0.16.0: liest deferrables_schedule (Forward-Plan) statt p_def0.state.
-        # Confirmation-Cycles gegen EMHASS-Replan-Jitter. Heuristik bleibt Fallback.
-        # Tank-Safety gilt IMMER.
-        tank_safe = s.t300_tank_temp < T300_TANK_MAX
-        if s.emhass_available and s.heizstab_schedule:
-            current_slot = deferrable_slot_at(s.heizstab_schedule, now)
-            plan_says_on = (
-                current_slot is not None
-                and current_slot.power >= EMHASS_DEFERRABLE_ON_MIN_W
-            )
-            if plan_says_on and tank_safe:
-                # Im On-Block — Counter reset, Block-Ende für Logging
-                self._uc4b_off_signal_count = 0
-                should_on = True
-                block = next_deferrable_on_block(
-                    s.heizstab_schedule, now, EMHASS_DEFERRABLE_ON_MIN_W,
-                )
-                block_end_str = block[1].strftime("%H:%M") if block else "?"
-                uc4b_source = (
-                    f"EMHASS-Block bis {block_end_str} "
-                    f"(Slot {current_slot.power:.0f}W)"
-                )
-            elif not tank_safe:
-                self._uc4b_off_signal_count = 0
-                should_on = False
-                uc4b_source = (
-                    f"Tank-Limit ({s.t300_tank_temp:.1f}°C ≥ {T300_TANK_MAX}°C)"
-                )
-            else:
-                # Plan sagt off — Confirmation-Cycles bevor wirklich ausschalten
-                self._uc4b_off_signal_count += 1
-                if (self._uc4b_off_signal_count < UC4B_CONFIRMATION_CYCLES
-                        and s.t300_heizstab_on):
-                    should_on = True
-                    uc4b_source = (
-                        f"EMHASS off-Signal "
-                        f"{self._uc4b_off_signal_count}/{UC4B_CONFIRMATION_CYCLES} "
-                        f"— halte ON gegen Jitter"
-                    )
-                else:
-                    should_on = False
-                    next_block = next_deferrable_on_block(
-                        s.heizstab_schedule, now, EMHASS_DEFERRABLE_ON_MIN_W,
-                    )
-                    next_str = (
-                        f", nächster Block ab {next_block[0].strftime('%H:%M')}"
-                        if next_block else ""
-                    )
-                    uc4b_source = f"EMHASS Plan: jetzt kein Block{next_str}"
-            should_off = not should_on
-        else:
-            # Heuristik-Fallback (EMHASS nicht verfügbar / kein Schedule)
-            self._uc4b_off_signal_count = 0
-            should_on = (
-                s.pv_surplus >= PV_SURPLUS_ON
-                and s.battery_soc >= BATTERY_FULL
-                and tank_safe
-            )
-            should_off = (
-                s.pv_surplus < PV_SURPLUS_OFF
-                or s.battery_soc < BATTERY_NOT_FULL
-                or not tank_safe
-            )
-            uc4b_source = (f"Heuristik (PV-Über {s.pv_surplus}W, "
-                           f"Bat {s.battery_soc}%, Tank {s.t300_tank_temp:.1f}°C)")
-        heizstab_reason = ""
-        if should_on and not s.t300_heizstab_on:
-            heizstab_reason = f"Heizstab EIN — {uc4b_source}"
-            _LOGGER.info("E-%s", heizstab_reason)
-            acted, act_desc = await self._try_act(
-                "uc4b", ENTITY_T300_HEIZSTAB, "on",
-                "switch", "turn_on",
-                {"entity_id": ENTITY_T300_HEIZSTAB},
-            )
-            if acted:
-                actions.append(act_desc)
-                s.uc_status["uc4b"] = "aktiv"
-            else:
-                _LOGGER.info("UC4b übersprungen: %s", act_desc)
-                s.uc_status["uc4b"] = act_desc
-                heizstab_reason = f"{heizstab_reason} (geblockt: {act_desc})"
-        elif should_off and s.t300_heizstab_on:
-            heizstab_reason = f"Heizstab AUS — {uc4b_source}"
-            _LOGGER.info("E-%s", heizstab_reason)
-            acted, act_desc = await self._try_act(
-                "uc4b", ENTITY_T300_HEIZSTAB, "off",
-                "switch", "turn_off",
-                {"entity_id": ENTITY_T300_HEIZSTAB},
-            )
-            if acted:
-                actions.append(act_desc)
-                s.uc_status["uc4b"] = "aktiv"
-            else:
-                _LOGGER.info("UC4b übersprungen: %s", act_desc)
-                s.uc_status["uc4b"] = act_desc
-                heizstab_reason = f"{heizstab_reason} (geblockt: {act_desc})"
-        else:
-            heizstab_reason = (f"Stabil ({'an' if s.t300_heizstab_on else 'aus'}) — "
-                               f"{uc4b_source}")
-            s.uc_status.setdefault("uc4b", self._uc_idle_status("uc4b"))
-        s.uc_reason["uc4b"] = heizstab_reason
-
-        # UC4b Safety-Reminder: Heizstab an UND Strompreis ≥ expensive → Push
-        await self._uc4b_send_safety_notify(s, now, actions)
+        # ── UC4b: E-Heizstab (Failsafe → Urlaub/Legionellen → EMHASS-Plan) ──
+        await self._handle_uc4b_heizstab(s, now, actions)
 
         # ── UC12: Proxon Kühlung (läuft vor UC10 weil UC10 das Ergebnis braucht) ──
         await self._handle_uc12_cooling(s, now, actions)
@@ -1057,6 +961,260 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
                 for ev in cal_data.get("events", []):
                     merged.append({**ev, "_calendar": cal_id})
         return merged
+
+    async def _handle_uc4b_heizstab(
+        self, s: WattsonData, now: datetime, actions: list[str]
+    ) -> None:
+        """UC4b: E-Heizstab (vorausschauend, EMHASS-Plan-basiert).
+
+        v0.16.0: liest deferrables_schedule (Forward-Plan) statt p_def0.state.
+        Confirmation-Cycles gegen EMHASS-Replan-Jitter. Heuristik bleibt Fallback.
+        Tank-Safety gilt IMMER.
+        v0.18.8: Dauerlauf-Failsafe (hart, am Override-System vorbei),
+        Urlaub-Gate + Legionellen-Aufheizung im Urlaub.
+        """
+        # Failsafe: Heizstab darf NIE unbegrenzt durchlaufen — egal ob
+        # Override-Cooldown, verpuffter Off-Write oder manuell vergessen.
+        # (Vorgeschichte: 32h-Dauerlauf 3.–5.7. + 26h 5.–6.7.2026 via
+        # Phantom-Override; Christian: „darf nicht einfach anbleiben".)
+        if s.t300_heizstab_on:
+            st = self.hass.states.get(ENTITY_T300_HEIZSTAB)
+            on_hours = (
+                (dt_util.utcnow() - st.last_changed).total_seconds() / 3600
+                if st is not None else 0.0
+            )
+            if on_hours >= HEIZSTAB_MAX_CONTINUOUS_H:
+                await self._heizstab_failsafe_off(s, now, actions, on_hours)
+                return
+
+        tank_safe = s.t300_tank_temp < T300_TANK_MAX
+
+        # Legionellen-Aufheizung (nur Urlaub, v0.18.8): T300 kann das nicht
+        # selbst; im Normalbetrieb sorgen Zapfung + PV-Fenster für Durchsatz,
+        # im Urlaub steht das Wasser. Fällig alle LEGIONELLA_INTERVAL_DAYS,
+        # Start im günstigen Fenster (PV-Überschuss oder cheapest_4h), Ende
+        # bei Zieltemperatur — spätestens kappt der Failsafe.
+        legionella_run = False
+        if s.urlaub_mode:
+            last_raw = self._override.get_misc("legionella_last_done")
+            try:
+                last_done = datetime.fromisoformat(last_raw) if last_raw else None
+            except (TypeError, ValueError):
+                last_done = None
+            legionella_due = (
+                last_done is None
+                or now - last_done >= timedelta(days=LEGIONELLA_INTERVAL_DAYS)
+            )
+            if self._legionella_active:
+                if s.t300_tank_temp >= LEGIONELLA_TARGET_C:
+                    self._legionella_active = False
+                    if not self._dry_run:
+                        await self._override.async_set_misc(
+                            "legionella_last_done", now.isoformat()
+                        )
+                    actions.append(
+                        f"Legionellen-Aufheizung fertig ({s.t300_tank_temp:.1f}°C)"
+                    )
+                    await self._send_simple_notify(
+                        "Legionellen-Aufheizung fertig",
+                        f"Tank {s.t300_tank_temp:.1f}°C erreicht — Heizstab geht "
+                        f"aus. Nächster Lauf in {LEGIONELLA_INTERVAL_DAYS} Tagen "
+                        f"(solange Urlaubsmodus an).",
+                        tag="wattson_legionella",
+                    )
+                else:
+                    legionella_run = True
+            elif legionella_due and (
+                s.pv_surplus >= PV_SURPLUS_ON
+                or (
+                    s.cheapest_4h_start
+                    and is_in_window(now, s.cheapest_4h_start, s.cheapest_4h_end)
+                )
+            ):
+                self._legionella_active = True
+                legionella_run = True
+                _LOGGER.info(
+                    "UC4b: Legionellen-Aufheizung startet (letzter Lauf: %s)",
+                    last_done.isoformat() if last_done else "nie",
+                )
+
+        if legionella_run:
+            should_on = s.t300_tank_temp < LEGIONELLA_TARGET_C
+            should_off = not should_on
+            uc4b_source = (
+                f"Legionellen-Aufheizung → {LEGIONELLA_TARGET_C:.0f}°C "
+                f"(Tank {s.t300_tank_temp:.1f}°C, Urlaub)"
+            )
+        elif s.urlaub_mode:
+            # Urlaub: kein EMHASS-/PV-Heizen ins leere Haus
+            should_on = False
+            should_off = s.t300_heizstab_on
+            uc4b_source = "Urlaubsmodus — Heizstab aus"
+        elif s.emhass_available and s.heizstab_schedule:
+            current_slot = deferrable_slot_at(s.heizstab_schedule, now)
+            plan_says_on = (
+                current_slot is not None
+                and current_slot.power >= EMHASS_DEFERRABLE_ON_MIN_W
+            )
+            if plan_says_on and tank_safe:
+                # Im On-Block — Counter reset, Block-Ende für Logging
+                self._uc4b_off_signal_count = 0
+                should_on = True
+                block = next_deferrable_on_block(
+                    s.heizstab_schedule, now, EMHASS_DEFERRABLE_ON_MIN_W,
+                )
+                block_end_str = block[1].strftime("%H:%M") if block else "?"
+                uc4b_source = (
+                    f"EMHASS-Block bis {block_end_str} "
+                    f"(Slot {current_slot.power:.0f}W)"
+                )
+            elif not tank_safe:
+                self._uc4b_off_signal_count = 0
+                should_on = False
+                uc4b_source = (
+                    f"Tank-Limit ({s.t300_tank_temp:.1f}°C ≥ {T300_TANK_MAX}°C)"
+                )
+            else:
+                # Plan sagt off — Confirmation-Cycles bevor wirklich ausschalten
+                self._uc4b_off_signal_count += 1
+                if (self._uc4b_off_signal_count < UC4B_CONFIRMATION_CYCLES
+                        and s.t300_heizstab_on):
+                    should_on = True
+                    uc4b_source = (
+                        f"EMHASS off-Signal "
+                        f"{self._uc4b_off_signal_count}/{UC4B_CONFIRMATION_CYCLES} "
+                        f"— halte ON gegen Jitter"
+                    )
+                else:
+                    should_on = False
+                    next_block = next_deferrable_on_block(
+                        s.heizstab_schedule, now, EMHASS_DEFERRABLE_ON_MIN_W,
+                    )
+                    next_str = (
+                        f", nächster Block ab {next_block[0].strftime('%H:%M')}"
+                        if next_block else ""
+                    )
+                    uc4b_source = f"EMHASS Plan: jetzt kein Block{next_str}"
+            should_off = not should_on
+        else:
+            # Heuristik-Fallback (EMHASS nicht verfügbar / kein Schedule)
+            self._uc4b_off_signal_count = 0
+            should_on = (
+                s.pv_surplus >= PV_SURPLUS_ON
+                and s.battery_soc >= BATTERY_FULL
+                and tank_safe
+            )
+            should_off = (
+                s.pv_surplus < PV_SURPLUS_OFF
+                or s.battery_soc < BATTERY_NOT_FULL
+                or not tank_safe
+            )
+            uc4b_source = (f"Heuristik (PV-Über {s.pv_surplus}W, "
+                           f"Bat {s.battery_soc}%, Tank {s.t300_tank_temp:.1f}°C)")
+        heizstab_reason = ""
+        if should_on and not s.t300_heizstab_on:
+            heizstab_reason = f"Heizstab EIN — {uc4b_source}"
+            _LOGGER.info("E-%s", heizstab_reason)
+            acted, act_desc = await self._try_act(
+                "uc4b", ENTITY_T300_HEIZSTAB, "on",
+                "switch", "turn_on",
+                {"entity_id": ENTITY_T300_HEIZSTAB},
+            )
+            if acted:
+                actions.append(act_desc)
+                s.uc_status["uc4b"] = "aktiv"
+            else:
+                _LOGGER.info("UC4b übersprungen: %s", act_desc)
+                s.uc_status["uc4b"] = act_desc
+                heizstab_reason = f"{heizstab_reason} (geblockt: {act_desc})"
+        elif should_off and s.t300_heizstab_on:
+            heizstab_reason = f"Heizstab AUS — {uc4b_source}"
+            _LOGGER.info("E-%s", heizstab_reason)
+            acted, act_desc = await self._try_act(
+                "uc4b", ENTITY_T300_HEIZSTAB, "off",
+                "switch", "turn_off",
+                {"entity_id": ENTITY_T300_HEIZSTAB},
+            )
+            if acted:
+                actions.append(act_desc)
+                s.uc_status["uc4b"] = "aktiv"
+            else:
+                _LOGGER.info("UC4b übersprungen: %s", act_desc)
+                s.uc_status["uc4b"] = act_desc
+                heizstab_reason = f"{heizstab_reason} (geblockt: {act_desc})"
+        else:
+            heizstab_reason = (f"Stabil ({'an' if s.t300_heizstab_on else 'aus'}) — "
+                               f"{uc4b_source}")
+            s.uc_status.setdefault("uc4b", self._uc_idle_status("uc4b"))
+        s.uc_reason["uc4b"] = heizstab_reason
+
+        # UC4b Safety-Reminder: Heizstab an UND Strompreis ≥ expensive → Push
+        await self._uc4b_send_safety_notify(s, now, actions)
+
+    async def _heizstab_failsafe_off(
+        self, s: WattsonData, now: datetime, actions: list[str], on_hours: float
+    ) -> None:
+        """Zwangsabschaltung nach Dauerlauf — bewusst am Override-System vorbei.
+
+        Einzige Stelle, die _try_act umgeht: Dauerlauf-Schutz schlägt hier den
+        User-Override-Respekt (Christian, 2026-07-06: „selbst im Urlaub darf
+        der nicht einfach anbleiben"). Schreibt einen Action-Record, damit der
+        Folge-Tick das Off weder als User-Eingriff noch als failed_write deutet.
+        """
+        _LOGGER.error(
+            "Heizstab-Failsafe: %.1fh kontinuierlich an (max %.0fh) — Zwangsabschaltung",
+            on_hours, HEIZSTAB_MAX_CONTINUOUS_H,
+        )
+        if not self._dry_run:
+            await self.hass.services.async_call(
+                "switch", "turn_off", {"entity_id": ENTITY_T300_HEIZSTAB},
+                blocking=False,
+            )
+            await self._override.async_record_action(
+                "uc4b", ENTITY_T300_HEIZSTAB, "off", prev_value="on",
+            )
+        s.t300_heizstab_on = False
+        s.uc_status["uc4b"] = "failsafe"
+        s.uc_reason["uc4b"] = (
+            f"FAILSAFE: Heizstab {on_hours:.1f}h kontinuierlich an → Zwangsabschaltung"
+        )
+        actions.append(f"Heizstab-Failsafe nach {on_hours:.1f}h")
+        # Laufende Legionellen-Aufheizung als erledigt werten — sonst startet
+        # sie im nächsten günstigen Fenster sofort wieder
+        if self._legionella_active:
+            self._legionella_active = False
+            if not self._dry_run:
+                await self._override.async_set_misc(
+                    "legionella_last_done", now.isoformat()
+                )
+        # Push bewusst OHNE Quiet-Hours (kostenrelevant + selten); max 1/h
+        # falls der Off-Write verpufft und der Failsafe erneut feuert
+        if (
+            self._heizstab_failsafe_notify_utc is None
+            or (now - self._heizstab_failsafe_notify_utc).total_seconds() / 60
+            >= HEIZSTAB_FAILSAFE_NOTIFY_COOLDOWN_MIN
+        ):
+            self._heizstab_failsafe_notify_utc = now
+            await self._send_simple_notify(
+                "Heizstab-Failsafe ausgelöst",
+                f"E-Heizstab lief {on_hours:.1f}h am Stück — Wattson hat "
+                f"zwangsabgeschaltet (Tank {s.t300_tank_temp:.1f}°C).",
+                tag="wattson_uc4b_failsafe",
+            )
+
+    async def _send_simple_notify(self, title: str, message: str, tag: str) -> None:
+        """Push ohne Buttons; Dry-Run loggt nur."""
+        if self._dry_run:
+            _LOGGER.info("[DRY-RUN] Notify: %s — %s", title, message)
+            return
+        try:
+            await self.hass.services.async_call(
+                "notify", NOTIFY_SERVICE.split(".", 1)[1],
+                {"title": title, "message": message, "data": {"tag": tag}},
+                blocking=False,
+            )
+        except Exception as ex:  # noqa: BLE001
+            _LOGGER.warning("Notify '%s' fehlgeschlagen: %s", title, ex)
 
     async def _uc4b_send_safety_notify(
         self, s: WattsonData, now: datetime, actions: list[str]

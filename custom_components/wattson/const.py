@@ -16,6 +16,21 @@ BATTERY_FULL     = 95   # % SOC ab dem Heizstab überhaupt erlaubt ist
 BATTERY_NOT_FULL = 90   # % SOC unter dem Heizstab abschaltet
 T300_TANK_MAX    = 60.0 # °C über dem Heizstab nicht weiter heizt
 
+# Heizstab-Failsafe (v0.18.8): länger als so viele Stunden kontinuierlich an
+# → Zwangsabschaltung am Override-System vorbei + Push. Normalbetrieb sind
+# Zyklen von 10–40 min (PV) bzw. EMHASS-Blöcke von 1–2 h; ein Legionellen-Lauf
+# (52 → 60 °C) braucht ~1–1.5 h. Alles legitim liegt klar unter 4 h.
+HEIZSTAB_MAX_CONTINUOUS_H = 4.0
+HEIZSTAB_FAILSAFE_NOTIFY_COOLDOWN_MIN = 60  # Push max 1/h falls Off-Write verpufft
+
+# Legionellen-Aufheizung im Urlaub (v0.18.8): T300 hat KEIN eigenes
+# Legionellen-Programm; im Normalbetrieb sorgt Warmwasserzapfung + PV-Fenster
+# für Durchsatz, im Urlaub steht das Wasser. Alle N Tage im günstigen Fenster
+# (cheapest_4h oder PV-Überschuss) per Heizstab auf Zieltemperatur.
+# 7 Tage / 60 °C = übliche Praxis für EFH-Kleinanlagen (DVGW W551-Umfeld).
+LEGIONELLA_INTERVAL_DAYS = 7
+LEGIONELLA_TARGET_C      = 60.0  # == T300_TANK_MAX, Tank-Safety bleibt konsistent
+
 # Auto
 SOC_WARNUNG  = 20  # % → Push-Notification
 SOC_VORLADEN = 80  # % → Ziel bei langem Kalendertermin

@@ -63,3 +63,4 @@ T300-Solltemperatur als deferrable in EMHASS — analog UC4b-Pattern
 | v0.18.0 | **Smart-UC11**: pro-Raum HT-Sensoren (Shelly BLU H&T), Office Auto-Mode aktiv |
 | v0.18.1 | UC11 Window-Guard: Office-Fenster offen (Tala) → kein Auto-Klima, läuft Klima schon → aus |
 | v0.18.7 | UC12 Urlaub-Gate + Force-Hitze respektiert Sleep; Write-Verifikation gegen Phantom-Overrides |
+| v0.18.8 | UC4b Dauerlauf-Failsafe (4h, override-immun) + Urlaub-Gate + Legionellen-Aufheizung im Urlaub |

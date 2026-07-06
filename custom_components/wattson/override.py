@@ -77,6 +77,7 @@ class OverrideManager:
         self._enabled: dict[str, bool] = {u.uc_id: u.default_enabled for u in ucs}
         self._actions: dict[str, ActionRecord] = {}
         self._overrides: dict[str, OverrideRecord] = {}
+        self._misc: dict[str, Any] = {}
 
     # ── Persistence ──────────────────────────────────────────────────────────
 
@@ -113,6 +114,8 @@ class OverrideManager:
             except (KeyError, ValueError, TypeError) as e:
                 _LOGGER.warning("Action-Record für %s ignoriert: %s", ent_id, e)
 
+        self._misc = dict(data.get("misc") or {})
+
         for uc_id, raw in (data.get("overrides") or {}).items():
             if uc_id not in self._ucs:
                 continue
@@ -129,6 +132,7 @@ class OverrideManager:
     async def _async_persist(self) -> None:
         data = {
             "uc_enabled": self._enabled,
+            "misc": self._misc,
             "actions": {
                 ent: {
                     "value": rec.value,
@@ -169,6 +173,15 @@ class OverrideManager:
         if uc_id not in self._ucs:
             return
         self._enabled[uc_id] = value
+        await self._async_persist()
+
+    # ── Misc key/value (JSON-persistiert, z.B. legionella_last_done) ────────
+
+    def get_misc(self, key: str) -> Any:
+        return self._misc.get(key)
+
+    async def async_set_misc(self, key: str, value: Any) -> None:
+        self._misc[key] = value
         await self._async_persist()
 
     # ── Action recording ─────────────────────────────────────────────────────

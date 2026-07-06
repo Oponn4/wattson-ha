@@ -39,6 +39,24 @@ Liest EMHASS-Forward-Plan (`deferrables_schedule`, deferrable0, Slots ≥ 500W).
 Off nur nach 2-Cycle-Confirmation (`UC4B_CONFIRMATION_CYCLES`). Tank-Safety
 bleibt. Fallback ohne EMHASS: PV-Surplus-Heuristik mit eigener Hysterese.
 
+Reihenfolge seit v0.18.8: **Failsafe → Urlaub/Legionellen → EMHASS-Plan/Heuristik.**
+
+**Dauerlauf-Failsafe (v0.18.8):** Heizstab länger als
+`HEIZSTAB_MAX_CONTINUOUS_H` (4h) kontinuierlich an → Zwangsabschaltung
+**am Override-System vorbei** (einzige _try_act-Umgehung; Dauerlauf-Schutz
+schlägt Override-Respekt) + Push ohne Quiet-Hours, max 1/h. Hintergrund:
+32h- und 26h-Dauerläufe Anfang Juli 2026 durch verpuffte Modbus-Writes +
+Phantom-Override.
+
+**Urlaub-Gate (v0.18.8):** Urlaubsmodus → kein EMHASS-/PV-Heizen, Stab aus.
+
+**Legionellen-Aufheizung (v0.18.8, nur Urlaub):** T300 hat kein eigenes
+Legionellen-Programm. Alle `LEGIONELLA_INTERVAL_DAYS` (7) startet UC4b im
+günstigen Fenster (PV ≥ 1700W oder cheapest_4h) den Stab bis
+`LEGIONELLA_TARGET_C` (60°C = Tank-Max), Push bei Abschluss, Zeitpunkt
+persistiert in `wattson_state.json` (`misc.legionella_last_done`). Failsafe
+kappt spätestens nach 4h. Im Normalbetrieb unnötig (Zapfung + PV-Fenster).
+
 **Safety-Reminder:** Heizstab an + `price_level ∈ {expensive, very_expensive}`
 → Push mit [Aus]/[Ignorieren], 60min-Cooldown, Quiet-Hours-Suppress.
 Action-Automation: `automation.wattson_heizstab_safety_action`.
