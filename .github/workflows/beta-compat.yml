@@ -1,0 +1,52 @@
+name: HA Beta Compatibility
+
+# Frühwarnsystem: installiert die aktuelle HA-Beta (und Stable als Referenz)
+# und importiert die Integration. Entfernte/umgezogene HA-APIs fallen so eine
+# Woche vor dem Monatsrelease als rote CI auf — nicht erst auf Prod.
+
+on:
+  schedule:
+    - cron: "0 6 * * 1" # montags 06:00 UTC
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  beta-compat:
+    name: HA ${{ matrix.channel }} — resolve + import
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        channel: [stable, beta]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install HA (${{ matrix.channel }})
+        run: |
+          pip install --quiet uv
+          PRE=""
+          if [ "${{ matrix.channel }}" = "beta" ]; then
+            PRE="--prerelease=allow"
+          fi
+          uv pip install --system $PRE homeassistant
+
+      - name: Import smoke test
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          python - <<'EOF'
+          from homeassistant.const import __version__
+          print(f"Home Assistant {__version__}")
+          import custom_components.wattson
+          import custom_components.wattson.coordinator
+          import custom_components.wattson.override
+          import custom_components.wattson.config_flow
+          print("wattson imports OK")
+          EOF
