@@ -30,6 +30,13 @@ HEIZSTAB_FAILSAFE_NOTIFY_COOLDOWN_MIN = 60  # Push max 1/h falls Off-Write verpu
 # 7 Tage / 60 °C = übliche Praxis für EFH-Kleinanlagen (DVGW W551-Umfeld).
 LEGIONELLA_INTERVAL_DAYS = 7
 LEGIONELLA_TARGET_C      = 60.0  # == T300_TANK_MAX, Tank-Safety bleibt konsistent
+# v0.18.9: Stab schafft real nur ~1.7 K/h auf T21-Mitte (Lauf 2026-07-07:
+# 52→59°C in 4h) — 4h-Failsafe kappte vor dem Ziel. Eigener Deckel für Läufe.
+LEGIONELLA_MAX_RUNTIME_H = 6.0
+# v0.18.9: Start bevorzugt PV-Überschuss (gratis + netzdienlich). Preisfenster
+# (cheapest_4h) nur als Fallback, wenn PV so viele Tage über die Fälligkeit
+# hinaus nicht geliefert hat (Winter). Nie mehr blind das nächstbeste Fenster.
+LEGIONELLA_PV_GRACE_DAYS = 2
 
 # Auto
 SOC_WARNUNG  = 20  # % → Push-Notification

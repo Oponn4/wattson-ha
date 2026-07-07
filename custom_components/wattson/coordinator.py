@@ -64,6 +64,8 @@ from .const import (
     HEIZSTAB_MAX_CONTINUOUS_H,
     HEIZSTAB_FAILSAFE_NOTIFY_COOLDOWN_MIN,
     LEGIONELLA_INTERVAL_DAYS,
+    LEGIONELLA_MAX_RUNTIME_H,
+    LEGIONELLA_PV_GRACE_DAYS,
     LEGIONELLA_TARGET_C,
     AWAY_LONG_HOURS,
     BATTERIE_KAPAZITAT_KWH,
@@ -983,8 +985,14 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
                 (dt_util.utcnow() - st.last_changed).total_seconds() / 3600
                 if st is not None else 0.0
             )
-            if on_hours >= HEIZSTAB_MAX_CONTINUOUS_H:
-                await self._heizstab_failsafe_off(s, now, actions, on_hours)
+            # v0.18.9: Legionellen-Lauf braucht ~4.7h (1.7 K/h real) → eigener
+            # 6h-Deckel; der harte 4h-Failsafe gilt für alles andere.
+            max_h = (
+                LEGIONELLA_MAX_RUNTIME_H if self._legionella_active
+                else HEIZSTAB_MAX_CONTINUOUS_H
+            )
+            if on_hours >= max_h:
+                await self._heizstab_failsafe_off(s, now, actions, on_hours, max_h)
                 return
 
         tank_safe = s.t300_tank_temp < T300_TANK_MAX
@@ -1024,19 +1032,23 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
                     )
                 else:
                     legionella_run = True
-            elif legionella_due and (
-                s.pv_surplus >= PV_SURPLUS_ON
-                or (
-                    s.cheapest_4h_start
-                    and is_in_window(now, s.cheapest_4h_start, s.cheapest_4h_end)
-                )
-            ):
-                self._legionella_active = True
+            elif legionella_due and self._legionella_window_open(s, now, last_done):
+                # v0.18.9: NUR Startversuch — _legionella_active wird erst nach
+                # erfolgreichem Einschalten gesetzt (unten). Vorher: Fenster wird
+                # jeden Tick neu bewertet. Bugfix 2026-07-07: der Lauf wurde beim
+                # Entscheid gearmt, vom Override-Cooldown geblockt und feuerte um
+                # 00:02 aufgestaut ins ~29ct-Fenster (statt PV/17.9ct mittags).
                 legionella_run = True
                 _LOGGER.info(
-                    "UC4b: Legionellen-Aufheizung startet (letzter Lauf: %s)",
+                    "UC4b: Legionellen-Startfenster offen (letzter Lauf: %s)",
                     last_done.isoformat() if last_done else "nie",
                 )
+
+        legionella_starting = legionella_run and not self._legionella_active
+        if legionella_starting and s.t300_heizstab_on:
+            # Stab läuft bereits (z.B. PV-Heizen) — Lauf übernimmt ihn direkt
+            self._legionella_active = True
+            legionella_starting = False
 
         if legionella_run:
             should_on = s.t300_tank_temp < LEGIONELLA_TARGET_C
@@ -1123,6 +1135,9 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             if acted:
                 actions.append(act_desc)
                 s.uc_status["uc4b"] = "aktiv"
+                if legionella_starting:
+                    # Einschalten ging durch → Lauf gilt jetzt als aktiv
+                    self._legionella_active = True
             else:
                 _LOGGER.info("UC4b übersprungen: %s", act_desc)
                 s.uc_status["uc4b"] = act_desc
@@ -1151,8 +1166,32 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         # UC4b Safety-Reminder: Heizstab an UND Strompreis ≥ expensive → Push
         await self._uc4b_send_safety_notify(s, now, actions)
 
+    def _legionella_window_open(
+        self, s: WattsonData, now: datetime, last_done: datetime | None
+    ) -> bool:
+        """Startfenster für die Legionellen-Aufheizung (v0.18.9, plan-aware).
+
+        Primär: PV-Überschuss JETZT — gratis und netzdienlich; im Sommer
+        praktisch täglich verfügbar. Preisfenster (cheapest_4h) nur als
+        Fallback, wenn der Lauf LEGIONELLA_PV_GRACE_DAYS über die Fälligkeit
+        hinaus auf PV gewartet hat (Winter). Ohne last_done (nie gelaufen)
+        gibt es keinen Überfälligkeits-Anker → nur PV.
+        """
+        if s.pv_surplus >= PV_SURPLUS_ON:
+            return True
+        if last_done is None:
+            return False
+        overdue = now - last_done - timedelta(days=LEGIONELLA_INTERVAL_DAYS)
+        if overdue < timedelta(days=LEGIONELLA_PV_GRACE_DAYS):
+            return False
+        return bool(
+            s.cheapest_4h_start
+            and is_in_window(now, s.cheapest_4h_start, s.cheapest_4h_end)
+        )
+
     async def _heizstab_failsafe_off(
-        self, s: WattsonData, now: datetime, actions: list[str], on_hours: float
+        self, s: WattsonData, now: datetime, actions: list[str], on_hours: float,
+        max_hours: float = HEIZSTAB_MAX_CONTINUOUS_H,
     ) -> None:
         """Zwangsabschaltung nach Dauerlauf — bewusst am Override-System vorbei.
 
@@ -1163,7 +1202,7 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         """
         _LOGGER.error(
             "Heizstab-Failsafe: %.1fh kontinuierlich an (max %.0fh) — Zwangsabschaltung",
-            on_hours, HEIZSTAB_MAX_CONTINUOUS_H,
+            on_hours, max_hours,
         )
         if not self._dry_run:
             await self.hass.services.async_call(

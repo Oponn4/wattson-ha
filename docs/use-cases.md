@@ -51,11 +51,19 @@ Phantom-Override.
 **Urlaub-Gate (v0.18.8):** Urlaubsmodus → kein EMHASS-/PV-Heizen, Stab aus.
 
 **Legionellen-Aufheizung (v0.18.8, nur Urlaub):** T300 hat kein eigenes
-Legionellen-Programm. Alle `LEGIONELLA_INTERVAL_DAYS` (7) startet UC4b im
-günstigen Fenster (PV ≥ 1700W oder cheapest_4h) den Stab bis
-`LEGIONELLA_TARGET_C` (60°C = Tank-Max), Push bei Abschluss, Zeitpunkt
-persistiert in `wattson_state.json` (`misc.legionella_last_done`). Failsafe
-kappt spätestens nach 4h. Im Normalbetrieb unnötig (Zapfung + PV-Fenster).
+Legionellen-Programm. Alle `LEGIONELLA_INTERVAL_DAYS` (7) heizt UC4b den Stab
+bis `LEGIONELLA_TARGET_C` (60°C = Tank-Max), Push bei Abschluss, Zeitpunkt
+persistiert in `wattson_state.json` (`misc.legionella_last_done`). Im
+Normalbetrieb unnötig (Zapfung + PV-Fenster).
+
+Startfenster seit **v0.18.9** plan-aware: primär PV-Überschuss ≥ 1700W
+(gratis + netzdienlich); cheapest_4h nur als Fallback, wenn PV
+`LEGIONELLA_PV_GRACE_DAYS` (2) über die Fälligkeit hinaus nicht geliefert hat.
+`_legionella_active` wird erst nach **erfolgreichem** Einschalten gesetzt —
+vorher wird das Fenster jeden Tick neu bewertet (Bugfix 2026-07-07: gearmter
+Lauf wurde vom Override-Cooldown geblockt und feuerte um 00:02 ins teuerste
+Fenster). Lauf-Deckel `LEGIONELLA_MAX_RUNTIME_H` (6h) statt des 4h-Failsafe —
+der Stab schafft real nur ~1.7 K/h auf T21-Mitte.
 
 **Safety-Reminder:** Heizstab an + `price_level ∈ {expensive, very_expensive}`
 → Push mit [Aus]/[Ignorieren], 60min-Cooldown, Quiet-Hours-Suppress.
