@@ -50,33 +50,39 @@ Phantom-Override.
 
 **Urlaub-Gate (v0.18.8):** Urlaubsmodus → kein EMHASS-/PV-Heizen, Stab aus.
 
-**Legionellen-Aufheizung (v0.18.8, nur Urlaub):** T300 hat kein eigenes
-Legionellen-Programm. Alle `LEGIONELLA_INTERVAL_DAYS` (7) heizt UC4b den Stab
-bis `LEGIONELLA_TARGET_C` (60°C = Tank-Max), Push bei Abschluss, Zeitpunkt
-persistiert in `wattson_state.json` (`misc.legionella_last_done`). Im
-Normalbetrieb unnötig (Zapfung + PV-Fenster).
+**Legionellen-Aufheizung (v0.18.8, 65°C seit v0.18.11 — nur Urlaub):** Die
+neue Proxon-App hat die Geräte-Legionellenfunktion entfernt (dafür Boost-Ziel
+bis 70°C). UC4b übernimmt: alle `LEGIONELLA_INTERVAL_DAYS` (7) wird das
+Boost-Ziel (Reg 2003, `number.proxon_t300_temperatur_e_heiz`) temporär auf
+`LEGIONELLA_BOOST_TEMP_C` (65) gehoben, Boost (Reg 2001) eingeschaltet und bis
+`LEGIONELLA_TARGET_C` (64.5, T21-Mitte) geheizt — echte Desinfektion statt
+58°C-Sparversion (T20 unten bleibt sonst lauwarm). Danach Boost aus +
+Boost-Ziel restauriert (`misc.legionella_prev_boost_temp`, dient zugleich als
+Restart-Resume-Marker), Push bei Abschluss, Zeitpunkt persistiert
+(`misc.legionella_last_done`). Im Normalbetrieb unnötig (Zapfung + PV-Fenster).
 
 Startfenster seit **v0.18.10** als 3-Stufen-Eskalation über das Lauf-Alter
 (Dunkelflauten-Hedge, PV = inverser Flauten-Melder):
 
 | Alter | Startbedingung |
 |---|---|
-| ≥ 5 Tage (`EARLY_PV_DAYS`) | PV-Überschuss ≥ 1700W → vorziehen |
+| ≥ 5 Tage (`EARLY_PV_DAYS`) | PV-Überschuss ≥ 1700W **vor 13 Uhr** → vorziehen |
 | ≥ 9 Tage (`INTERVAL`+`GRACE`) | cheapest_4h **und** price_level nicht expensive |
 | ≥ 12 Tage (`HARD_DAYS`) | cheapest_4h bedingungslos (Hygiene > Preis) |
 
 `_legionella_active` wird erst nach **erfolgreichem** Einschalten gesetzt —
 vorher wird das Fenster jeden Tick neu bewertet (Bugfix 2026-07-07: gearmter
 Lauf wurde vom Override-Cooldown geblockt und feuerte um 00:02 ins teuerste
-Fenster). Lauf-Deckel `LEGIONELLA_MAX_RUNTIME_H` (6h) statt des 4h-Failsafe —
-der Stab schafft real nur ~1.7 K/h auf T21-Mitte.
+Fenster). Lauf-Deckel `LEGIONELLA_MAX_RUNTIME_H` (12h) statt des 4h-Failsafe —
+der Stab schafft real ~1.7 K/h auf T21-Mitte, 52→65 ≈ 6–8h (WP hilft bis ~57).
 
-**Gerätesemantik (Feldtest 2026-07-07):** Freigabe-Register 2001 = App-Funktion
-„E-Heizstab/Boost" (Aktor, regelt selbst aufs Boost-Ziel Reg 2003 = 59°C) —
-deshalb `LEGIONELLA_TARGET_C` = 58.5. **Betriebsart LF1/LF2 (Reg 2002) NIE
-verwenden**: Legacy-Modi, die neue Proxon-App kennt sie nicht (zeigt
-„Warmwasser aus") und der Modus legt den Warmwasser-Betrieb still — Boost
-heizt darin nicht, WP auch nicht (4h-Test ohne jede Reaktion).
+**Gerätesemantik (Feldtests 2026-07-07):** Freigabe-Register 2001 = App-Funktion
+„E-Heizstab/Boost": Aktor mit **Einschalt-Hysterese ~3–5 K unterm Boost-Ziel**
+(Ziel 59 / Tank 56.9 → keine Reaktion; Ziel 65 → Stab an) — beim echten Lauf
+startet der Tank bei ~52, Hysterese also irrelevant. **Betriebsart LF1/LF2
+(Reg 2002) NIE verwenden**: Legacy-Modi, die neue Proxon-App kennt sie nicht
+(zeigt „Warmwasser aus") und der Modus legt den Warmwasser-Betrieb still —
+Boost heizt darin nicht, WP auch nicht (4h-Test ohne jede Reaktion).
 
 **Safety-Reminder:** Heizstab an + `price_level ∈ {expensive, very_expensive}`
 → Push mit [Aus]/[Ignorieren], 60min-Cooldown, Quiet-Hours-Suppress.

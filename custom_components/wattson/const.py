@@ -29,16 +29,23 @@ HEIZSTAB_FAILSAFE_NOTIFY_COOLDOWN_MIN = 60  # Push max 1/h falls Off-Write verpu
 # (cheapest_4h oder PV-Überschuss) per Heizstab auf Zieltemperatur.
 # 7 Tage / 60 °C = übliche Praxis für EFH-Kleinanlagen (DVGW W551-Umfeld).
 LEGIONELLA_INTERVAL_DAYS = 7
-# v0.18.10: Ziel UNTER dem Boost-Ziel (Reg 2003 = 59°C) halten — das
-# Freigabe-Register 2001 ist laut Proxon-App der „E-Heizstab/Boost"-Knopf und
-# regelt selbst auf 59; mit Ziel 60 würde der Lauf nie fertig (2026-07-07:
-# Failsafe kappte bei 59.0). NIE Betriebsart LF1/LF2 (Reg 2002) verwenden:
-# Legacy-Modi, neue App kennt sie nicht (zeigt „Warmwasser aus") und der
-# Modus legt den Warmwasser-Betrieb still (Boost heizt darin NICHT).
-LEGIONELLA_TARGET_C      = 58.5
-# v0.18.9: Stab schafft real nur ~1.7 K/h auf T21-Mitte (Lauf 2026-07-07:
-# 52→59°C in 4h) — 4h-Failsafe kappte vor dem Ziel. Eigener Deckel für Läufe.
-LEGIONELLA_MAX_RUNTIME_H = 6.0
+# v0.18.11: Echte Desinfektion wie die alte Geräte-Legionellenfunktion —
+# Christian: 65°C reicht (Abtötung in ~2 min; alte Funktion fuhr 70).
+# Ablauf: Boost-Ziel (Reg 2003) für den Lauf auf LEGIONELLA_BOOST_TEMP_C
+# heben, Boost (Reg 2001) an, Abschluss bei T21 ≥ TARGET (knapp unter dem
+# Boost-Ziel, sonst wird der Lauf nie fertig), danach Reg 2003 restaurieren.
+# Boost hat ~3–5 K Einschalt-Hysterese unterm Ziel (Feldtest 7.7.: Ziel 59 /
+# Tank 56.9 → keine Reaktion; Ziel 65 → Stab an) — beim echten Lauf startet
+# der Tank bei ~52 (WP-Soll), Hysterese also nie ein Problem.
+# NIE Betriebsart LF1/LF2 (Reg 2002) verwenden: Legacy-Modi, neue App kennt
+# sie nicht (zeigt „Warmwasser aus") und der Modus legt Warmwasser still.
+LEGIONELLA_BOOST_TEMP_C  = 65.0
+LEGIONELLA_TARGET_C      = 64.5
+# Stab schafft real ~1.7 K/h auf T21-Mitte; 52→65 mit WP-Anteil ≈ 6–8h.
+LEGIONELLA_MAX_RUNTIME_H = 12.0
+# PV-Start nur vormittags/früher Nachmittag — der lange Lauf soll in Sonne
+# und Billigfenster liegen, nicht in den Abendpeak laufen.
+LEGIONELLA_PV_START_BEFORE_H = 13
 # v0.18.10: 3-Stufen-Start-Eskalation (Dunkelflauten-Hedge, PV = inverser
 # Flauten-Melder — Mehrtages-Preisforecast gibt es nicht):
 #   ≥ EARLY_PV_DAYS:        PV-Überschuss → vorziehen (Sonnentag mitnehmen)
@@ -79,6 +86,9 @@ ENTITY_PV_SURPLUS     = "sensor.pv_uberschuss_der_letzen_15_minuten"
 ENTITY_T300_TANK      = "sensor.proxon_t300_temperatur_t21_behalter_mitte"
 ENTITY_T300_SOLL      = "number.proxon_t300_solltemperatur"
 ENTITY_T300_HEIZSTAB  = "switch.proxon_t300_e_heizstab"
+# Boost-Zieltemperatur (Reg 2003) — wird für Legionellen-Läufe temporär auf
+# LEGIONELLA_BOOST_TEMP_C gehoben und danach restauriert
+ENTITY_T300_BOOST_TEMP = "number.proxon_t300_temperatur_e_heiz"
 ENTITY_EVCC_MODE      = "select.evcc_auto_mode"
 ENTITY_EVCC_CONNECTED = "binary_sensor.evcc_auto_connected"
 ENTITY_EVCC_SOC       = "sensor.evcc_auto_vehicle_soc"

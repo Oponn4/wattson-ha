@@ -63,11 +63,14 @@ from .const import (
     PV_SURPLUS_ON,
     HEIZSTAB_MAX_CONTINUOUS_H,
     HEIZSTAB_FAILSAFE_NOTIFY_COOLDOWN_MIN,
+    ENTITY_T300_BOOST_TEMP,
+    LEGIONELLA_BOOST_TEMP_C,
     LEGIONELLA_EARLY_PV_DAYS,
     LEGIONELLA_HARD_DAYS,
     LEGIONELLA_INTERVAL_DAYS,
     LEGIONELLA_MAX_RUNTIME_H,
     LEGIONELLA_PV_GRACE_DAYS,
+    LEGIONELLA_PV_START_BEFORE_H,
     LEGIONELLA_TARGET_C,
     AWAY_LONG_HOURS,
     BATTERIE_KAPAZITAT_KWH,
@@ -1011,9 +1014,18 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
                 last_done = datetime.fromisoformat(last_raw) if last_raw else None
             except (TypeError, ValueError):
                 last_done = None
+            # v0.18.11: Lauf-Fortsetzung nach HA-Restart — ein gemerkter
+            # prev-Boost-Temp-Wert heißt: Lauf war aktiv (Reg 2003 steht
+            # noch auf LEGIONELLA_BOOST_TEMP_C und muss restauriert werden)
+            if (
+                not self._legionella_active
+                and self._override.get_misc("legionella_prev_boost_temp") is not None
+            ):
+                self._legionella_active = True
             if self._legionella_active:
                 if s.t300_tank_temp >= LEGIONELLA_TARGET_C:
                     self._legionella_active = False
+                    await self._legionella_restore_boost_temp()
                     if not self._dry_run:
                         await self._override.async_set_misc(
                             "legionella_last_done", now.isoformat()
@@ -1049,6 +1061,7 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             # Stab läuft bereits (z.B. PV-Heizen) — Lauf übernimmt ihn direkt
             self._legionella_active = True
             legionella_starting = False
+            await self._legionella_begin_boost()
 
         if legionella_run:
             should_on = s.t300_tank_temp < LEGIONELLA_TARGET_C
@@ -1138,6 +1151,7 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
                 if legionella_starting:
                     # Einschalten ging durch → Lauf gilt jetzt als aktiv
                     self._legionella_active = True
+                    await self._legionella_begin_boost()
             else:
                 _LOGGER.info("UC4b übersprungen: %s", act_desc)
                 s.uc_status["uc4b"] = act_desc
@@ -1189,8 +1203,12 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         Ohne last_done (nie gelaufen): kein Überfälligkeits-Anker → nur PV.
         """
         age = now - last_done if last_done else None
-        if s.pv_surplus >= PV_SURPLUS_ON and (
-            age is None or age >= timedelta(days=LEGIONELLA_EARLY_PV_DAYS)
+        # PV-Start nur bis LEGIONELLA_PV_START_BEFORE_H Uhr — der Lauf dauert
+        # 6–8h und soll in Sonne/Billigfenster liegen, nicht im Abendpeak enden
+        if (
+            s.pv_surplus >= PV_SURPLUS_ON
+            and now.hour < LEGIONELLA_PV_START_BEFORE_H
+            and (age is None or age >= timedelta(days=LEGIONELLA_EARLY_PV_DAYS))
         ):
             return True
         if age is None:
@@ -1204,6 +1222,46 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         if age >= timedelta(days=LEGIONELLA_INTERVAL_DAYS + LEGIONELLA_PV_GRACE_DAYS):
             return in_cheapest and s.price_level not in UC12_EXPENSIVE_LEVELS
         return False
+
+    async def _legionella_begin_boost(self) -> None:
+        """Boost-Ziel (Reg 2003) für den Lauf auf LEGIONELLA_BOOST_TEMP_C heben.
+
+        Vorherigen Wert in `misc.legionella_prev_boost_temp` merken — der Key
+        dient zugleich als Restart-Marker für die Lauf-Fortsetzung.
+        """
+        if self._dry_run:
+            _LOGGER.info("[DRY-RUN] Boost-Ziel → %.1f°C", LEGIONELLA_BOOST_TEMP_C)
+            return
+        prev = self._fval_or_none(ENTITY_T300_BOOST_TEMP)
+        await self._override.async_set_misc(
+            "legionella_prev_boost_temp", prev if prev is not None else 59.0
+        )
+        await self.hass.services.async_call(
+            "number", "set_value",
+            {"entity_id": ENTITY_T300_BOOST_TEMP, "value": LEGIONELLA_BOOST_TEMP_C},
+            blocking=False,
+        )
+        _LOGGER.info(
+            "UC4b: Boost-Ziel %.1f → %.1f°C (Legionellen-Lauf)",
+            prev if prev is not None else -1, LEGIONELLA_BOOST_TEMP_C,
+        )
+
+    async def _legionella_restore_boost_temp(self) -> None:
+        """Boost-Ziel (Reg 2003) nach Lauf-Ende restaurieren + Marker löschen."""
+        prev = self._override.get_misc("legionella_prev_boost_temp")
+        if prev is None or self._dry_run:
+            return
+        try:
+            value = float(prev)
+        except (TypeError, ValueError):
+            value = 59.0
+        await self.hass.services.async_call(
+            "number", "set_value",
+            {"entity_id": ENTITY_T300_BOOST_TEMP, "value": value},
+            blocking=False,
+        )
+        await self._override.async_set_misc("legionella_prev_boost_temp", None)
+        _LOGGER.info("UC4b: Boost-Ziel restauriert → %.1f°C", value)
 
     async def _heizstab_failsafe_off(
         self, s: WattsonData, now: datetime, actions: list[str], on_hours: float,
@@ -1235,9 +1293,10 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         )
         actions.append(f"Heizstab-Failsafe nach {on_hours:.1f}h")
         # Laufende Legionellen-Aufheizung als erledigt werten — sonst startet
-        # sie im nächsten günstigen Fenster sofort wieder
+        # sie im nächsten günstigen Fenster sofort wieder. Boost-Ziel zurück!
         if self._legionella_active:
             self._legionella_active = False
+            await self._legionella_restore_boost_temp()
             if not self._dry_run:
                 await self._override.async_set_misc(
                     "legionella_last_done", now.isoformat()
