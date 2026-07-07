@@ -63,6 +63,8 @@ from .const import (
     PV_SURPLUS_ON,
     HEIZSTAB_MAX_CONTINUOUS_H,
     HEIZSTAB_FAILSAFE_NOTIFY_COOLDOWN_MIN,
+    LEGIONELLA_EARLY_PV_DAYS,
+    LEGIONELLA_HARD_DAYS,
     LEGIONELLA_INTERVAL_DAYS,
     LEGIONELLA_MAX_RUNTIME_H,
     LEGIONELLA_PV_GRACE_DAYS,
@@ -1009,10 +1011,6 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
                 last_done = datetime.fromisoformat(last_raw) if last_raw else None
             except (TypeError, ValueError):
                 last_done = None
-            legionella_due = (
-                last_done is None
-                or now - last_done >= timedelta(days=LEGIONELLA_INTERVAL_DAYS)
-            )
             if self._legionella_active:
                 if s.t300_tank_temp >= LEGIONELLA_TARGET_C:
                     self._legionella_active = False
@@ -1032,12 +1030,14 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
                     )
                 else:
                     legionella_run = True
-            elif legionella_due and self._legionella_window_open(s, now, last_done):
+            elif self._legionella_window_open(s, now, last_done):
                 # v0.18.9: NUR Startversuch — _legionella_active wird erst nach
                 # erfolgreichem Einschalten gesetzt (unten). Vorher: Fenster wird
                 # jeden Tick neu bewertet. Bugfix 2026-07-07: der Lauf wurde beim
                 # Entscheid gearmt, vom Override-Cooldown geblockt und feuerte um
                 # 00:02 aufgestaut ins ~29ct-Fenster (statt PV/17.9ct mittags).
+                # v0.18.10: Fälligkeit + 3-Stufen-Eskalation komplett in
+                # _legionella_window_open (early-PV / level-gated / hard).
                 legionella_run = True
                 _LOGGER.info(
                     "UC4b: Legionellen-Startfenster offen (letzter Lauf: %s)",
@@ -1169,25 +1169,41 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
     def _legionella_window_open(
         self, s: WattsonData, now: datetime, last_done: datetime | None
     ) -> bool:
-        """Startfenster für die Legionellen-Aufheizung (v0.18.9, plan-aware).
+        """Startfenster + Fälligkeit für die Legionellen-Aufheizung (v0.18.10).
 
-        Primär: PV-Überschuss JETZT — gratis und netzdienlich; im Sommer
-        praktisch täglich verfügbar. Preisfenster (cheapest_4h) nur als
-        Fallback, wenn der Lauf LEGIONELLA_PV_GRACE_DAYS über die Fälligkeit
-        hinaus auf PV gewartet hat (Winter). Ohne last_done (nie gelaufen)
-        gibt es keinen Überfälligkeits-Anker → nur PV.
+        3-Stufen-Eskalation über das Lauf-Alter (Dunkelflauten-Hedge; PV ist
+        der inverse Flauten-Melder, Mehrtages-Preisforecast existiert nicht):
+
+        ≥ EARLY_PV_DAYS (5):        PV-Überschuss → vorziehen. Der letzte
+                                    Sonnentag VOR einer Flaute wird mitgenommen;
+                                    öfter desinfizieren schadet nicht (Gerät
+                                    selbst würde alle 2–3 Tage zyklen).
+        ≥ INTERVAL+GRACE (7+2=9):   cheapest_4h, aber nur wenn price_level
+                                    nicht expensive — in der Dunkelflaute ist
+                                    selbst das Tages-Minimum „expensive"
+                                    (Tibber-Level relativ zum gleitenden
+                                    Schnitt → saisonfest) → er wartet.
+        ≥ HARD_DAYS (12):           cheapest_4h bedingungslos — irgendwann
+                                    schlägt Hygiene den Strompreis.
+
+        Ohne last_done (nie gelaufen): kein Überfälligkeits-Anker → nur PV.
         """
-        if s.pv_surplus >= PV_SURPLUS_ON:
+        age = now - last_done if last_done else None
+        if s.pv_surplus >= PV_SURPLUS_ON and (
+            age is None or age >= timedelta(days=LEGIONELLA_EARLY_PV_DAYS)
+        ):
             return True
-        if last_done is None:
+        if age is None:
             return False
-        overdue = now - last_done - timedelta(days=LEGIONELLA_INTERVAL_DAYS)
-        if overdue < timedelta(days=LEGIONELLA_PV_GRACE_DAYS):
-            return False
-        return bool(
+        in_cheapest = bool(
             s.cheapest_4h_start
             and is_in_window(now, s.cheapest_4h_start, s.cheapest_4h_end)
         )
+        if age >= timedelta(days=LEGIONELLA_HARD_DAYS):
+            return in_cheapest
+        if age >= timedelta(days=LEGIONELLA_INTERVAL_DAYS + LEGIONELLA_PV_GRACE_DAYS):
+            return in_cheapest and s.price_level not in UC12_EXPENSIVE_LEVELS
+        return False
 
     async def _heizstab_failsafe_off(
         self, s: WattsonData, now: datetime, actions: list[str], on_hours: float,

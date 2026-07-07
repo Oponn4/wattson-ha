@@ -56,14 +56,27 @@ bis `LEGIONELLA_TARGET_C` (60°C = Tank-Max), Push bei Abschluss, Zeitpunkt
 persistiert in `wattson_state.json` (`misc.legionella_last_done`). Im
 Normalbetrieb unnötig (Zapfung + PV-Fenster).
 
-Startfenster seit **v0.18.9** plan-aware: primär PV-Überschuss ≥ 1700W
-(gratis + netzdienlich); cheapest_4h nur als Fallback, wenn PV
-`LEGIONELLA_PV_GRACE_DAYS` (2) über die Fälligkeit hinaus nicht geliefert hat.
+Startfenster seit **v0.18.10** als 3-Stufen-Eskalation über das Lauf-Alter
+(Dunkelflauten-Hedge, PV = inverser Flauten-Melder):
+
+| Alter | Startbedingung |
+|---|---|
+| ≥ 5 Tage (`EARLY_PV_DAYS`) | PV-Überschuss ≥ 1700W → vorziehen |
+| ≥ 9 Tage (`INTERVAL`+`GRACE`) | cheapest_4h **und** price_level nicht expensive |
+| ≥ 12 Tage (`HARD_DAYS`) | cheapest_4h bedingungslos (Hygiene > Preis) |
+
 `_legionella_active` wird erst nach **erfolgreichem** Einschalten gesetzt —
 vorher wird das Fenster jeden Tick neu bewertet (Bugfix 2026-07-07: gearmter
 Lauf wurde vom Override-Cooldown geblockt und feuerte um 00:02 ins teuerste
 Fenster). Lauf-Deckel `LEGIONELLA_MAX_RUNTIME_H` (6h) statt des 4h-Failsafe —
 der Stab schafft real nur ~1.7 K/h auf T21-Mitte.
+
+**Gerätesemantik (Feldtest 2026-07-07):** Freigabe-Register 2001 = App-Funktion
+„E-Heizstab/Boost" (Aktor, regelt selbst aufs Boost-Ziel Reg 2003 = 59°C) —
+deshalb `LEGIONELLA_TARGET_C` = 58.5. **Betriebsart LF1/LF2 (Reg 2002) NIE
+verwenden**: Legacy-Modi, die neue Proxon-App kennt sie nicht (zeigt
+„Warmwasser aus") und der Modus legt den Warmwasser-Betrieb still — Boost
+heizt darin nicht, WP auch nicht (4h-Test ohne jede Reaktion).
 
 **Safety-Reminder:** Heizstab an + `price_level ∈ {expensive, very_expensive}`
 → Push mit [Aus]/[Ignorieren], 60min-Cooldown, Quiet-Hours-Suppress.

@@ -65,3 +65,4 @@ T300-Solltemperatur als deferrable in EMHASS — analog UC4b-Pattern
 | v0.18.7 | UC12 Urlaub-Gate + Force-Hitze respektiert Sleep; Write-Verifikation gegen Phantom-Overrides |
 | v0.18.8 | UC4b Dauerlauf-Failsafe (4h, override-immun) + Urlaub-Gate + Legionellen-Aufheizung im Urlaub |
 | v0.18.9 | Legionellen plan-aware (PV-primär + Grace-Fallback), Arm-nach-Act-Fix, 6h-Lauf-Deckel |
+| v0.18.10 | Legionellen: 3-Stufen-Preiseskalation (early-PV/level-gated/hard), Ziel 58.5°C (Boost-Semantik), LF1/LF2 verworfen |

@@ -29,14 +29,25 @@ HEIZSTAB_FAILSAFE_NOTIFY_COOLDOWN_MIN = 60  # Push max 1/h falls Off-Write verpu
 # (cheapest_4h oder PV-Überschuss) per Heizstab auf Zieltemperatur.
 # 7 Tage / 60 °C = übliche Praxis für EFH-Kleinanlagen (DVGW W551-Umfeld).
 LEGIONELLA_INTERVAL_DAYS = 7
-LEGIONELLA_TARGET_C      = 60.0  # == T300_TANK_MAX, Tank-Safety bleibt konsistent
+# v0.18.10: Ziel UNTER dem Boost-Ziel (Reg 2003 = 59°C) halten — das
+# Freigabe-Register 2001 ist laut Proxon-App der „E-Heizstab/Boost"-Knopf und
+# regelt selbst auf 59; mit Ziel 60 würde der Lauf nie fertig (2026-07-07:
+# Failsafe kappte bei 59.0). NIE Betriebsart LF1/LF2 (Reg 2002) verwenden:
+# Legacy-Modi, neue App kennt sie nicht (zeigt „Warmwasser aus") und der
+# Modus legt den Warmwasser-Betrieb still (Boost heizt darin NICHT).
+LEGIONELLA_TARGET_C      = 58.5
 # v0.18.9: Stab schafft real nur ~1.7 K/h auf T21-Mitte (Lauf 2026-07-07:
 # 52→59°C in 4h) — 4h-Failsafe kappte vor dem Ziel. Eigener Deckel für Läufe.
 LEGIONELLA_MAX_RUNTIME_H = 6.0
-# v0.18.9: Start bevorzugt PV-Überschuss (gratis + netzdienlich). Preisfenster
-# (cheapest_4h) nur als Fallback, wenn PV so viele Tage über die Fälligkeit
-# hinaus nicht geliefert hat (Winter). Nie mehr blind das nächstbeste Fenster.
+# v0.18.10: 3-Stufen-Start-Eskalation (Dunkelflauten-Hedge, PV = inverser
+# Flauten-Melder — Mehrtages-Preisforecast gibt es nicht):
+#   ≥ EARLY_PV_DAYS:        PV-Überschuss → vorziehen (Sonnentag mitnehmen)
+#   ≥ INTERVAL+GRACE_DAYS:  cheapest_4h, aber nur wenn price_level nicht
+#                           expensive (Tibber-Level ist relativ → saisonfest)
+#   ≥ HARD_DAYS:            cheapest_4h bedingungslos (Hygiene > Preis)
+LEGIONELLA_EARLY_PV_DAYS = 5
 LEGIONELLA_PV_GRACE_DAYS = 2
+LEGIONELLA_HARD_DAYS     = 12
 
 # Auto
 SOC_WARNUNG  = 20  # % → Push-Notification
