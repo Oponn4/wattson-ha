@@ -259,4 +259,17 @@ class WattsonNextTripSensor(WattsonBaseSensor):
             "benoetigter_soc": d.trip_required_soc,
             "plan_gesetzt": d.trip_plan_set,
             "begruendung": d.trip_reason,
+            "anstehende_fahrten": d.trips,
+            "anstecken_bis_guenstig": (
+                d.trip_plugin_deadline.isoformat() if d.trip_plugin_deadline else None
+            ),
+            "anstecken_spaetestens": (
+                d.trip_plugin_latest_feasible.isoformat()
+                if d.trip_plugin_latest_feasible else None
+            ),
+            "erinnerung_stufe": d.trip_reminder_stage,
+            "mehrkosten_bei_warten_eur": (
+                round(d.trip_extra_cost_eur, 2)
+                if d.trip_extra_cost_eur is not None else None
+            ),
         }

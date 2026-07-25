@@ -19,6 +19,23 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Version gepinnt: ungepinnt ändert ein ruff-Release den Regelsatz und
+      # der Gate wird rot, ohne dass sich der Code geändert hat (passiert mit
+      # 0.16.0). Anheben ist damit eine bewusste Entscheidung.
       - uses: astral-sh/ruff-action@v3
         with:
-          args: check custom_components/
+          version: "0.16.0"
+          args: check custom_components/ tests/
+
+  tests:
+    name: pytest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      # Kein Home Assistant nötig: forecast.py/const.py sind HA-frei,
+      # evcc_client.py braucht nur aiohttp
+      - run: pip install pytest aiohttp
+      - run: python -m pytest tests/ -q

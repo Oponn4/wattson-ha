@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
 from collections import deque
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
 from homeassistant.core import HomeAssistant
@@ -11,71 +11,12 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
-from .forecast import (
-    DeferrableSlot,
-    PriceSlot,
-    calculate_required_soc,
-    cheapest_window,
-    consecutive_cheap_minutes_from_now,
-    deferrable_slot_at,
-    humidex,
-    is_in_window,
-    most_expensive_window,
-    next_deferrable_on_block,
-    next_relevant_event,
-    parse_deferrable_schedule,
-    parse_tibber_response,
-    upcoming_slots,
-)
-from .gmaps import GoogleMapsClient
-from .e3dc_client import E3DCClient
-from .override import OverrideManager, UCDefinition
 from .const import (
-    BATTERY_FULL,
-    BATTERY_NOT_FULL,
-    DOMAIN,
-    EVCC_PLAN_BUFFER_MINUTES,
-    SKIP_LOCATION_KEYWORDS,
-    UC_DEFINITIONS,
-    ENTITY_BATTERY_SOC,
-    ENTITY_EVCC_CONNECTED,
-    ENTITY_EVCC_MODE,
-    ENTITY_EVCC_RANGE,
-    ENTITY_EVCC_SOC,
-    ENTITY_PRICE,
-    ENTITY_PRICE_LEVEL,
-    ENTITY_PRICE_RANKING,
-    ENTITY_PV_FC_HOUR,
-    ENTITY_PV_FC_NEXT_HOUR,
-    ENTITY_PV_FC_NOW,
-    ENTITY_PV_FC_REMAINING,
-    ENTITY_PV_FC_TOMORROW,
-    ENTITY_PV_PEAK_TODAY,
-    ENTITY_PV_PEAK_TOMORROW,
-    ENTITY_PV_POWER,
-    ENTITY_PV_SURPLUS,
-    ENTITY_SLEEP,
-    ENTITY_T300_HEIZSTAB,
-    ENTITY_T300_SOLL,
-    ENTITY_T300_TANK,
-    NOTIFY_SERVICE,
-    PV_SURPLUS_OFF,
-    PV_SURPLUS_ON,
-    HEIZSTAB_MAX_CONTINUOUS_H,
-    HEIZSTAB_FAILSAFE_NOTIFY_COOLDOWN_MIN,
-    ENTITY_T300_BOOST_TEMP,
-    LEGIONELLA_BOOST_TEMP_C,
-    LEGIONELLA_EARLY_PV_DAYS,
-    LEGIONELLA_HARD_DAYS,
-    LEGIONELLA_INTERVAL_DAYS,
-    LEGIONELLA_MAX_RUNTIME_H,
-    LEGIONELLA_PV_GRACE_DAYS,
-    LEGIONELLA_PV_START_BEFORE_H,
-    LEGIONELLA_TARGET_C,
     AWAY_LONG_HOURS,
     BATTERIE_KAPAZITAT_KWH,
+    BATTERY_FULL,
+    BATTERY_NOT_FULL,
     CLIMATE_COOL_OFFSET_C,
-    E3DC_MAX_DISCHARGE_W,
     CLIMATE_ECO_OFFSET_C,
     CLIMATE_PEAK_OFFSET_C,
     CLIMATE_PRECOOL_OFFSET_C,
@@ -92,32 +33,86 @@ from .const import (
     COOL_TREND_RISE_C_PER_H,
     COOL_TRIGGER_MAX_C,
     COOL_TRIGGER_MIN_C,
+    DEFAULT_EVCC_URL,
+    DOMAIN,
+    E3DC_MAX_DISCHARGE_W,
     EMHASS_BATT_DISCHARGE_MIN_W,
     EMHASS_DEFERRABLE_ON_MIN_W,
     EMHASS_MAX_PLAN_AGE_H,
     EMHASS_OPTIM_OK,
+    ENTITY_BATTERY_SOC,
     ENTITY_COOL_SNOOZE,
     ENTITY_EMHASS_OPTIM_STATUS,
     ENTITY_EMHASS_P_BATT_FORECAST,
     ENTITY_EMHASS_P_DEFERRABLE0,
     ENTITY_EMHASS_P_DEFERRABLE1,
+    ENTITY_EVCC_CONNECTED,
+    ENTITY_EVCC_MAX_CURRENT,
+    ENTITY_EVCC_MODE,
+    ENTITY_EVCC_PHASES,
+    ENTITY_EVCC_PLAN_SOC,
+    ENTITY_EVCC_RANGE,
+    ENTITY_EVCC_SOC,
     ENTITY_FRISCHLUFT,
+    ENTITY_HT_OFFICE_HUMIDITY,
+    ENTITY_HT_OFFICE_TEMP,
+    ENTITY_HT_SCHLAFZIMMER_HUMIDITY,
+    ENTITY_HT_SCHLAFZIMMER_TEMP,
+    ENTITY_HUMIDITY_PROXY,
     ENTITY_KLIMA_OFFICE,
     ENTITY_KLIMA_SCHLAFZIMMER,
     ENTITY_PERSON_CHRISTIAN,
     ENTITY_PERSON_SONJA,
+    ENTITY_PRICE,
+    ENTITY_PRICE_LEVEL,
+    ENTITY_PRICE_RANKING,
     ENTITY_PROXON_ABLUFT,
-    ENTITY_PROXON_COOL_ENABLE,
     ENTITY_PROXON_CLIMATE_OFFICE,
     ENTITY_PROXON_CLIMATE_SCHLAFZIMMER,
+    ENTITY_PROXON_COOL_ENABLE,
+    ENTITY_PV_FC_HOUR,
+    ENTITY_PV_FC_NEXT_HOUR,
+    ENTITY_PV_FC_NOW,
+    ENTITY_PV_FC_REMAINING,
+    ENTITY_PV_FC_TOMORROW,
+    ENTITY_PV_PEAK_TODAY,
+    ENTITY_PV_PEAK_TOMORROW,
+    ENTITY_PV_POWER,
+    ENTITY_PV_SURPLUS,
+    ENTITY_SLEEP,
+    ENTITY_T300_BOOST_TEMP,
+    ENTITY_T300_HEIZSTAB,
+    ENTITY_T300_SOLL,
+    ENTITY_T300_TANK,
     ENTITY_URLAUB_MODE,
     ENTITY_WEATHER_FORECAST,
+    ENTITY_WINDOW_OFFICE_LINKS,
+    EVCC_PLAN_BUFFER_MINUTES,
+    HEIZSTAB_FAILSAFE_NOTIFY_COOLDOWN_MIN,
+    HEIZSTAB_MAX_CONTINUOUS_H,
     HOT_FORECAST_THRESHOLD_C,
+    HUMIDEX_INSIDE_OUTSIDE_MIN_DELTA,
+    HUMIDEX_UNCOMFORTABLE,
+    HUMIDEX_WARM_THRESHOLD,
+    LEGIONELLA_BOOST_TEMP_C,
+    LEGIONELLA_EARLY_PV_DAYS,
+    LEGIONELLA_HARD_DAYS,
+    LEGIONELLA_INTERVAL_DAYS,
+    LEGIONELLA_MAX_RUNTIME_H,
+    LEGIONELLA_PV_GRACE_DAYS,
+    LEGIONELLA_PV_START_BEFORE_H,
+    LEGIONELLA_TARGET_C,
     MIN_SPREAD_EUR,
+    MISC_UC2_PLAN,
+    NOTIFY_SERVICE,
     PV_BYPASS_FACTOR,
     PV_COOLING_MIN_W,
     PV_KLIMA_MIN_W,
+    PV_SURPLUS_OFF,
+    PV_SURPLUS_ON,
     SCAN_INTERVAL_SECONDS,
+    SKIP_LOCATION_KEYWORDS,
+    SLEEP_EXEMPT_UCS,
     SMART_SPREAD_THRESHOLD_EUR,
     SOC_BATTERY_RESERVE,
     SOC_TARGET,
@@ -129,6 +124,13 @@ from .const import (
     T300_TEMP_TEUER,
     TREND_MIN_SPAN_MINUTES,
     TREND_WINDOW_MINUTES,
+    TRIP_CHARGE_LOSS_FACTOR,
+    TRIP_CHARGE_POWER_FALLBACK_KW,
+    TRIP_MAX_EVENTS_EVALUATED,
+    TRIP_REMINDER_STAGE1_LEAD_MIN,
+    TRIP_REMINDER_STAGE2_LEAD_MIN,
+    TRIP_REMINDER_STAGE3_BUFFER_MIN,
+    TRIP_REMINDER_TOLERANCE_EUR_PER_KWH,
     UC4B_CONFIRMATION_CYCLES,
     UC4B_REMINDER_COOLDOWN_MIN,
     UC6_DOWNSHIFT_CONFIRMATION_CYCLES,
@@ -151,16 +153,36 @@ from .const import (
     UC14_MIN_WINDOW_MINUTES,
     UC14_SOC_MAX_PCT,
     UC14_TOPUP_OVERHEAD_FACTOR,
-    HUMIDEX_INSIDE_OUTSIDE_MIN_DELTA,
-    HUMIDEX_UNCOMFORTABLE,
-    HUMIDEX_WARM_THRESHOLD,
-    ENTITY_HUMIDITY_PROXY,
-    ENTITY_HT_OFFICE_TEMP,
-    ENTITY_HT_OFFICE_HUMIDITY,
-    ENTITY_HT_SCHLAFZIMMER_TEMP,
-    ENTITY_HT_SCHLAFZIMMER_HUMIDITY,
-    ENTITY_WINDOW_OFFICE_LINKS,
+    UC_DEFINITIONS,
 )
+from .e3dc_client import E3DCClient
+from .evcc_client import EvccClient
+from .forecast import (
+    DeferrableSlot,
+    PriceSlot,
+    TripCandidate,
+    calculate_required_soc,
+    cheapest_window,
+    consecutive_cheap_minutes_from_now,
+    cost_from,
+    current_reminder_stage,
+    deferrable_slot_at,
+    event_key,
+    humidex,
+    is_in_window,
+    most_expensive_window,
+    needs_forced_charging,
+    next_deferrable_on_block,
+    parse_deferrable_schedule,
+    parse_tibber_response,
+    plan_charge_window,
+    relevant_events,
+    reminder_stage_due_times,
+    select_binding_trip,
+    upcoming_slots,
+)
+from .gmaps import GoogleMapsClient
+from .override import OverrideManager, UCDefinition
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -176,6 +198,8 @@ class WattsonTripConfig:
     safety_margin: int           # %
     evcc_vehicle_name: str
     lookahead_hours: int
+    # Empfänger der Plug-in-Erinnerungen (Default nur Christian, per UI erweiterbar)
+    notify_services: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -222,7 +246,7 @@ class WattsonData:
     pv_peak_today: datetime | None = None
     pv_peak_tomorrow: datetime | None = None
 
-    # UC2 — nächste Fahrt
+    # UC2 — nächste Fahrt (trip_* = bindende Fahrt, sonst die nächste)
     trip_title: str = ""
     trip_location: str = ""
     trip_calendar: str = ""
@@ -231,6 +255,14 @@ class WattsonData:
     trip_required_soc: int | None = None
     trip_plan_set: bool = False
     trip_reason: str = ""
+    # Alle ausgewerteten Fahrten im Lookahead — damit im Sensor sichtbar ist,
+    # was UC2 kennt, und nicht nur der eine gewählte Termin
+    trips: list[dict] = field(default_factory=list)
+    # Plug-in-Reminder: Deadline + Stand der Eskalation (für Sensor/Diagnose)
+    trip_plugin_deadline: datetime | None = None
+    trip_plugin_latest_feasible: datetime | None = None
+    trip_reminder_stage: int = 0
+    trip_extra_cost_eur: float | None = None
 
     # Forecast (Tibber)
     forecast_slots: list[PriceSlot] = field(default_factory=list)
@@ -306,7 +338,8 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
 
     def __init__(self, hass: HomeAssistant, dry_run: bool,
                  trip_cfg: WattsonTripConfig | None = None,
-                 e3dc: E3DCClient | None = None) -> None:
+                 e3dc: E3DCClient | None = None,
+                 evcc: EvccClient | None = None) -> None:
         super().__init__(
             hass,
             _LOGGER,
@@ -316,8 +349,13 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         self._dry_run = dry_run
         self._trip_cfg = trip_cfg
         self._e3dc = e3dc
+        self._evcc = evcc or EvccClient(hass, DEFAULT_EVCC_URL)
         self._prev: WattsonData = WattsonData(dry_run=dry_run)
-        self._planned_event_uid: str | None = None
+        # UC2-Fahrplan liegt persistiert im OverrideManager (MISC_UC2_PLAN),
+        # damit ein HA-Restart keinen manuell gelöschten Plan neu setzt.
+        # UC2 Plug-in-Reminder: Eskalationsstand pro (Termin, Ziel)
+        self._trip_reminder_key: str | None = None
+        self._trip_reminder_stage: int = 0
         self._last_max_discharge: int | None = None  # für UC10 override-detection
         self._all_away_since: datetime | None = None  # Tracking für UC11 v2
         # UC6-Hysterese: verhindert 5-min-Mode-Oszillation
@@ -602,8 +640,8 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
                                  "message": f"EMHASS liefert {age_h:.0f}h alten Plan — optimize.sh prüfen!"},
                                 blocking=False,
                             )
-                except Exception:
-                    pass
+                except Exception as ex:  # noqa: BLE001
+                    _LOGGER.debug("EMHASS-Stale-Notify fehlgeschlagen: %s", ex)
             else:
                 s.emhass_available = False
         if s.emhass_available:
@@ -691,15 +729,21 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         )
 
         if s.sleep_mode:
-            _LOGGER.info("Schlafmodus — keine Aktionen")
-            s.last_actions = ["Schlafmodus aktiv"]
+            _LOGGER.info("Schlafmodus — nur stille Planung (%s)", ", ".join(SLEEP_EXEMPT_UCS))
             s.t300_target = s.t300_solltemperatur
             s.evcc_target = s.evcc_mode
             s.t300_reason = "Schlafmodus"
             s.evcc_reason = "Schlafmodus"
             for uc_id, _slug, _display, _default in UC_DEFINITIONS:
+                if uc_id in SLEEP_EXEMPT_UCS:
+                    continue
                 s.uc_status[uc_id] = "schlafmodus"
                 s.uc_reason[uc_id] = "Schlafmodus aktiv"
+            # UC2 rechnet weiter: nachts liegende Billigfenster müssen erreichbar
+            # bleiben. Setzt nur einen evcc-Plan — keine Aktorik, kein Push.
+            sleep_actions: list[str] = []
+            await self._run_trip_planning(s, now, sleep_actions)
+            s.last_actions = ["Schlafmodus aktiv", *sleep_actions]
             self._prev = s
             return s
 
@@ -772,7 +816,7 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         await self._handle_uc10_discharge_lock(s, now, actions)
 
         # ── UC2: Kalender-basiertes Vorladen (vor UC6/7 weil setzt Plan-Mode-Hinweis) ──
-        await self._handle_trip_planning(s, now, actions)
+        await self._run_trip_planning(s, now, actions)
 
         # ── UC6/UC7: evcc Modus — v0.17.1: 3-Level + plan-aware ──────────
         # 3-phasig + 5.2 kWp PV → pv lädt selten autonom; minpv ist Workhorse.
@@ -780,11 +824,7 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         # (Richtung weniger laden) braucht Confirmation gegen Replan-Jitter.
         if s.car_connected:
             needs_charge = s.car_soc < SOC_TARGET
-            trip_urgent = bool(
-                s.trip_plan_set and s.trip_start is not None
-                and (s.trip_start - now)
-                    <= timedelta(hours=UC6_NOW_TRIP_URGENT_HOURS)
-            )
+            trip_urgent = self._trip_needs_forced_charging(s, now)
             socsoc_critical = s.car_soc < UC6_NOW_SOC_THRESHOLD_PCT
 
             # Plan-aware: aktueller Wallbox-Slot aus Forward-Plan (24h × 30min)
@@ -947,7 +987,15 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         self._prev = s
         return s
 
-    async def _fetch_calendar_events(self, entity_ids: list[str], hours: int) -> list[dict]:
+    async def _fetch_calendar_events(
+        self, entity_ids: list[str], hours: int
+    ) -> list[dict] | None:
+        """Events der konfigurierten Kalender.
+
+        None = Abruf fehlgeschlagen, [] = wirklich keine Termine. Die
+        Unterscheidung ist wichtig: das Aufräumen alter Fahrpläne darf einen
+        gültigen Plan nicht löschen, nur weil der Kalender gerade nicht antwortet.
+        """
         if not entity_ids:
             return []
         try:
@@ -958,9 +1006,9 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             )
         except HomeAssistantError as e:
             _LOGGER.warning("calendar.get_events fehlgeschlagen: %s", e)
-            return []
+            return None
         if not resp:
-            return []
+            return None
         # Response ist {entity_id: {"events": [...]}, ...} — mergen
         merged: list[dict] = []
         for cal_id, cal_data in resp.items():
@@ -1472,7 +1520,7 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         # Forced-off (Urlaub)
         if forced_off:
             if current_hvac != "off":
-                acted, desc = await self._try_act(
+                acted, _desc = await self._try_act(
                     "uc11", entity, "off",
                     "climate", "set_hvac_mode",
                     {"entity_id": entity, "hvac_mode": "off"},
@@ -1668,7 +1716,7 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
                 self._uc11_last_notify_utc[room] = now
                 actions.append(f"UC11 {room}: Notify gesendet ({message})")
                 _LOGGER.info("UC11 advisor notify gesendet (%s): %s", room, message)
-            except Exception as ex:
+            except Exception as ex:  # noqa: BLE001
                 _LOGGER.warning("UC11 notify fehlgeschlagen: %s", ex)
 
     async def _seed_abluft_trend_from_history(self) -> None:
@@ -1683,7 +1731,7 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
                 history.state_changes_during_period,
                 self.hass, start, None, ENTITY_PROXON_ABLUFT,
             )
-        except Exception as ex:  # Recorder fehlt/Query-Fehler → Buffer füllt live
+        except Exception as ex:  # noqa: BLE001 — Recorder fehlt/Query-Fehler, Buffer füllt live
             _LOGGER.debug("UC12 Trend-Seed aus Historie nicht möglich: %s", ex)
             return
         samples: list[tuple[datetime, float]] = []
@@ -2179,8 +2227,8 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         current_max_charge = int(current_settings.get("maxChargePower", UC14_FORCE_CHARGE_W))
 
         # Override-Detection: hat User maxChargePower extern geändert?
-        if self._last_max_charge is not None and self._uc14_active:
-            if abs(current_max_charge - self._last_max_charge) > 50:
+        if (self._last_max_charge is not None and self._uc14_active
+                and abs(current_max_charge - self._last_max_charge) > 50):
                 prev = self._last_max_charge
                 await self._override.async_record_override(
                     "uc14", "e3dc_max_charge_power", current_max_charge,
@@ -2336,9 +2384,9 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         current_max_discharge = int(current_settings.get("maxDischargePower", E3DC_MAX_DISCHARGE_W))
 
         # Override-Detection: hat User maxDischargePower extern geändert?
-        if self._last_max_discharge is not None:
-            # Toleranz 50W gegen Float-Rundung
-            if abs(current_max_discharge - self._last_max_discharge) > 50:
+        # Toleranz 50W gegen Float-Rundung
+        if (self._last_max_discharge is not None
+                and abs(current_max_discharge - self._last_max_discharge) > 50):
                 prev = self._last_max_discharge
                 await self._override.async_record_override(
                     "uc10", "e3dc_max_discharge_power", current_max_discharge,
@@ -2382,6 +2430,22 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
                 s.uc_status["uc10"] = "fehler"
                 s.uc_reason["uc10"] = "E3DC POST set_max_discharge_power fehlgeschlagen"
 
+    async def _run_trip_planning(
+        self, s: WattsonData, now: datetime, actions: list[str]
+    ) -> None:
+        """UC2 isoliert ausführen.
+
+        Kalenderdaten kommen von außen (fremde Formate, Ganztags-Events); ein
+        Fehler hier darf nicht den ganzen Tick und damit alle anderen UCs reißen.
+        """
+        try:
+            await self._handle_trip_planning(s, now, actions)
+        except Exception as ex:
+            _LOGGER.exception("UC2 Trip-Planning fehlgeschlagen")
+            s.trip_reason = f"Fehler: {ex}"
+            s.uc_status["uc2"] = "fehler"
+            s.uc_reason["uc2"] = s.trip_reason
+
     async def _handle_trip_planning(
         self, s: WattsonData, now: datetime, actions: list[str]
     ) -> None:
@@ -2413,61 +2477,471 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             return
 
         events = await self._fetch_calendar_events(cfg.auto_calendars, cfg.lookahead_hours)
-        event = next_relevant_event(events, now, SKIP_LOCATION_KEYWORDS)
-        if event is None:
-            s.trip_reason = "kein relevanter Termin in Sicht"
-            self._planned_event_uid = None
+        if events is None:
+            # Kalender nicht erreichbar — bestehenden Plan unangetastet lassen
+            s.trip_reason = "Kalender nicht abrufbar — Plan bleibt unverändert"
+            s.uc_status["uc2"] = "fehler"
+            s.uc_reason["uc2"] = s.trip_reason
             return
 
-        s.trip_title = event.get("summary", "?")
-        s.trip_location = event.get("location", "")
-        s.trip_start = event["_start_dt"]
-        s.trip_calendar = event.get("_calendar", "")
-
-        route = await cfg.gmaps.distance(cfg.home_address, s.trip_location)
-        if route is None:
-            s.trip_reason = f"Distanz für '{s.trip_location}' nicht ermittelbar"
-            return
-        s.trip_distance_km = route.distance_km
-
-        required_soc = calculate_required_soc(
-            route.distance_km, cfg.vehicle_consumption,
-            cfg.vehicle_capacity, cfg.safety_margin,
+        candidates = await self._evaluate_trip_candidates(cfg, events, now)
+        await self._cleanup_stale_trip_plan(
+            events, now, actions, cfg.evcc_vehicle_name,
         )
-        s.trip_required_soc = required_soc
-
-        if s.car_soc >= required_soc:
-            s.trip_reason = (f"SOC {s.car_soc:.0f}% ≥ benötigt {required_soc}% "
-                             f"({s.trip_title}, {route.distance_km:.0f} km)")
+        s.trips = [
+            {
+                "titel": c.title,
+                "start": c.start.isoformat(),
+                "ort": c.location,
+                "kalender": c.calendar,
+                "distanz_km": round(c.distance_km, 1),
+                "benoetigter_soc": c.required_soc,
+                "gedeckt": c.satisfied_by(s.car_soc),
+            }
+            for c in candidates
+        ]
+        if not candidates:
+            s.trip_reason = "kein relevanter Termin in Sicht"
             return
 
-        # Plan nur einmal pro Event setzen (idempotent via UID)
-        event_uid = event.get("uid") or f"{s.trip_start.isoformat()}:{s.trip_title}"
-        if self._planned_event_uid == event_uid and self._prev.trip_plan_set:
+        binding = select_binding_trip(candidates, s.car_soc)
+
+        # Anzeige: bindende Fahrt, sonst die nächste (dann als gedeckt gemeldet)
+        shown = binding.deadline_trip if binding else candidates[0]
+        s.trip_title = shown.title
+        s.trip_location = shown.location
+        s.trip_start = shown.start
+        s.trip_calendar = shown.calendar
+        s.trip_distance_km = shown.distance_km
+        s.trip_required_soc = binding.required_soc if binding else shown.required_soc
+
+        if binding is None:
+            s.trip_reason = (f"SOC {s.car_soc:.0f}% ≥ benötigt {shown.required_soc}% "
+                             f"({shown.title}, {shown.distance_km:.0f} km)")
+            return
+
+        required_soc = binding.required_soc
+        trip = binding.deadline_trip
+        # Ziel kann von einer späteren, größeren Fahrt kommen — im Text zeigen
+        driver_note = (
+            "" if binding.soc_driver is trip
+            else f", Ziel von '{binding.soc_driver.title}' "
+                 f"({binding.soc_driver.start.strftime('%d.%m %H:%M')})"
+        )
+
+        # Plan nur einmal pro (Termin, Ziel) setzen. Ziel gehört in den Key:
+        # taucht eine größere Fahrt auf, muss der Plan neu gesetzt werden.
+        plan_key = f"{trip.uid}:{required_soc}"
+
+        # Erinnerung läuft unabhängig davon, ob der Plan neu ist oder schon
+        # steht — ein Plan ohne angestecktes Auto bringt nichts.
+        departure = trip.start - timedelta(minutes=EVCC_PLAN_BUFFER_MINUTES)
+        self._compute_charge_window(s, cfg, now, required_soc, departure)
+        await self._handle_trip_plugin_reminder(
+            s, cfg, now, trip, required_soc, departure, plan_key, actions,
+        )
+
+        # Idempotenz gegen den ECHTEN evcc-Zustand, nicht gegen eigenes
+        # Gedächtnis: nur wenn dort schon unser Ziel steht, ist nichts zu tun.
+        # (Ein nur erinnerter Plan kann längst gelöscht worden sein.)
+        plan_soc_now = self._ival(ENTITY_EVCC_PLAN_SOC)
+        if plan_soc_now == required_soc and self._stored_plan_key() == plan_key:
             s.trip_plan_set = True
-            s.trip_reason = (f"Plan aktiv: {required_soc}% bis {s.trip_start.strftime('%d.%m %H:%M')} "
-                             f"({s.trip_title})")
+            s.trip_reason = (f"Plan aktiv: {required_soc}% bis "
+                             f"{trip.start.strftime('%d.%m %H:%M')} "
+                             f"({trip.title}{driver_note})")
             return
 
-        departure = s.trip_start - timedelta(minutes=EVCC_PLAN_BUFFER_MINUTES)
         if departure <= now:
-            s.trip_reason = f"Termin {s.trip_title} zu kurzfristig — Plan nicht mehr sinnvoll"
+            s.trip_reason = f"Termin {trip.title} zu kurzfristig — Plan nicht mehr sinnvoll"
             return
 
         _LOGGER.info(
-            "UC2: setze Plan für '%s' (%s) — Ziel %d%% bis %s (%.0f km, %s Termin)",
-            s.trip_title, s.trip_location, required_soc,
-            departure.strftime("%d.%m %H:%M"), route.distance_km,
-            s.trip_start.strftime("%d.%m %H:%M"),
+            "UC2: setze Plan für '%s' (%s) — Ziel %d%% bis %s (%.0f km, %s Termin)%s",
+            trip.title, trip.location, required_soc,
+            departure.strftime("%d.%m %H:%M"), trip.distance_km,
+            trip.start.strftime("%d.%m %H:%M"), driver_note,
         )
-        actions.append(await self._act(
-            "evcc_intg", "set_vehicle_plan",
-            startdate=departure.isoformat(),
-            vehicle=cfg.evcc_vehicle_name,
-            soc=required_soc,
-        ))
+        # Override-Vorprüfung getrennt vom Schreiben: geschrieben wird über die
+        # evcc-API (der evcc_intg-Service ist wirkungslos, s. evcc_client.py)
+        blocked = await self._trip_plan_blocked()
+        if blocked:
+            s.trip_reason = f"Plan nicht gesetzt — {blocked}"
+            s.uc_status["uc2"] = blocked
+            s.uc_reason["uc2"] = s.trip_reason
+            return
+
+        prev_plan_soc = self._state(ENTITY_EVCC_PLAN_SOC)
+        if self._dry_run:
+            act_desc = (f"DRY-RUN: evcc set_vehicle_plan("
+                        f"{cfg.evcc_vehicle_name}, {required_soc}%, "
+                        f"{departure.isoformat()})")
+            _LOGGER.info("[DRY-RUN] %s", act_desc)
+        else:
+            ok = await self._evcc.set_vehicle_plan(
+                cfg.evcc_vehicle_name, required_soc, departure,
+            )
+            if not ok:
+                s.trip_reason = "Plan setzen fehlgeschlagen (evcc-API)"
+                s.uc_status["uc2"] = "fehler"
+                s.uc_reason["uc2"] = s.trip_reason
+                return
+            await self._override.async_record_action(
+                "uc2", ENTITY_EVCC_PLAN_SOC, required_soc, prev_value=prev_plan_soc,
+            )
+            act_desc = (f"evcc-Fahrplan {required_soc}% bis "
+                        f"{departure.strftime('%d.%m %H:%M')}")
+        actions.append(act_desc)
         s.trip_plan_set = True
-        s.trip_reason = (f"Plan gesetzt: {required_soc}% bis {departure.strftime('%d.%m %H:%M')} "
-                         f"({s.trip_title}, {route.distance_km:.0f} km)")
+        s.trip_reason = (f"Plan gesetzt: {required_soc}% bis "
+                         f"{departure.strftime('%d.%m %H:%M')} "
+                         f"({trip.title}, {trip.distance_km:.0f} km{driver_note})")
         s.uc_reason["uc2"] = s.trip_reason
-        self._planned_event_uid = event_uid
+        await self._store_plan(plan_key, trip, required_soc, departure)
+
+    async def _trip_plan_blocked(self) -> str | None:
+        """Grund, warum UC2 den Fahrplan gerade NICHT schreiben darf.
+
+        Entspricht der Vorprüfung aus `_try_act`; UC2 braucht sie getrennt,
+        weil geschrieben wird über die evcc-API statt über einen HA-Service.
+        Erkennt insbesondere einen von Hand gelöschten Plan als User-Override
+        (und einen nie angekommenen Write als Retry-Fall, kein Override).
+        """
+        if self._override.in_cooldown("uc2"):
+            remaining = self._override.cooldown_remaining_minutes("uc2")
+            return f"user-override ({remaining}min Rest)"
+
+        current = self._state(ENTITY_EVCC_PLAN_SOC)
+        verdict = await self._override.async_check_action(ENTITY_EVCC_PLAN_SOC, current)
+        if verdict == "override":
+            await self._override.async_record_override("uc2", ENTITY_EVCC_PLAN_SOC, current)
+            remaining = self._override.cooldown_remaining_minutes("uc2")
+            return f"user-override neu erkannt ({remaining}min Rest)"
+        if verdict == "failed_write":
+            last = self._override.get_last_action(ENTITY_EVCC_PLAN_SOC)
+            _LOGGER.warning(
+                "UC2: Fahrplan-Write kam nicht an (Ist=%s, gewollt=%s) — Retry",
+                current, last.value if last else "?",
+            )
+            await self._override.async_drop_action(ENTITY_EVCC_PLAN_SOC)
+        return None
+
+    def _stored_plan(self) -> dict | None:
+        """Von UC2 gesetzter Fahrplan, persistiert (übersteht HA-Restart)."""
+        stored = self._override.get_misc(MISC_UC2_PLAN)
+        return stored if isinstance(stored, dict) else None
+
+    def _stored_plan_key(self) -> str | None:
+        stored = self._stored_plan()
+        return stored.get("key") if stored else None
+
+    async def _store_plan(
+        self, plan_key: str, trip: TripCandidate, required_soc: int, departure: datetime,
+    ) -> None:
+        await self._override.async_set_misc(MISC_UC2_PLAN, {
+            "key": plan_key,
+            "uid": trip.uid,
+            "titel": trip.title,
+            "soc": required_soc,
+            "abfahrt": departure.isoformat(),
+        })
+
+    async def _cleanup_stale_trip_plan(
+        self, events: list[dict], now: datetime, actions: list[str],
+        vehicle_name: str,
+    ) -> None:
+        """Fahrplan löschen, dessen Termin verschwunden ist.
+
+        Deckt abgesagte wie erledigte Termine ab. Ohne das bliebe ein Plan
+        stehen, bis zufällig ein neuer ihn überschreibt — evcc würde für eine
+        Fahrt laden, die niemand mehr macht.
+
+        Grundlage sind die ROHEN Kalendertermine, nicht die geocodierten
+        Kandidaten: sonst würde ein gmaps-Ausfall als „Termin weg" gelesen.
+        Der Aufrufer stellt sicher, dass der Kalenderabruf geklappt hat.
+        """
+        stored = self._stored_plan()
+        if not stored:
+            return
+        uid = stored.get("uid")
+        still_there = any(event_key(ev, now.tzinfo) == uid for ev in events)
+        if still_there:
+            return
+
+        # Nur löschen, wenn evcc überhaupt noch unseren Plan hält
+        plan_soc = self._ival(ENTITY_EVCC_PLAN_SOC)
+        if plan_soc and plan_soc == stored.get("soc"):
+            _LOGGER.info(
+                "UC2: Termin '%s' verschwunden — lösche evcc-Fahrplan (%s%%)",
+                stored.get("titel", "?"), plan_soc,
+            )
+            if self._dry_run:
+                actions.append(f"DRY-RUN: evcc del_vehicle_plan({vehicle_name})")
+            elif await self._evcc.delete_vehicle_plan(vehicle_name):
+                actions.append(f"evcc-Fahrplan gelöscht ({stored.get('titel', '?')})")
+                await self._override.async_drop_action(ENTITY_EVCC_PLAN_SOC)
+            else:
+                _LOGGER.warning("UC2: Fahrplan-Löschen fehlgeschlagen — Eintrag bleibt")
+                return
+        else:
+            _LOGGER.debug(
+                "UC2: Termin '%s' weg, evcc hält keinen passenden Plan (%s) — nur aufräumen",
+                stored.get("titel", "?"), plan_soc,
+            )
+        await self._override.async_set_misc(MISC_UC2_PLAN, None)
+
+    def _charge_power_kw(self) -> float:
+        """Ladeleistung aus evcc-Phasen/Strom, sonst Fallback."""
+        phases = self._ival(ENTITY_EVCC_PHASES)
+        current = self._fval(ENTITY_EVCC_MAX_CURRENT)
+        if phases >= 1 and current >= 6:
+            return phases * current * 230.0 / 1000.0
+        return TRIP_CHARGE_POWER_FALLBACK_KW
+
+    def _trip_needs_forced_charging(self, s: WattsonData, now: datetime) -> bool:
+        """Muss UC6 den Plan überstimmen und sofort laden (`now`)?
+
+        Früher rein zeitlich („Abfahrt < 12 h"). Das war falsch: `now` ignoriert
+        den evcc-Fahrplan und lädt preisblind. Am 25.07.2026 hätte die Regel ab
+        Mitternacht gegriffen (Abfahrt 12:00, SOC 86 < Ziel 90) und die fehlenden
+        2,5 kWh zu 35,6 ct gezogen, statt sie dem Plan im Billigfenster
+        10:00–11:30 (18–20 ct) zu überlassen.
+
+        Maßgeblich ist stattdessen, ob der Plan zeitlich überhaupt noch
+        durchkommt: erst ab `latest_feasible` (aus `plan_charge_window`) reicht
+        die verbleibende Zeit nicht mehr, und nur dann ist Vorrang für `now`
+        gerechtfertigt. Fehlt die Grenze (keine Preis-/Bedarfsdaten), greift die
+        alte Zeitregel als Rückfallebene.
+        """
+        return needs_forced_charging(
+            s.trip_plan_set, s.trip_start, s.trip_plugin_latest_feasible,
+            now, UC6_NOW_TRIP_URGENT_HOURS,
+        )
+
+    def _compute_charge_window(
+        self,
+        s: WattsonData,
+        cfg: WattsonTripConfig,
+        now: datetime,
+        required_soc: int,
+        departure: datetime,
+    ) -> None:
+        """Lade-Zeitfenster berechnen und auf `s` ablegen.
+
+        Bewusst unabhängig vom Ansteckzustand: der Plug-in-Reminder braucht die
+        Werte bei abgestecktem Auto, UC6 dagegen bei angestecktem (für die
+        Frage, ob der evcc-Plan zeitlich noch durchkommt).
+        """
+        s.trip_plugin_deadline = None
+        s.trip_plugin_latest_feasible = None
+        s.trip_extra_cost_eur = None
+
+        energy_kwh = (
+            max(0.0, required_soc - s.car_soc) / 100.0
+            * cfg.vehicle_capacity
+            * TRIP_CHARGE_LOSS_FACTOR
+        )
+        if energy_kwh <= 0 or departure <= now:
+            return
+        power_kw = self._charge_power_kw()
+
+        window = plan_charge_window(
+            s.forecast_slots, now, departure, energy_kwh, power_kw,
+            TRIP_REMINDER_TOLERANCE_EUR_PER_KWH,
+        )
+        if window is None:
+            # Ohne Preisdaten bleibt die reine Machbarkeitsgrenze
+            s.trip_plugin_latest_feasible = departure - timedelta(
+                hours=energy_kwh / power_kw
+            )
+            return
+
+        s.trip_plugin_deadline = window.price_deadline
+        s.trip_plugin_latest_feasible = window.latest_feasible
+        if window.latest_feasible is not None:
+            worst = cost_from(
+                s.forecast_slots, window.latest_feasible, departure,
+                window.slots_needed, power_kw,
+            )
+            if worst is not None:
+                s.trip_extra_cost_eur = window.extra_cost_eur(worst)
+
+    async def _handle_trip_plugin_reminder(
+        self,
+        s: WattsonData,
+        cfg: WattsonTripConfig,
+        now: datetime,
+        trip: TripCandidate,
+        required_soc: int,
+        departure: datetime,
+        plan_key: str,
+        actions: list[str],
+    ) -> None:
+        """Erinnern, das Auto anzustecken — getaktet nach der Preiskurve.
+
+        Kein fester Vorlauf zur Abfahrt: entscheidend ist, wann das letzte
+        bezahlbare Ladefenster schließt (`plan_charge_window`). Am 25.07.2026
+        lag diese Kante 17,5 h vor der Abfahrt — eine „6 h vorher"-Regel hätte
+        mitten in die teure Nacht gefeuert.
+
+        Löst sich selbst auf: sobald das Auto hängt, wird der Stand
+        zurückgesetzt. Deshalb ohne Aktions-Buttons — der einzige sinnvolle
+        Quittungsweg ist das Anstecken selbst.
+        """
+        if self._trip_reminder_key != plan_key:
+            # Neue Fahrt bzw. neues Ziel → Eskalation von vorn
+            self._trip_reminder_key = plan_key
+            self._trip_reminder_stage = 0
+
+        price_deadline = s.trip_plugin_deadline
+        latest_feasible = s.trip_plugin_latest_feasible
+        penalty_eur = s.trip_extra_cost_eur
+
+        if s.car_connected:
+            # Auto hängt → nichts zu erinnern. Die Fenster-Werte bleiben stehen,
+            # UC6 braucht sie für seine Dringlichkeitsprüfung.
+            if self._trip_reminder_stage:
+                _LOGGER.info("UC2: Auto hängt — Erinnerung zurückgesetzt (%s)", trip.title)
+            self._trip_reminder_stage = 0
+            s.trip_reminder_stage = 0
+            return
+        if latest_feasible is None and price_deadline is None:
+            return
+
+        # Nachtruhe zieht Fälligkeiten nach VORNE, unterdrückt sie nicht
+        stage_due = reminder_stage_due_times(
+            price_deadline, latest_feasible,
+            TRIP_REMINDER_STAGE1_LEAD_MIN,
+            TRIP_REMINDER_STAGE2_LEAD_MIN,
+            TRIP_REMINDER_STAGE3_BUFFER_MIN,
+            UC11_QUIET_START_H, UC11_QUIET_END_H,
+        )
+        level = current_reminder_stage(now, stage_due)
+        s.trip_reminder_stage = max(level, self._trip_reminder_stage)
+
+        if level <= self._trip_reminder_stage:
+            return
+
+        title, message, urgent = self._trip_reminder_text(
+            level, trip, required_soc, s.car_soc, departure,
+            price_deadline, latest_feasible, penalty_eur,
+        )
+        sent = await self._send_trip_reminder(cfg, title, message, urgent)
+        if sent:
+            self._trip_reminder_stage = level
+            s.trip_reminder_stage = level
+            actions.append(f"UC2 Anstecken-Erinnerung Stufe {level} gesendet")
+
+    def _trip_reminder_text(
+        self,
+        level: int,
+        trip: TripCandidate,
+        required_soc: int,
+        car_soc: float,
+        departure: datetime,
+        price_deadline: datetime | None,
+        latest_feasible: datetime | None,
+        penalty_eur: float | None,
+    ) -> tuple[str, str, bool]:
+        fahrt = (f"{trip.title} {trip.start.strftime('%d.%m. %H:%M')}, "
+                 f"{trip.distance_km:.0f} km")
+        soc = f"Auto {car_soc:.0f}%, gebraucht {required_soc}%"
+        if level == 1:
+            bis = price_deadline.strftime("%H:%M") if price_deadline else "?"
+            return (
+                "Auto anstecken für günstiges Laden",
+                f"{fahrt}. {soc}. Günstig laden geht nur bis {bis}.",
+                False,
+            )
+        if level == 2:
+            bis = price_deadline.strftime("%H:%M") if price_deadline else "bald"
+            mehr = f" Später wird's ~{penalty_eur:.2f} € teurer." if penalty_eur else ""
+            return (
+                "Letzter günstiger Ladeslot",
+                f"{fahrt}. {soc}. Billigfenster schließt {bis}.{mehr}",
+                True,
+            )
+        ab = latest_feasible.strftime("%H:%M") if latest_feasible else "jetzt"
+        los = departure.strftime("%H:%M")
+        return (
+            "Auto anstecken — Zeit wird knapp",
+            f"{fahrt}. {soc}. Ab {ab} reicht die Zeit bis {los} nicht mehr.",
+            True,
+        )
+
+    async def _send_trip_reminder(
+        self, cfg: WattsonTripConfig, title: str, message: str, urgent: bool,
+    ) -> bool:
+        """An alle konfigurierten notify-Dienste schicken."""
+        targets = cfg.notify_services or [NOTIFY_SERVICE]
+        payload = {
+            "title": f"⚡ {title}",
+            "message": message,
+            "data": {
+                # ersetzt die vorherige Stufe statt zu stapeln
+                "tag": "wattson_uc2_plugin",
+                "url": "/lovelace/energie",
+            },
+        }
+        if urgent:
+            payload["data"]["push"] = {"interruption-level": "time-sensitive"}
+        if self._dry_run:
+            _LOGGER.info("[DRY-RUN] UC2 Erinnerung an %s: %s", targets, message)
+            return True
+        ok = False
+        for target in targets:
+            service = target.split(".", 1)[1] if "." in target else target
+            try:
+                await self.hass.services.async_call(
+                    "notify", service, payload, blocking=False,
+                )
+                ok = True
+            except Exception as ex:  # noqa: BLE001
+                _LOGGER.warning("UC2 Erinnerung an %s fehlgeschlagen: %s", target, ex)
+        if ok:
+            _LOGGER.info("UC2 Erinnerung gesendet: %s", message)
+        return ok
+
+    async def _evaluate_trip_candidates(
+        self, cfg: WattsonTripConfig, events: list[dict], now: datetime
+    ) -> list[TripCandidate]:
+        """Alle relevanten Termine zu routbaren Trip-Kandidaten auflösen.
+
+        Nicht routbare Orte werden übersprungen (Warnung im Log) — ein Tippfehler
+        in einem Termin darf die Planung der übrigen nicht verhindern. Die Zahl
+        der Geocoding-Abfragen ist gedeckelt; der gmaps-Client cacht 7 Tage, die
+        Grenze schützt nur den ersten Tick nach einem Kalender-Schwall.
+        """
+        relevant = relevant_events(events, now, SKIP_LOCATION_KEYWORDS)
+        if len(relevant) > TRIP_MAX_EVENTS_EVALUATED:
+            _LOGGER.warning(
+                "UC2: %d relevante Termine, werte nur die nächsten %d aus",
+                len(relevant), TRIP_MAX_EVENTS_EVALUATED,
+            )
+            relevant = relevant[:TRIP_MAX_EVENTS_EVALUATED]
+
+        candidates: list[TripCandidate] = []
+        for ev in relevant:
+            location = (ev.get("location") or "").strip()
+            route = await cfg.gmaps.distance(cfg.home_address, location)
+            if route is None:
+                _LOGGER.warning(
+                    "UC2: Distanz für '%s' (%s) nicht ermittelbar — Termin übersprungen",
+                    location, ev.get("summary", "?"),
+                )
+                continue
+            start_dt = ev["_start_dt"]
+            title = ev.get("summary", "?")
+            candidates.append(TripCandidate(
+                title=title,
+                location=location,
+                calendar=ev.get("_calendar", ""),
+                start=start_dt,
+                distance_km=route.distance_km,
+                required_soc=calculate_required_soc(
+                    route.distance_km, cfg.vehicle_consumption,
+                    cfg.vehicle_capacity, cfg.safety_margin,
+                ),
+                uid=event_key(ev, now.tzinfo),
+            ))
+        return candidates

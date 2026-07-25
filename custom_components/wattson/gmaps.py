@@ -64,7 +64,7 @@ class GoogleMapsClient:
                 return None
             result = RouteResult(
                 distance_km=element["distance"]["value"] / 1000.0,
-                duration_min=int(round(element["duration"]["value"] / 60)),
+                duration_min=round(element["duration"]["value"] / 60),
             )
         except (KeyError, IndexError, TypeError) as e:
             _LOGGER.warning("gmaps Response unerwartet: %s", e)

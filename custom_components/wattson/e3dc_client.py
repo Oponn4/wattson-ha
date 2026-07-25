@@ -64,7 +64,7 @@ class E3DCClient:
                 "e3dc_rscp", "set_power_limits", data, blocking=True,
             )
             return True
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             _LOGGER.warning("e3dc_rscp.set_power_limits fehlgeschlagen: %s", exc)
             return False
 
