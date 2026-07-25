@@ -530,48 +530,87 @@ def needs_forced_charging(
     return (trip_start - now) <= timedelta(hours=fallback_hours)
 
 
-def reminder_stage_due_times(
-    price_deadline: datetime | None,
-    latest_feasible: datetime | None,
-    stage1_lead_min: int,
-    stage2_lead_min: int,
-    stage3_buffer_min: int,
-    quiet_start_h: int,
-    quiet_end_h: int,
-) -> dict[int, datetime | None]:
-    """Fälligkeit der drei Eskalationsstufen, aus der Nachtruhe vorgezogen.
+@dataclass(frozen=True)
+class PluginReminder:
+    """Eine Erinnerung, das Auto anzustecken."""
+    kind: str      # "ankunft" | "fahrt"
+    title: str
+    message: str
+    urgent: bool
 
-    Stufen 1+2 hängen an der Preis-Deadline, Stufe 3 an der Machbarkeitsgrenze
-    (und ist damit preisunabhängig — sie feuert auch ohne Forecast).
+
+def plugin_reminder_due(
+    *,
+    car_home: bool,
+    car_plugged: bool,
+    car_soc: float,
+    comfort_soc: int,
+    trip_required_soc: int | None,
+    trip_title: str,
+    trip_at_risk: bool,
+    minutes_since_arrival: float | None,
+    arrival_window_min: int,
+) -> PluginReminder | None:
+    """Ist eine Anstecken-Erinnerung fällig?
+
+    Bewusst EINE Sorte Meldung statt gestaffelter Preis-Eskalation. Das Einzige,
+    was ein Mensch beisteuern muss, ist das Kabel — alles andere entscheidet das
+    System selbst. Also gibt es auch nur eine Bitte, und die heißt "steck an".
+
+    Der Zeitpunkt trägt die halbe Wirkung: beim Heimkommen steht man neben dem
+    Auto, das Kabel ist zwei Meter weg. Dieselbe Meldung abends auf dem Sofa
+    wird weggewischt. Deshalb ist das Ankunftsfenster der Normalfall; ohne
+    Ankunftsbezug meldet nur noch die gefährdete Fahrt.
+
+    Seltenheit ist Teil der Funktion: eine Erinnerung, die oft kommt, wird
+    ignoriert — und mit ihr die eine wichtige. Darum liegt `comfort_soc`
+    bewusst niedrig.
     """
-    def _due(when: datetime | None, minutes: int) -> datetime | None:
-        if when is None:
-            return None
-        return pull_out_of_quiet_hours(
-            when - timedelta(minutes=minutes), quiet_start_h, quiet_end_h
+    if not car_home or car_plugged:
+        return None
+
+    braucht_fahrt = (
+        trip_required_soc is not None and car_soc < trip_required_soc
+    )
+
+    # Gefährdete Fahrt meldet unabhängig von der Ankunft — sonst verpasst man
+    # sie, wenn das Auto schon länger ungenutzt dasteht.
+    if braucht_fahrt and trip_at_risk:
+        return PluginReminder(
+            kind="fahrt",
+            title="Auto anstecken — Zeit wird knapp",
+            message=(
+                f"{trip_title}: gebraucht {trip_required_soc} %, "
+                f"drin sind {car_soc:.0f} %. Bitte anstecken."
+            ),
+            urgent=True,
         )
 
-    return {
-        1: _due(price_deadline, stage1_lead_min),
-        2: _due(price_deadline, stage2_lead_min),
-        3: _due(latest_feasible, stage3_buffer_min),
-    }
+    frisch_angekommen = (
+        minutes_since_arrival is not None
+        and minutes_since_arrival <= arrival_window_min
+    )
+    if not frisch_angekommen:
+        return None
 
-
-def current_reminder_stage(
-    now: datetime, stage_due: dict[int, datetime | None]
-) -> int:
-    """Höchste fällige Stufe (0 = noch nichts).
-
-    Höchste gewinnt: zieht die Nachtruhe zwei Stufen auf dieselbe Zeit, wird
-    die dringendere gemeldet statt beide.
-    """
-    stage = 0
-    for candidate in sorted(stage_due):
-        due = stage_due[candidate]
-        if due is not None and now >= due:
-            stage = candidate
-    return stage
+    if braucht_fahrt:
+        return PluginReminder(
+            kind="ankunft",
+            title="Auto anstecken",
+            message=(
+                f"ORA bei {car_soc:.0f} % — {trip_title} braucht "
+                f"{trip_required_soc} %. Bitte anstecken."
+            ),
+            urgent=False,
+        )
+    if car_soc < comfort_soc:
+        return PluginReminder(
+            kind="ankunft",
+            title="Auto anstecken",
+            message=f"ORA bei {car_soc:.0f} % — bitte anstecken.",
+            urgent=False,
+        )
+    return None
 
 
 @dataclass(frozen=True)

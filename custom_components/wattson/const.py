@@ -217,11 +217,19 @@ SLEEP_EXEMPT_UCS = ("uc2",)
 # letzten bezahlbaren Ladefensters (siehe forecast.plan_charge_window).
 # Mehrpreis pro kWh, der noch als „günstig genug" gilt
 TRIP_REMINDER_TOLERANCE_EUR_PER_KWH = 0.02
-# Vorlauf der Stufen relativ zur Preis-Deadline
-TRIP_REMINDER_STAGE1_LEAD_MIN = 90     # Vorwarnung
-TRIP_REMINDER_STAGE2_LEAD_MIN = 20     # letzter Aufruf, mit Mehrkosten im Text
-# Machbarkeits-Notnagel: Vorlauf vor dem spätesten noch reichenden Anstecken
-TRIP_REMINDER_STAGE3_BUFFER_MIN = 30
+# v0.19: EINE Erinnerung statt gestaffelter Preis-Eskalation.
+# Das Einzige, was ein Mensch beisteuern muss, ist das Kabel — also gibt es
+# auch nur eine Bitte. Gemeldet wird beim Heimkommen (da steht man neben dem
+# Auto) oder wenn eine Fahrt zeitlich zu kippen droht.
+ENTITY_CAR_LOCATION = "device_tracker.gwm_ora_03_location"
+# Unter diesem SOC beim Heimkommen erinnern. Bewusst niedrig: eine Meldung,
+# die oft kommt, wird ignoriert — und mit ihr die eine wichtige. 40 % sind
+# beim ORA noch gut 120 km, für einen normalen Tag reichlich.
+PLUGIN_COMFORT_SOC = 40
+# So lange nach der Ankunft gilt "gerade heimgekommen"
+PLUGIN_ARRIVAL_WINDOW_MIN = 20
+# Nicht öfter als alle N Minuten erinnern (pro Heimaufenthalt)
+PLUGIN_REMINDER_COOLDOWN_MIN = 180
 # Ladeleistung für die Bedarfsrechnung (3×16 A). Fällt zurück, wenn evcc
 # keine Phasen/Ströme liefert.
 TRIP_CHARGE_POWER_FALLBACK_KW = 11.04

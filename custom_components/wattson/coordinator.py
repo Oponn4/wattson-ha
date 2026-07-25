@@ -41,6 +41,7 @@ from .const import (
     EMHASS_MAX_PLAN_AGE_H,
     EMHASS_OPTIM_OK,
     ENTITY_BATTERY_SOC,
+    ENTITY_CAR_LOCATION,
     ENTITY_COOL_SNOOZE,
     ENTITY_EMHASS_OPTIM_STATUS,
     ENTITY_EMHASS_P_BATT_FORECAST,
@@ -106,6 +107,9 @@ from .const import (
     MIN_SPREAD_EUR,
     MISC_UC2_PLAN,
     NOTIFY_SERVICE,
+    PLUGIN_ARRIVAL_WINDOW_MIN,
+    PLUGIN_COMFORT_SOC,
+    PLUGIN_REMINDER_COOLDOWN_MIN,
     PV_BYPASS_FACTOR,
     PV_COOLING_MIN_W,
     PV_KLIMA_MIN_W,
@@ -128,9 +132,6 @@ from .const import (
     TRIP_CHARGE_LOSS_FACTOR,
     TRIP_CHARGE_POWER_FALLBACK_KW,
     TRIP_MAX_EVENTS_EVALUATED,
-    TRIP_REMINDER_STAGE1_LEAD_MIN,
-    TRIP_REMINDER_STAGE2_LEAD_MIN,
-    TRIP_REMINDER_STAGE3_BUFFER_MIN,
     TRIP_REMINDER_TOLERANCE_EUR_PER_KWH,
     UC4B_CONFIRMATION_CYCLES,
     UC4B_REMINDER_COOLDOWN_MIN,
@@ -161,13 +162,13 @@ from .e3dc_client import E3DCClient
 from .evcc_client import EvccClient
 from .forecast import (
     DeferrableSlot,
+    PluginReminder,
     PriceSlot,
     TripCandidate,
     calculate_required_soc,
     cheapest_window,
     consecutive_cheap_minutes_from_now,
     cost_from,
-    current_reminder_stage,
     decide_charge_mode,
     deferrable_slot_at,
     event_key,
@@ -179,8 +180,8 @@ from .forecast import (
     parse_deferrable_schedule,
     parse_tibber_response,
     plan_charge_window,
+    plugin_reminder_due,
     relevant_events,
-    reminder_stage_due_times,
     select_binding_trip,
     upcoming_slots,
 )
@@ -266,8 +267,8 @@ class WattsonData:
     # Plug-in-Reminder: Deadline + Stand der Eskalation (für Sensor/Diagnose)
     trip_plugin_deadline: datetime | None = None
     trip_plugin_latest_feasible: datetime | None = None
-    trip_reminder_stage: int = 0
     trip_extra_cost_eur: float | None = None
+    plugin_reminder_kind: str = ""   # "" | "ankunft" | "fahrt"
 
     # Forecast (Tibber)
     forecast_slots: list[PriceSlot] = field(default_factory=list)
@@ -358,9 +359,9 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         self._prev: WattsonData = WattsonData(dry_run=dry_run)
         # UC2-Fahrplan liegt persistiert im OverrideManager (MISC_UC2_PLAN),
         # damit ein HA-Restart keinen manuell gelöschten Plan neu setzt.
-        # UC2 Plug-in-Reminder: Eskalationsstand pro (Termin, Ziel)
-        self._trip_reminder_key: str | None = None
-        self._trip_reminder_stage: int = 0
+        # Anstecken-Erinnerung: seit wann steht das Auto zuhause, wann zuletzt erinnert
+        self._car_home_since: datetime | None = None
+        self._plugin_reminder_sent_at: datetime | None = None
         self._last_max_discharge: int | None = None  # für UC10 override-detection
         self._all_away_since: datetime | None = None  # Tracking für UC11 v2
         # UC6-Hysterese: verhindert 5-min-Mode-Oszillation
@@ -828,6 +829,9 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
 
         # ── UC2: Kalender-basiertes Vorladen (vor UC6/7 weil setzt Plan-Mode-Hinweis) ──
         await self._run_trip_planning(s, now, actions)
+
+        # ── Anstecken-Erinnerung (v0.19) — braucht keinen Termin ──────────
+        await self._handle_plugin_reminder(s, now, actions)
 
         # ── UC6/UC7: evcc Modus — v0.17.1: 3-Level + plan-aware ──────────
         # 3-phasig + 5.2 kWp PV → pv lädt selten autonom; minpv ist Workhorse.
@@ -2490,12 +2494,11 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         s.trip_departure = departure
         s.trip_travel_minutes = trip.travel_minutes
 
-        # Erinnerung läuft unabhängig davon, ob der Plan neu ist oder schon
-        # steht — ein Plan ohne angestecktes Auto bringt nichts.
+        # Lade-Zeitfenster berechnen — UC6 braucht `latest_feasible` für die
+        # Frage, ob der Plan zeitlich noch durchkommt. Die Anstecken-Erinnerung
+        # läuft seit v0.19 als eigener Schritt im Tick, nicht mehr hier: sie
+        # gilt auch ohne Termin.
         self._compute_charge_window(s, cfg, now, required_soc, departure)
-        await self._handle_trip_plugin_reminder(
-            s, cfg, now, trip, required_soc, departure, plan_key, actions,
-        )
 
         # Idempotenz gegen den ECHTEN evcc-Zustand, nicht gegen eigenes
         # Gedächtnis: nur wenn dort schon unser Ziel steht, ist nichts zu tun.
@@ -2723,127 +2726,83 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             if worst is not None:
                 s.trip_extra_cost_eur = window.extra_cost_eur(worst)
 
-    async def _handle_trip_plugin_reminder(
-        self,
-        s: WattsonData,
-        cfg: WattsonTripConfig,
-        now: datetime,
-        trip: TripCandidate,
-        required_soc: int,
-        departure: datetime,
-        plan_key: str,
-        actions: list[str],
+    async def _handle_plugin_reminder(
+        self, s: WattsonData, now: datetime, actions: list[str]
     ) -> None:
-        """Erinnern, das Auto anzustecken — getaktet nach der Preiskurve.
+        """Erinnern, das Auto anzustecken.
 
-        Kein fester Vorlauf zur Abfahrt: entscheidend ist, wann das letzte
-        bezahlbare Ladefenster schließt (`plan_charge_window`). Am 25.07.2026
-        lag diese Kante 17,5 h vor der Abfahrt — eine „6 h vorher"-Regel hätte
-        mitten in die teure Nacht gefeuert.
+        Läuft bewusst AUSSERHALB von UC2: der Alltagsfall ist "Akku niedrig,
+        Auto steht unangesteckt da" und hat mit Terminen nichts zu tun. Die
+        Fahrt ist nur der Sonderfall obendrauf.
 
-        Löst sich selbst auf: sobald das Auto hängt, wird der Stand
-        zurückgesetzt. Deshalb ohne Aktions-Buttons — der einzige sinnvolle
-        Quittungsweg ist das Anstecken selbst.
+        Gesendet wird beim Heimkommen — da steht man neben dem Auto und das
+        Kabel ist zwei Meter weg. Dieselbe Meldung abends auf dem Sofa wird
+        weggewischt. Ausnahme ist eine Fahrt, die zeitlich zu kippen droht;
+        die meldet unabhängig von der Ankunft.
         """
-        if self._trip_reminder_key != plan_key:
-            # Neue Fahrt bzw. neues Ziel → Eskalation von vorn
-            self._trip_reminder_key = plan_key
-            self._trip_reminder_stage = 0
+        cfg = self._trip_cfg
+        car_home = self._state(ENTITY_CAR_LOCATION) == "home"
 
-        price_deadline = s.trip_plugin_deadline
-        latest_feasible = s.trip_plugin_latest_feasible
-        penalty_eur = s.trip_extra_cost_eur
+        # Ankunft verfolgen: Übergang draußen -> zuhause
+        if car_home and self._car_home_since is None:
+            self._car_home_since = now
+            _LOGGER.debug("Auto zuhause seit %s", now.strftime("%H:%M"))
+        elif not car_home:
+            self._car_home_since = None
+            self._plugin_reminder_sent_at = None
 
         if s.car_connected:
-            # Auto hängt → nichts zu erinnern. Die Fenster-Werte bleiben stehen,
-            # UC6 braucht sie für seine Dringlichkeitsprüfung.
-            if self._trip_reminder_stage:
-                _LOGGER.info("UC2: Auto hängt — Erinnerung zurückgesetzt (%s)", trip.title)
-            self._trip_reminder_stage = 0
-            s.trip_reminder_stage = 0
-            return
-        if latest_feasible is None and price_deadline is None:
+            # Steckt — löst sich damit von selbst auf, deshalb braucht die
+            # Meldung auch keinen Quittungs-Button.
+            self._plugin_reminder_sent_at = None
             return
 
-        # Nachtruhe zieht Fälligkeiten nach VORNE, unterdrückt sie nicht
-        stage_due = reminder_stage_due_times(
-            price_deadline, latest_feasible,
-            TRIP_REMINDER_STAGE1_LEAD_MIN,
-            TRIP_REMINDER_STAGE2_LEAD_MIN,
-            TRIP_REMINDER_STAGE3_BUFFER_MIN,
-            UC11_QUIET_START_H, UC11_QUIET_END_H,
+        minutes_since_arrival = (
+            (now - self._car_home_since).total_seconds() / 60
+            if self._car_home_since else None
         )
-        level = current_reminder_stage(now, stage_due)
-        s.trip_reminder_stage = max(level, self._trip_reminder_stage)
-
-        if level <= self._trip_reminder_stage:
+        reminder = plugin_reminder_due(
+            car_home=car_home,
+            car_plugged=s.car_connected,
+            car_soc=s.car_soc,
+            comfort_soc=PLUGIN_COMFORT_SOC,
+            trip_required_soc=s.trip_required_soc if s.trip_plan_set else None,
+            trip_title=s.trip_title or "Fahrt",
+            trip_at_risk=self._trip_needs_forced_charging(s, now),
+            minutes_since_arrival=minutes_since_arrival,
+            arrival_window_min=PLUGIN_ARRIVAL_WINDOW_MIN,
+        )
+        s.plugin_reminder_kind = reminder.kind if reminder else ""
+        if reminder is None:
             return
 
-        title, message, urgent = self._trip_reminder_text(
-            level, trip, required_soc, s.car_soc, departure,
-            price_deadline, latest_feasible, penalty_eur,
-        )
-        sent = await self._send_trip_reminder(cfg, title, message, urgent)
-        if sent:
-            self._trip_reminder_stage = level
-            s.trip_reminder_stage = level
-            actions.append(f"UC2 Anstecken-Erinnerung Stufe {level} gesendet")
+        if self._plugin_reminder_sent_at is not None:
+            seit = (now - self._plugin_reminder_sent_at).total_seconds() / 60
+            if seit < PLUGIN_REMINDER_COOLDOWN_MIN:
+                return
 
-    def _trip_reminder_text(
-        self,
-        level: int,
-        trip: TripCandidate,
-        required_soc: int,
-        car_soc: float,
-        departure: datetime,
-        price_deadline: datetime | None,
-        latest_feasible: datetime | None,
-        penalty_eur: float | None,
-    ) -> tuple[str, str, bool]:
-        fahrt = (f"{trip.title} {trip.start.strftime('%d.%m. %H:%M')}, "
-                 f"{trip.distance_km:.0f} km")
-        soc = f"Auto {car_soc:.0f}%, gebraucht {required_soc}%"
-        if level == 1:
-            bis = price_deadline.strftime("%H:%M") if price_deadline else "?"
-            return (
-                "Auto anstecken für günstiges Laden",
-                f"{fahrt}. {soc}. Günstig laden geht nur bis {bis}.",
-                False,
-            )
-        if level == 2:
-            bis = price_deadline.strftime("%H:%M") if price_deadline else "bald"
-            mehr = f" Später wird's ~{penalty_eur:.2f} € teurer." if penalty_eur else ""
-            return (
-                "Letzter günstiger Ladeslot",
-                f"{fahrt}. {soc}. Billigfenster schließt {bis}.{mehr}",
-                True,
-            )
-        ab = latest_feasible.strftime("%H:%M") if latest_feasible else "jetzt"
-        los = departure.strftime("%H:%M")
-        return (
-            "Auto anstecken — Zeit wird knapp",
-            f"{fahrt}. {soc}. Ab {ab} reicht die Zeit bis {los} nicht mehr.",
-            True,
-        )
+        if await self._send_plugin_reminder(cfg, reminder):
+            self._plugin_reminder_sent_at = now
+            actions.append(f"Anstecken-Erinnerung gesendet ({reminder.kind})")
 
-    async def _send_trip_reminder(
-        self, cfg: WattsonTripConfig, title: str, message: str, urgent: bool,
+    async def _send_plugin_reminder(
+        self, cfg: WattsonTripConfig | None, reminder: PluginReminder
     ) -> bool:
         """An alle konfigurierten notify-Dienste schicken."""
-        targets = cfg.notify_services or [NOTIFY_SERVICE]
+        targets = (cfg.notify_services if cfg else None) or [NOTIFY_SERVICE]
         payload = {
-            "title": f"⚡ {title}",
-            "message": message,
+            "title": f"\U0001F50C {reminder.title}",
+            "message": reminder.message,
             "data": {
-                # ersetzt die vorherige Stufe statt zu stapeln
-                "tag": "wattson_uc2_plugin",
+                # ersetzt eine ältere Meldung statt zu stapeln
+                "tag": "wattson_plugin",
                 "url": "/lovelace/energie",
             },
         }
-        if urgent:
+        if reminder.urgent:
             payload["data"]["push"] = {"interruption-level": "time-sensitive"}
         if self._dry_run:
-            _LOGGER.info("[DRY-RUN] UC2 Erinnerung an %s: %s", targets, message)
+            _LOGGER.info("[DRY-RUN] Erinnerung an %s: %s", targets, reminder.message)
             return True
         ok = False
         for target in targets:
@@ -2854,9 +2813,9 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
                 )
                 ok = True
             except Exception as ex:  # noqa: BLE001
-                _LOGGER.warning("UC2 Erinnerung an %s fehlgeschlagen: %s", target, ex)
+                _LOGGER.warning("Erinnerung an %s fehlgeschlagen: %s", target, ex)
         if ok:
-            _LOGGER.info("UC2 Erinnerung gesendet: %s", message)
+            _LOGGER.info("Anstecken-Erinnerung gesendet: %s", reminder.message)
         return ok
 
     async def _evaluate_trip_candidates(

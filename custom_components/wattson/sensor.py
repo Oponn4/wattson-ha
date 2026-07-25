@@ -269,7 +269,7 @@ class WattsonNextTripSensor(WattsonBaseSensor):
                 d.trip_plugin_latest_feasible.isoformat()
                 if d.trip_plugin_latest_feasible else None
             ),
-            "erinnerung_stufe": d.trip_reminder_stage,
+            "erinnerung": d.plugin_reminder_kind or None,
             "mehrkosten_bei_warten_eur": (
                 round(d.trip_extra_cost_eur, 2)
                 if d.trip_extra_cost_eur is not None else None
