@@ -12,17 +12,21 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from .const import (
     CONF_AUTO_CALENDARS,
     CONF_CALENDAR_ENTITY,
+    CONF_EVCC_URL,
     CONF_EVCC_VEHICLE_NAME,
     CONF_EVENT_LOOKAHEAD,
     CONF_GMAPS_KEY,
     CONF_HOME_ADDRESS,
+    CONF_NOTIFY_SERVICES,
     CONF_SAFETY_MARGIN,
     CONF_VEHICLE_CAPACITY,
     CONF_VEHICLE_CONSUMPTION,
     DEFAULT_AUTO_CALENDARS,
+    DEFAULT_EVCC_URL,
     DEFAULT_EVCC_VEHICLE_NAME,
     DEFAULT_EVENT_LOOKAHEAD,
     DEFAULT_HOME_ADDRESS,
+    DEFAULT_NOTIFY_SERVICES,
     DEFAULT_SAFETY_MARGIN,
     DEFAULT_VEHICLE_CAPACITY,
     DEFAULT_VEHICLE_CONSUMPTION,
@@ -31,6 +35,7 @@ from .const import (
 )
 from .coordinator import WattsonCoordinator, WattsonTripConfig
 from .e3dc_client import E3DCClient
+from .evcc_client import EvccClient
 from .gmaps import GoogleMapsClient
 
 _LOGGER = logging.getLogger(__name__)
@@ -127,12 +132,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         safety_margin=int(_opt(entry, CONF_SAFETY_MARGIN, DEFAULT_SAFETY_MARGIN)),
         evcc_vehicle_name=_opt(entry, CONF_EVCC_VEHICLE_NAME, DEFAULT_EVCC_VEHICLE_NAME),
         lookahead_hours=int(_opt(entry, CONF_EVENT_LOOKAHEAD, DEFAULT_EVENT_LOOKAHEAD)),
+        notify_services=(
+            _opt(entry, CONF_NOTIFY_SERVICES, None) or list(DEFAULT_NOTIFY_SERVICES)
+        ),
     )
 
     e3dc = E3DCClient(hass)
+    evcc = EvccClient(hass, _opt(entry, CONF_EVCC_URL, DEFAULT_EVCC_URL))
 
     coordinator = WattsonCoordinator(
-        hass, dry_run=dry_run, trip_cfg=trip_cfg, e3dc=e3dc,
+        hass, dry_run=dry_run, trip_cfg=trip_cfg, e3dc=e3dc, evcc=evcc,
     )
     await coordinator.async_setup()
     await coordinator.async_config_entry_first_refresh()

@@ -8,5 +8,7 @@ SRC="$(dirname "$0")/custom_components/wattson"
 
 echo "Deploying to $HA_TEST_HOST:$HA_TEST_PATH ..."
 ssh "$HA_TEST_HOST" "mkdir -p $HA_TEST_PATH"
-rsync -av --delete "$SRC/" "$HA_TEST_HOST:$HA_TEST_PATH/"
+# __pycache__ ausschließen: lokal kompilierte .pyc gehören nicht ins Zielsystem,
+# HA kompiliert selbst
+rsync -av --delete --exclude='__pycache__' "$SRC/" "$HA_TEST_HOST:$HA_TEST_PATH/"
 echo "Done. Restart Home Assistant to apply."

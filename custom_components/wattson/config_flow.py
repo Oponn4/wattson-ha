@@ -11,10 +11,12 @@ from .const import (
     CONF_E3DC_PASSWORD,
     CONF_E3DC_URL,
     CONF_E3DC_USER,
+    CONF_EVCC_URL,
     CONF_EVCC_VEHICLE_NAME,
     CONF_EVENT_LOOKAHEAD,
     CONF_GMAPS_KEY,
     CONF_HOME_ADDRESS,
+    CONF_NOTIFY_SERVICES,
     CONF_SAFETY_MARGIN,
     CONF_VEHICLE_CAPACITY,
     CONF_VEHICLE_CONSUMPTION,
@@ -22,9 +24,11 @@ from .const import (
     DEFAULT_E3DC_PASSWORD,
     DEFAULT_E3DC_URL,
     DEFAULT_E3DC_USER,
+    DEFAULT_EVCC_URL,
     DEFAULT_EVCC_VEHICLE_NAME,
     DEFAULT_EVENT_LOOKAHEAD,
     DEFAULT_HOME_ADDRESS,
+    DEFAULT_NOTIFY_SERVICES,
     DEFAULT_SAFETY_MARGIN,
     DEFAULT_VEHICLE_CAPACITY,
     DEFAULT_VEHICLE_CONSUMPTION,
@@ -49,6 +53,17 @@ def _schema(defaults: dict) -> vol.Schema:
         ): selector.EntitySelector(
             selector.EntitySelectorConfig(domain="calendar", multiple=True),
         ),
+        # Mehrfachauswahl: weitere Empfänger (z.B. Sonja) ohne Code-Änderung
+        vol.Optional(
+            CONF_NOTIFY_SERVICES,
+            default=defaults.get(CONF_NOTIFY_SERVICES, DEFAULT_NOTIFY_SERVICES),
+        ): selector.EntitySelector(
+            selector.EntitySelectorConfig(domain="notify", multiple=True),
+        ),
+        vol.Optional(
+            CONF_EVCC_URL,
+            default=defaults.get(CONF_EVCC_URL, DEFAULT_EVCC_URL),
+        ): str,
         vol.Optional(
             CONF_EVCC_VEHICLE_NAME,
             default=defaults.get(CONF_EVCC_VEHICLE_NAME, DEFAULT_EVCC_VEHICLE_NAME),

@@ -91,6 +91,11 @@ ENTITY_T300_HEIZSTAB  = "switch.proxon_t300_e_heizstab"
 ENTITY_T300_BOOST_TEMP = "number.proxon_t300_temperatur_e_heiz"
 ENTITY_EVCC_MODE      = "select.evcc_auto_mode"
 ENTITY_EVCC_CONNECTED = "binary_sensor.evcc_auto_connected"
+ENTITY_EVCC_PHASES      = "sensor.evcc_auto_phases_active"
+ENTITY_EVCC_MAX_CURRENT = "select.evcc_auto_max_current"
+# Ist-Zustand des evcc-Fahrplans — Wahrheitsquelle statt eigenem Gedächtnis
+ENTITY_EVCC_PLAN_SOC    = "sensor.evcc_auto_effective_plan_soc"
+ENTITY_EVCC_PLAN_TIME   = "sensor.evcc_auto_effective_plan_time"
 ENTITY_EVCC_SOC       = "sensor.evcc_auto_vehicle_soc"
 ENTITY_EVCC_RANGE     = "sensor.evcc_auto_vehicle_range"
 ENTITY_BATTERY_SOC    = "sensor.s10e_state_of_charge"   # % via e3dc_rscp
@@ -146,6 +151,11 @@ ENTITY_PV_PEAK_TOMORROW = "sensor.power_highest_peak_time_tomorrow"  # datetime
 
 NOTIFY_SERVICE = "notify.mobile_app_ios_hw23x69q47"
 
+# Empfänger für UC2-Erinnerungen. Konfigurierbar, damit Sonja per UI
+# zugeschaltet werden kann, ohne Code anzufassen — Default nur Christian.
+CONF_NOTIFY_SERVICES    = "notify_services"
+DEFAULT_NOTIFY_SERVICES = [NOTIFY_SERVICE]
+
 # Welle 7 — UC2 Kalender-Vorladen (Defaults für Config Flow)
 CONF_GMAPS_KEY            = "google_maps_api_key"
 CONF_HOME_ADDRESS         = "home_address"
@@ -156,6 +166,9 @@ CONF_VEHICLE_CAPACITY     = "vehicle_capacity_kwh"
 CONF_SAFETY_MARGIN        = "safety_margin_percent"
 CONF_EVCC_VEHICLE_NAME    = "evcc_vehicle_name"
 CONF_EVENT_LOOKAHEAD      = "event_lookahead_hours"
+# Fahrpläne gehen direkt an die evcc-API — der Service der evcc_intg-
+# Integration meldet Erfolg, ohne etwas zu bewirken (siehe evcc_client.py)
+CONF_EVCC_URL             = "evcc_url"
 
 DEFAULT_HOME_ADDRESS         = "Limburg an der Lahn, Germany"
 DEFAULT_CALENDAR_ENTITY      = "calendar.amazone"  # deprecated
@@ -165,9 +178,44 @@ DEFAULT_VEHICLE_CAPACITY     = 63.0   # kWh
 DEFAULT_SAFETY_MARGIN        = 25     # %
 DEFAULT_EVCC_VEHICLE_NAME    = "ora"
 DEFAULT_EVENT_LOOKAHEAD      = 36     # h
+DEFAULT_EVCC_URL             = "http://10.42.2.203:7070"  # CT 102
+
+# Persistenz-Key für den von UC2 gesetzten Fahrplan (übersteht HA-Restart)
+MISC_UC2_PLAN = "uc2_plan"
 
 # Skip Locations die offensichtlich keine echte Fahrt brauchen
 SKIP_LOCATION_KEYWORDS = ("microsoft teams", "teams meeting", "zoom", "https://", "http://")
+
+# Ganztags-Events nennen keine Abfahrtszeit → diese Stunde (lokal) annehmen.
+# Bewusst früh: lieber zu zeitig geladen als zur Abfahrt zu leer.
+ALL_DAY_DEPARTURE_HOUR = 8
+
+# Deckel für Geocoding-Abfragen pro Tick (gmaps cacht 7 Tage, schützt den
+# ersten Tick nach einem Kalender-Schwall). Sortiert nach Startzeit — die
+# zeitlich nächsten Termine gewinnen.
+TRIP_MAX_EVENTS_EVALUATED = 8
+
+# UCs, die auch im Schlafmodus laufen dürfen: rein rechnend/planend, keine
+# Aktorik im Haus und keine Notification. UC2 setzt nur einen evcc-Plan —
+# ohne diese Ausnahme wären nachts liegende Billigfenster unerreichbar
+# (im Winter der Normalfall).
+SLEEP_EXEMPT_UCS = ("uc2",)
+
+# ── UC2 Plug-in-Reminder ──────────────────────────────────────────────
+# Auslöser ist NICHT der Abstand zur Abfahrt, sondern die Schließkante des
+# letzten bezahlbaren Ladefensters (siehe forecast.plan_charge_window).
+# Mehrpreis pro kWh, der noch als „günstig genug" gilt
+TRIP_REMINDER_TOLERANCE_EUR_PER_KWH = 0.02
+# Vorlauf der Stufen relativ zur Preis-Deadline
+TRIP_REMINDER_STAGE1_LEAD_MIN = 90     # Vorwarnung
+TRIP_REMINDER_STAGE2_LEAD_MIN = 20     # letzter Aufruf, mit Mehrkosten im Text
+# Machbarkeits-Notnagel: Vorlauf vor dem spätesten noch reichenden Anstecken
+TRIP_REMINDER_STAGE3_BUFFER_MIN = 30
+# Ladeleistung für die Bedarfsrechnung (3×16 A). Fällt zurück, wenn evcc
+# keine Phasen/Ströme liefert.
+TRIP_CHARGE_POWER_FALLBACK_KW = 11.04
+# Ladeverluste (AC→Batterie) auf den reinen SOC-Bedarf aufschlagen
+TRIP_CHARGE_LOSS_FACTOR = 1.10
 
 # Plan-Charging — Wattson setzt Plan max 1× pro Event, identifiziert via uid
 EVCC_PLAN_BUFFER_MINUTES = 30  # Plan zielt N Min vor Event-Start
