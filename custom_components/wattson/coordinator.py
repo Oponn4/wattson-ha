@@ -47,6 +47,7 @@ from .const import (
     ENTITY_EMHASS_P_DEFERRABLE0,
     ENTITY_EMHASS_P_DEFERRABLE1,
     ENTITY_EVCC_CONNECTED,
+    ENTITY_EVCC_LIMIT_SOC,
     ENTITY_EVCC_MAX_CURRENT,
     ENTITY_EVCC_MODE,
     ENTITY_EVCC_PHASES,
@@ -133,11 +134,12 @@ from .const import (
     TRIP_REMINDER_TOLERANCE_EUR_PER_KWH,
     UC4B_CONFIRMATION_CYCLES,
     UC4B_REMINDER_COOLDOWN_MIN,
+    UC6_ALWAYS_CHARGE_LEVELS,
     UC6_DOWNSHIFT_CONFIRMATION_CYCLES,
     UC6_MINPV_PRICE_LEVELS,
     UC6_MODE_HOLD_MINUTES,
-    UC6_NOW_SOC_THRESHOLD_PCT,
     UC6_NOW_TRIP_URGENT_HOURS,
+    UC6_SUN_SURPLUS_MIN_W,
     UC11_AUTO_ACTION_OFFICE,
     UC11_AUTO_ACTION_SCHLAF,
     UC11_NOTIFY_COOLDOWN_MIN,
@@ -166,6 +168,7 @@ from .forecast import (
     consecutive_cheap_minutes_from_now,
     cost_from,
     current_reminder_stage,
+    decide_charge_mode,
     deferrable_slot_at,
     event_key,
     humidex,
@@ -620,6 +623,12 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             key="p_deferrable0",
         )
         s.emhass_p_deferrable1_plan = self._fval(ENTITY_EMHASS_P_DEFERRABLE1, 0.0)
+        # Wird weiter eingelesen (Diagnose, Dashboard), aber seit v0.19 NICHT
+        # mehr von UC6 befolgt: evcc kennt den Tibber-Tarif selbst und plant
+        # das Auto besser, als eine zweite Instanz es von außen kann.
+        # Im Auge behalten: EMHASS plant Batterie und Heizstab weiterhin unter
+        # der Annahme, die Wallbox laufe nach seinem Plan. Weicht das stark ab,
+        # gehört die Wallbox als Deferrable aus der EMHASS-Konfiguration raus.
         s.wallbox_schedule = parse_deferrable_schedule(
             self._attr(ENTITY_EMHASS_P_DEFERRABLE1, "deferrables_schedule", []),
             key="p_deferrable1",
@@ -825,89 +834,26 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         # now nur bei echtem Notfall (SOC<50 + Trip urgent). Downshift
         # (Richtung weniger laden) braucht Confirmation gegen Replan-Jitter.
         if s.car_connected:
-            needs_charge = s.car_soc < SOC_TARGET
-            trip_urgent = self._trip_needs_forced_charging(s, now)
-            socsoc_critical = s.car_soc < UC6_NOW_SOC_THRESHOLD_PCT
-
-            # Plan-aware: aktueller Wallbox-Slot aus Forward-Plan (24h × 30min)
-            wb_slot = (
-                deferrable_slot_at(s.wallbox_schedule, now)
-                if s.wallbox_schedule else None
+            # v0.19: eine Regel statt fünf Zweigen. Vorher optimierten drei
+            # Instanzen dasselbe Gerät (evcc mit Tarif, EMHASS-Wallbox-Plan,
+            # UC6-Heuristik) und arbeiteten gegeneinander — daher auch die
+            # Oszillation, gegen die Downshift-Zähler und Hysterese gebaut
+            # wurden. Jetzt: UC2 setzt den Plan, evcc führt ihn in `pv` aus,
+            # UC6 greift nur noch für Preis-Freigabe und den Notfall.
+            decision = decide_charge_mode(
+                car_connected=True,
+                plan_active=s.trip_plan_set,
+                plan_at_risk=self._trip_needs_forced_charging(s, now),
+                price_level=s.price_level,
+                pv_surplus_w=s.pv_surplus,
+                car_soc=s.car_soc,
+                limit_soc=self._ival(ENTITY_EVCC_LIMIT_SOC) or SOC_TARGET,
+                cheap_levels=UC6_MINPV_PRICE_LEVELS,
+                always_charge_levels=UC6_ALWAYS_CHARGE_LEVELS,
+                pv_surplus_min_w=UC6_SUN_SURPLUS_MIN_W,
             )
-            in_wb_block = (
-                wb_slot is not None
-                and wb_slot.power >= EMHASS_DEFERRABLE_ON_MIN_W
-            )
-
-            # raw_target: Wunschmode pro Cycle (vor Confirmation)
-            if socsoc_critical and (trip_urgent or in_wb_block):
-                raw_target = "now"
-                raw_reason = (
-                    f"Notfall: SOC {s.car_soc:.0f}% < "
-                    f"{UC6_NOW_SOC_THRESHOLD_PCT}% "
-                    + ("+ Trip in <"
-                       f"{UC6_NOW_TRIP_URGENT_HOURS}h" if trip_urgent
-                       else f"+ EMHASS-Plan {wb_slot.power:.0f}W")
-                )
-            elif trip_urgent and s.trip_required_soc and s.car_soc < s.trip_required_soc:
-                raw_target = "now"
-                raw_reason = (
-                    f"Trip in <{UC6_NOW_TRIP_URGENT_HOURS}h "
-                    f"({s.trip_title}, Ziel {s.trip_required_soc}% > "
-                    f"{s.car_soc:.0f}%)"
-                )
-            elif s.trip_plan_set:
-                # UC2-Plan aktiv, aber nicht urgent → minpv damit Plan greifen
-                # kann (now würde Plan ignorieren). pv wäre zu konservativ.
-                raw_target = "minpv"
-                raw_reason = (
-                    f"Trip-Plan aktiv ({s.trip_title}, Ziel "
-                    f"{s.trip_required_soc}% bis "
-                    f"{s.trip_start.strftime('%d.%m %H:%M') if s.trip_start else '?'}) "
-                    f"— minpv, Plan greift"
-                )
-            elif s.emhass_available and s.wallbox_schedule:
-                if in_wb_block:
-                    raw_target = "minpv"
-                    raw_reason = (
-                        f"EMHASS Plan-Slot {wb_slot.power:.0f}W "
-                        f"(SOC {s.car_soc:.0f}%, Preis {s.price_level})"
-                    )
-                elif s.price_level in UC6_MINPV_PRICE_LEVELS and needs_charge:
-                    raw_target = "minpv"
-                    raw_reason = (
-                        f"kein Plan-Slot, Preis {s.price_level} ok "
-                        f"(SOC {s.car_soc:.0f}% < {SOC_TARGET}%)"
-                    )
-                else:
-                    raw_target = "pv"
-                    raw_reason = (
-                        f"kein Plan-Slot, Preis {s.price_level} "
-                        f"({'SOC voll' if not needs_charge else 'expensive ohne Plan'})"
-                    )
-            else:
-                # Fallback Heuristik (kein EMHASS / Plan leer)
-                in_cheapest_4h = bool(
-                    s.cheapest_4h_start
-                    and is_in_window(
-                        now, s.cheapest_4h_start, s.cheapest_4h_end,
-                    )
-                )
-                if needs_charge and (
-                    in_cheapest_4h or s.price_level in UC6_MINPV_PRICE_LEVELS
-                ):
-                    raw_target = "minpv"
-                    raw_reason = (
-                        f"Heuristik: günstig ({s.price_level}"
-                        + (", cheapest_4h" if in_cheapest_4h else "")
-                        + f", SOC {s.car_soc:.0f}%)"
-                    )
-                else:
-                    raw_target = "pv"
-                    raw_reason = (
-                        f"Heuristik: SOC {s.car_soc:.0f}%, "
-                        f"Preis {s.price_level} → pv default"
-                    )
+            raw_target = decision.mode
+            raw_reason = decision.reason
 
             # Downshift-Confirmation: minpv→pv, now→minpv, now→pv brauchen
             # UC6_DOWNSHIFT_CONFIRMATION_CYCLES Cycles in Folge, damit kurze

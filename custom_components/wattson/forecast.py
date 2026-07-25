@@ -443,6 +443,69 @@ def pull_out_of_quiet_hours(
     return boundary - timedelta(minutes=1)
 
 
+@dataclass(frozen=True)
+class ChargeDecision:
+    """Ergebnis der Lademodus-Entscheidung."""
+    mode: str      # "now" | "minpv" | "pv"
+    reason: str
+
+
+def decide_charge_mode(
+    *,
+    car_connected: bool,
+    plan_active: bool,
+    plan_at_risk: bool,
+    price_level: str,
+    pv_surplus_w: int,
+    car_soc: float,
+    limit_soc: int,
+    cheap_levels: tuple[str, ...],
+    always_charge_levels: tuple[str, ...],
+    pv_surplus_min_w: int,
+) -> ChargeDecision:
+    """Lademodus nach der Alltagsregel bestimmen.
+
+    Die Regel in Worten: laden, wenn der Strom sau günstig ist — oder wenn er
+    günstig ist und die Sonne scheint. Dazu ein Fahrplan, wenn ein Termin es
+    verlangt. Sonst nur PV-Überschuss.
+
+    Bewusst NICHT enthalten: `normal` als Ladefreigabe. Tibbers Level sind
+    relativ zum gleitenden Mittel, und `normal` reicht damit bis rund 115 %
+    davon — Ende Juli 2026 also bis ~35 ct. Das ist keine Ladefreigabe,
+    sondern der Normalpreis.
+
+    `now` überstimmt den Fahrplan und lädt preisblind; deshalb nur, wenn der
+    Plan zeitlich nicht mehr durchkommt (`plan_at_risk`).
+    """
+    if not car_connected:
+        return ChargeDecision("pv", "Auto nicht angeschlossen")
+
+    if plan_active and plan_at_risk:
+        return ChargeDecision("now", "Fahrplan schafft es zeitlich nicht mehr")
+
+    if car_soc >= limit_soc:
+        return ChargeDecision("pv", f"SOC {car_soc:.0f}% ≥ Limit {limit_soc}%")
+
+    if price_level in always_charge_levels:
+        return ChargeDecision("minpv", f"Strom {price_level} — laden")
+
+    sun = pv_surplus_w >= pv_surplus_min_w
+    if price_level in cheap_levels and sun:
+        return ChargeDecision(
+            "minpv", f"Strom {price_level} + PV {pv_surplus_w} W — laden"
+        )
+
+    if plan_active:
+        # Der Plan läuft in `pv`: evcc kennt den Tarif und sucht sich die
+        # günstigsten Slots selbst. `minpv` würde ihn unterlaufen, weil es
+        # unabhängig vom Preis dauernd mit Mindeststrom aus dem Netz zieht.
+        return ChargeDecision("pv", "Fahrplan aktiv — evcc wählt die Slots")
+
+    if price_level in cheap_levels:
+        return ChargeDecision("pv", f"Strom {price_level}, aber keine Sonne")
+    return ChargeDecision("pv", f"Strom {price_level} — nur PV-Überschuss")
+
+
 def needs_forced_charging(
     plan_set: bool,
     trip_start: datetime | None,

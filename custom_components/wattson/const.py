@@ -95,6 +95,7 @@ ENTITY_EVCC_PHASES      = "sensor.evcc_auto_phases_active"
 ENTITY_EVCC_MAX_CURRENT = "select.evcc_auto_max_current"
 # Ist-Zustand des evcc-Fahrplans — Wahrheitsquelle statt eigenem Gedächtnis
 ENTITY_EVCC_PLAN_SOC    = "sensor.evcc_auto_effective_plan_soc"
+ENTITY_EVCC_LIMIT_SOC   = "sensor.evcc_auto_effective_limit_soc"
 ENTITY_EVCC_PLAN_TIME   = "sensor.evcc_auto_effective_plan_time"
 ENTITY_EVCC_SOC       = "sensor.evcc_auto_vehicle_soc"
 ENTITY_EVCC_RANGE     = "sensor.evcc_auto_vehicle_range"
@@ -122,7 +123,17 @@ UC6_MODE_HOLD_MINUTES = 10  # v0.17.1: gesenkt von 15 — Confirmation übernimm
 # minpv für "günstig laden auch ohne Vollüberschuss", now nur bei echtem Notfall.
 UC6_NOW_SOC_THRESHOLD_PCT     = 50     # SOC < X% + Trip-Termin → now
 UC6_NOW_TRIP_URGENT_HOURS     = 12     # Trip in < X h → now
-UC6_MINPV_PRICE_LEVELS        = ("very_cheap", "cheap", "normal")
+# Ladefreigabe nach Tibber-Level (Christian, 25.07.2026):
+# "very cheap ist natürlich very cheap, also saugünstig. Cheap sollte uns
+#  ausreichen." — `normal` bleibt bewusst DRAUSSEN: Tibbers Level sind relativ
+# zum gleitenden Mittel, `normal` reicht bis ~115% davon (Ende Juli 2026 rund
+# 35 ct) und ist damit keine Ladefreigabe, sondern der Normalpreis.
+UC6_MINPV_PRICE_LEVELS        = ("very_cheap", "cheap")
+# Diese Level laden auch ohne Sonne (Preis allein reicht)
+UC6_ALWAYS_CHARGE_LEVELS      = ("very_cheap",)
+# Ab so viel PV-Überschuss gilt "die Sonne scheint". 3-phasig braucht die
+# Wallbox min. 4,14 kW; darunter würde minpv die Differenz aus dem Netz ziehen.
+UC6_SUN_SURPLUS_MIN_W         = 4200
 # Downshift (Richtung "weniger laden") braucht Confirmation gegen Replan-Jitter
 UC6_DOWNSHIFT_CONFIRMATION_CYCLES = 2  # 2 Cycles in Folge "kein Bedarf mehr"
 
