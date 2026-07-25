@@ -250,7 +250,9 @@ class WattsonData:
     trip_title: str = ""
     trip_location: str = ""
     trip_calendar: str = ""
-    trip_start: datetime | None = None
+    trip_start: datetime | None = None       # Termin-Beginn
+    trip_departure: datetime | None = None   # Abfahrt = Beginn − Fahrzeit − Puffer
+    trip_travel_minutes: int | None = None
     trip_distance_km: float | None = None
     trip_required_soc: int | None = None
     trip_plan_set: bool = False
@@ -2495,6 +2497,8 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
                 "ort": c.location,
                 "kalender": c.calendar,
                 "distanz_km": round(c.distance_km, 1),
+                "fahrzeit_min": c.travel_minutes,
+                "abfahrt": c.departure(EVCC_PLAN_BUFFER_MINUTES).isoformat(),
                 "benoetigter_soc": c.required_soc,
                 "gedeckt": c.satisfied_by(s.car_soc),
             }
@@ -2533,9 +2537,15 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         # taucht eine größere Fahrt auf, muss der Plan neu gesetzt werden.
         plan_key = f"{trip.uid}:{required_soc}"
 
+        # Ladeziel ist die ABFAHRT, nicht der Termin-Beginn: bei 71 min Anfahrt
+        # wäre ein auf den Beginn gerechneter Plan erst fertig, wenn man längst
+        # unterwegs ist.
+        departure = trip.departure(EVCC_PLAN_BUFFER_MINUTES)
+        s.trip_departure = departure
+        s.trip_travel_minutes = trip.travel_minutes
+
         # Erinnerung läuft unabhängig davon, ob der Plan neu ist oder schon
         # steht — ein Plan ohne angestecktes Auto bringt nichts.
-        departure = trip.start - timedelta(minutes=EVCC_PLAN_BUFFER_MINUTES)
         self._compute_charge_window(s, cfg, now, required_soc, departure)
         await self._handle_trip_plugin_reminder(
             s, cfg, now, trip, required_soc, departure, plan_key, actions,
@@ -2548,8 +2558,9 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         if plan_soc_now == required_soc and self._stored_plan_key() == plan_key:
             s.trip_plan_set = True
             s.trip_reason = (f"Plan aktiv: {required_soc}% bis "
-                             f"{trip.start.strftime('%d.%m %H:%M')} "
-                             f"({trip.title}{driver_note})")
+                             f"{departure.strftime('%d.%m %H:%M')} "
+                             f"(Abfahrt zu {trip.title} "
+                             f"{trip.start.strftime('%H:%M')}{driver_note})")
             return
 
         if departure <= now:
@@ -2943,5 +2954,6 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
                     cfg.vehicle_capacity, cfg.safety_margin,
                 ),
                 uid=event_key(ev, now.tzinfo),
+                travel_minutes=route.duration_min,
             ))
         return candidates

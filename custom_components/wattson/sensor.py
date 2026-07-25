@@ -254,6 +254,8 @@ class WattsonNextTripSensor(WattsonBaseSensor):
         return {
             "ort": d.trip_location,
             "start": d.trip_start.isoformat() if d.trip_start else None,
+            "abfahrt": d.trip_departure.isoformat() if d.trip_departure else None,
+            "fahrzeit_min": d.trip_travel_minutes,
             "kalender": d.trip_calendar,
             "distanz_km": d.trip_distance_km,
             "benoetigter_soc": d.trip_required_soc,

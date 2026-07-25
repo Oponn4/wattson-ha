@@ -247,13 +247,25 @@ class TripCandidate:
     title: str
     location: str
     calendar: str
-    start: datetime          # tz-aware
+    start: datetime          # tz-aware, Termin-BEGINN (nicht Abfahrt)
     distance_km: float       # einfache Strecke
     required_soc: int        # für Hin+Rück inkl. Marge
     uid: str = ""
+    travel_minutes: int = 0  # einfache Fahrzeit laut Routing
 
     def satisfied_by(self, car_soc: float) -> bool:
         return car_soc >= self.required_soc
+
+    def departure(self, ready_buffer_minutes: int) -> datetime:
+        """Spätester Zeitpunkt, zu dem das Auto geladen dastehen muss.
+
+        Termin-Beginn minus Fahrzeit minus Fertigmach-Puffer. Ohne die
+        Fahrzeit zielte der Ladeplan auf den Termin-Beginn — bei 71 min
+        Anfahrt wäre das Auto erst fertig, wenn man längst unterwegs ist.
+        """
+        return self.start - timedelta(
+            minutes=self.travel_minutes + ready_buffer_minutes
+        )
 
 
 @dataclass(frozen=True)

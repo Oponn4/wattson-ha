@@ -218,7 +218,9 @@ TRIP_CHARGE_POWER_FALLBACK_KW = 11.04
 TRIP_CHARGE_LOSS_FACTOR = 1.10
 
 # Plan-Charging — Wattson setzt Plan max 1× pro Event, identifiziert via uid
-EVCC_PLAN_BUFFER_MINUTES = 30  # Plan zielt N Min vor Event-Start
+# Fertigmach-Puffer VOR der Abfahrt (nicht vor dem Termin): Abfahrt ist
+# Termin-Beginn minus Fahrzeit, davon nochmal diese Minuten abgezogen.
+EVCC_PLAN_BUFFER_MINUTES = 30
 
 # ── Use Cases (für Override-Manager + UI-Switches/Sensoren/Buttons) ──
 # Tuple: (uc_id, slug, display_name, default_enabled)
