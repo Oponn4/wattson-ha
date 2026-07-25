@@ -235,10 +235,8 @@ def calculate_required_soc(
     energy_needed_kwh = (distance_km * 2.0) * consumption_kwh_100km / 100.0
     soc_pct = (energy_needed_kwh / capacity_kwh) * 100.0
     soc_with_margin = soc_pct + safety_margin_percent
-    if soc_with_margin < 5:
-        soc_with_margin = 5
-    if soc_with_margin > 100:
-        soc_with_margin = 100
+    soc_with_margin = max(soc_with_margin, 5)
+    soc_with_margin = min(soc_with_margin, 100)
     # Aufrunden auf round_step
     return int(((soc_with_margin + round_step - 1) // round_step) * round_step)
 

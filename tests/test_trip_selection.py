@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from typing import ClassVar
 
 from conftest import forecast
 
@@ -80,7 +81,7 @@ class TestVollerPfadAbRohdaten:
     von gmaps gelieferten Werte (Geocoding selbst ist hier nicht Gegenstand).
     """
 
-    RAW = [
+    RAW: ClassVar[list[dict]] = [
         {
             "start": "2026-07-25T18:00:00+02:00",
             "end": "2026-07-25T19:30:00+02:00",
@@ -105,7 +106,7 @@ class TestVollerPfadAbRohdaten:
             "location": "Microsoft Teams-Besprechung",
         },
     ]
-    DISTANCES = {"Tennis": 6.557, "Wolfgangs Geburtstag": 100.6}
+    DISTANCES: ClassVar[dict[str, float]] = {"Tennis": 6.557, "Wolfgangs Geburtstag": 100.6}
 
     def _candidates(self, now: datetime) -> list[TripCandidate]:
         from conftest import const

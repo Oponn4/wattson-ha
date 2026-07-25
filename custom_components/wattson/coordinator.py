@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
 from collections import deque
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
 from homeassistant.core import HomeAssistant
@@ -11,93 +11,12 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
-from .forecast import (
-    DeferrableSlot,
-    PriceSlot,
-    TripCandidate,
-    calculate_required_soc,
-    cheapest_window,
-    consecutive_cheap_minutes_from_now,
-    deferrable_slot_at,
-    humidex,
-    is_in_window,
-    most_expensive_window,
-    needs_forced_charging,
-    next_deferrable_on_block,
-    parse_deferrable_schedule,
-    cost_from,
-    current_reminder_stage,
-    event_key,
-    parse_tibber_response,
-    plan_charge_window,
-    reminder_stage_due_times,
-    relevant_events,
-    select_binding_trip,
-    upcoming_slots,
-)
-from .gmaps import GoogleMapsClient
-from .e3dc_client import E3DCClient
-from .evcc_client import EvccClient
-from .override import OverrideManager, UCDefinition
 from .const import (
-    BATTERY_FULL,
-    BATTERY_NOT_FULL,
-    DOMAIN,
-    DEFAULT_EVCC_URL,
-    EVCC_PLAN_BUFFER_MINUTES,
-    MISC_UC2_PLAN,
-    SKIP_LOCATION_KEYWORDS,
-    SLEEP_EXEMPT_UCS,
-    TRIP_CHARGE_LOSS_FACTOR,
-    TRIP_CHARGE_POWER_FALLBACK_KW,
-    TRIP_MAX_EVENTS_EVALUATED,
-    TRIP_REMINDER_STAGE1_LEAD_MIN,
-    TRIP_REMINDER_STAGE2_LEAD_MIN,
-    TRIP_REMINDER_STAGE3_BUFFER_MIN,
-    TRIP_REMINDER_TOLERANCE_EUR_PER_KWH,
-    UC_DEFINITIONS,
-    ENTITY_BATTERY_SOC,
-    ENTITY_EVCC_CONNECTED,
-    ENTITY_EVCC_MODE,
-    ENTITY_EVCC_MAX_CURRENT,
-    ENTITY_EVCC_PHASES,
-    ENTITY_EVCC_PLAN_SOC,
-    ENTITY_EVCC_RANGE,
-    ENTITY_EVCC_SOC,
-    ENTITY_PRICE,
-    ENTITY_PRICE_LEVEL,
-    ENTITY_PRICE_RANKING,
-    ENTITY_PV_FC_HOUR,
-    ENTITY_PV_FC_NEXT_HOUR,
-    ENTITY_PV_FC_NOW,
-    ENTITY_PV_FC_REMAINING,
-    ENTITY_PV_FC_TOMORROW,
-    ENTITY_PV_PEAK_TODAY,
-    ENTITY_PV_PEAK_TOMORROW,
-    ENTITY_PV_POWER,
-    ENTITY_PV_SURPLUS,
-    ENTITY_SLEEP,
-    ENTITY_T300_HEIZSTAB,
-    ENTITY_T300_SOLL,
-    ENTITY_T300_TANK,
-    NOTIFY_SERVICE,
-    PV_SURPLUS_OFF,
-    PV_SURPLUS_ON,
-    HEIZSTAB_MAX_CONTINUOUS_H,
-    HEIZSTAB_FAILSAFE_NOTIFY_COOLDOWN_MIN,
-    ENTITY_T300_BOOST_TEMP,
-    LEGIONELLA_BOOST_TEMP_C,
-    LEGIONELLA_EARLY_PV_DAYS,
-    LEGIONELLA_HARD_DAYS,
-    LEGIONELLA_INTERVAL_DAYS,
-    LEGIONELLA_MAX_RUNTIME_H,
-    LEGIONELLA_PV_GRACE_DAYS,
-    LEGIONELLA_PV_START_BEFORE_H,
-    LEGIONELLA_TARGET_C,
     AWAY_LONG_HOURS,
     BATTERIE_KAPAZITAT_KWH,
+    BATTERY_FULL,
+    BATTERY_NOT_FULL,
     CLIMATE_COOL_OFFSET_C,
-    E3DC_MAX_DISCHARGE_W,
     CLIMATE_ECO_OFFSET_C,
     CLIMATE_PEAK_OFFSET_C,
     CLIMATE_PRECOOL_OFFSET_C,
@@ -114,32 +33,86 @@ from .const import (
     COOL_TREND_RISE_C_PER_H,
     COOL_TRIGGER_MAX_C,
     COOL_TRIGGER_MIN_C,
+    DEFAULT_EVCC_URL,
+    DOMAIN,
+    E3DC_MAX_DISCHARGE_W,
     EMHASS_BATT_DISCHARGE_MIN_W,
     EMHASS_DEFERRABLE_ON_MIN_W,
     EMHASS_MAX_PLAN_AGE_H,
     EMHASS_OPTIM_OK,
+    ENTITY_BATTERY_SOC,
     ENTITY_COOL_SNOOZE,
     ENTITY_EMHASS_OPTIM_STATUS,
     ENTITY_EMHASS_P_BATT_FORECAST,
     ENTITY_EMHASS_P_DEFERRABLE0,
     ENTITY_EMHASS_P_DEFERRABLE1,
+    ENTITY_EVCC_CONNECTED,
+    ENTITY_EVCC_MAX_CURRENT,
+    ENTITY_EVCC_MODE,
+    ENTITY_EVCC_PHASES,
+    ENTITY_EVCC_PLAN_SOC,
+    ENTITY_EVCC_RANGE,
+    ENTITY_EVCC_SOC,
     ENTITY_FRISCHLUFT,
+    ENTITY_HT_OFFICE_HUMIDITY,
+    ENTITY_HT_OFFICE_TEMP,
+    ENTITY_HT_SCHLAFZIMMER_HUMIDITY,
+    ENTITY_HT_SCHLAFZIMMER_TEMP,
+    ENTITY_HUMIDITY_PROXY,
     ENTITY_KLIMA_OFFICE,
     ENTITY_KLIMA_SCHLAFZIMMER,
     ENTITY_PERSON_CHRISTIAN,
     ENTITY_PERSON_SONJA,
+    ENTITY_PRICE,
+    ENTITY_PRICE_LEVEL,
+    ENTITY_PRICE_RANKING,
     ENTITY_PROXON_ABLUFT,
-    ENTITY_PROXON_COOL_ENABLE,
     ENTITY_PROXON_CLIMATE_OFFICE,
     ENTITY_PROXON_CLIMATE_SCHLAFZIMMER,
+    ENTITY_PROXON_COOL_ENABLE,
+    ENTITY_PV_FC_HOUR,
+    ENTITY_PV_FC_NEXT_HOUR,
+    ENTITY_PV_FC_NOW,
+    ENTITY_PV_FC_REMAINING,
+    ENTITY_PV_FC_TOMORROW,
+    ENTITY_PV_PEAK_TODAY,
+    ENTITY_PV_PEAK_TOMORROW,
+    ENTITY_PV_POWER,
+    ENTITY_PV_SURPLUS,
+    ENTITY_SLEEP,
+    ENTITY_T300_BOOST_TEMP,
+    ENTITY_T300_HEIZSTAB,
+    ENTITY_T300_SOLL,
+    ENTITY_T300_TANK,
     ENTITY_URLAUB_MODE,
     ENTITY_WEATHER_FORECAST,
+    ENTITY_WINDOW_OFFICE_LINKS,
+    EVCC_PLAN_BUFFER_MINUTES,
+    HEIZSTAB_FAILSAFE_NOTIFY_COOLDOWN_MIN,
+    HEIZSTAB_MAX_CONTINUOUS_H,
     HOT_FORECAST_THRESHOLD_C,
+    HUMIDEX_INSIDE_OUTSIDE_MIN_DELTA,
+    HUMIDEX_UNCOMFORTABLE,
+    HUMIDEX_WARM_THRESHOLD,
+    LEGIONELLA_BOOST_TEMP_C,
+    LEGIONELLA_EARLY_PV_DAYS,
+    LEGIONELLA_HARD_DAYS,
+    LEGIONELLA_INTERVAL_DAYS,
+    LEGIONELLA_MAX_RUNTIME_H,
+    LEGIONELLA_PV_GRACE_DAYS,
+    LEGIONELLA_PV_START_BEFORE_H,
+    LEGIONELLA_TARGET_C,
     MIN_SPREAD_EUR,
+    MISC_UC2_PLAN,
+    NOTIFY_SERVICE,
     PV_BYPASS_FACTOR,
     PV_COOLING_MIN_W,
     PV_KLIMA_MIN_W,
+    PV_SURPLUS_OFF,
+    PV_SURPLUS_ON,
     SCAN_INTERVAL_SECONDS,
+    SKIP_LOCATION_KEYWORDS,
+    SLEEP_EXEMPT_UCS,
     SMART_SPREAD_THRESHOLD_EUR,
     SOC_BATTERY_RESERVE,
     SOC_TARGET,
@@ -151,6 +124,13 @@ from .const import (
     T300_TEMP_TEUER,
     TREND_MIN_SPAN_MINUTES,
     TREND_WINDOW_MINUTES,
+    TRIP_CHARGE_LOSS_FACTOR,
+    TRIP_CHARGE_POWER_FALLBACK_KW,
+    TRIP_MAX_EVENTS_EVALUATED,
+    TRIP_REMINDER_STAGE1_LEAD_MIN,
+    TRIP_REMINDER_STAGE2_LEAD_MIN,
+    TRIP_REMINDER_STAGE3_BUFFER_MIN,
+    TRIP_REMINDER_TOLERANCE_EUR_PER_KWH,
     UC4B_CONFIRMATION_CYCLES,
     UC4B_REMINDER_COOLDOWN_MIN,
     UC6_DOWNSHIFT_CONFIRMATION_CYCLES,
@@ -173,16 +153,36 @@ from .const import (
     UC14_MIN_WINDOW_MINUTES,
     UC14_SOC_MAX_PCT,
     UC14_TOPUP_OVERHEAD_FACTOR,
-    HUMIDEX_INSIDE_OUTSIDE_MIN_DELTA,
-    HUMIDEX_UNCOMFORTABLE,
-    HUMIDEX_WARM_THRESHOLD,
-    ENTITY_HUMIDITY_PROXY,
-    ENTITY_HT_OFFICE_TEMP,
-    ENTITY_HT_OFFICE_HUMIDITY,
-    ENTITY_HT_SCHLAFZIMMER_TEMP,
-    ENTITY_HT_SCHLAFZIMMER_HUMIDITY,
-    ENTITY_WINDOW_OFFICE_LINKS,
+    UC_DEFINITIONS,
 )
+from .e3dc_client import E3DCClient
+from .evcc_client import EvccClient
+from .forecast import (
+    DeferrableSlot,
+    PriceSlot,
+    TripCandidate,
+    calculate_required_soc,
+    cheapest_window,
+    consecutive_cheap_minutes_from_now,
+    cost_from,
+    current_reminder_stage,
+    deferrable_slot_at,
+    event_key,
+    humidex,
+    is_in_window,
+    most_expensive_window,
+    needs_forced_charging,
+    next_deferrable_on_block,
+    parse_deferrable_schedule,
+    parse_tibber_response,
+    plan_charge_window,
+    relevant_events,
+    reminder_stage_due_times,
+    select_binding_trip,
+    upcoming_slots,
+)
+from .gmaps import GoogleMapsClient
+from .override import OverrideManager, UCDefinition
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -640,8 +640,8 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
                                  "message": f"EMHASS liefert {age_h:.0f}h alten Plan — optimize.sh prüfen!"},
                                 blocking=False,
                             )
-                except Exception:
-                    pass
+                except Exception as ex:  # noqa: BLE001
+                    _LOGGER.debug("EMHASS-Stale-Notify fehlgeschlagen: %s", ex)
             else:
                 s.emhass_available = False
         if s.emhass_available:
@@ -1520,7 +1520,7 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         # Forced-off (Urlaub)
         if forced_off:
             if current_hvac != "off":
-                acted, desc = await self._try_act(
+                acted, _desc = await self._try_act(
                     "uc11", entity, "off",
                     "climate", "set_hvac_mode",
                     {"entity_id": entity, "hvac_mode": "off"},
@@ -1716,7 +1716,7 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
                 self._uc11_last_notify_utc[room] = now
                 actions.append(f"UC11 {room}: Notify gesendet ({message})")
                 _LOGGER.info("UC11 advisor notify gesendet (%s): %s", room, message)
-            except Exception as ex:
+            except Exception as ex:  # noqa: BLE001
                 _LOGGER.warning("UC11 notify fehlgeschlagen: %s", ex)
 
     async def _seed_abluft_trend_from_history(self) -> None:
@@ -1731,7 +1731,7 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
                 history.state_changes_during_period,
                 self.hass, start, None, ENTITY_PROXON_ABLUFT,
             )
-        except Exception as ex:  # Recorder fehlt/Query-Fehler → Buffer füllt live
+        except Exception as ex:  # noqa: BLE001 — Recorder fehlt/Query-Fehler, Buffer füllt live
             _LOGGER.debug("UC12 Trend-Seed aus Historie nicht möglich: %s", ex)
             return
         samples: list[tuple[datetime, float]] = []
@@ -2227,8 +2227,8 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         current_max_charge = int(current_settings.get("maxChargePower", UC14_FORCE_CHARGE_W))
 
         # Override-Detection: hat User maxChargePower extern geändert?
-        if self._last_max_charge is not None and self._uc14_active:
-            if abs(current_max_charge - self._last_max_charge) > 50:
+        if (self._last_max_charge is not None and self._uc14_active
+                and abs(current_max_charge - self._last_max_charge) > 50):
                 prev = self._last_max_charge
                 await self._override.async_record_override(
                     "uc14", "e3dc_max_charge_power", current_max_charge,
@@ -2384,9 +2384,9 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         current_max_discharge = int(current_settings.get("maxDischargePower", E3DC_MAX_DISCHARGE_W))
 
         # Override-Detection: hat User maxDischargePower extern geändert?
-        if self._last_max_discharge is not None:
-            # Toleranz 50W gegen Float-Rundung
-            if abs(current_max_discharge - self._last_max_discharge) > 50:
+        # Toleranz 50W gegen Float-Rundung
+        if (self._last_max_discharge is not None
+                and abs(current_max_discharge - self._last_max_discharge) > 50):
                 prev = self._last_max_discharge
                 await self._override.async_record_override(
                     "uc10", "e3dc_max_discharge_power", current_max_discharge,
@@ -2440,8 +2440,8 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         """
         try:
             await self._handle_trip_planning(s, now, actions)
-        except Exception as ex:  # noqa: BLE001
-            _LOGGER.exception("UC2 Trip-Planning fehlgeschlagen: %s", ex)
+        except Exception as ex:
+            _LOGGER.exception("UC2 Trip-Planning fehlgeschlagen")
             s.trip_reason = f"Fehler: {ex}"
             s.uc_status["uc2"] = "fehler"
             s.uc_reason["uc2"] = s.trip_reason
@@ -2847,26 +2847,25 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
                  f"{trip.distance_km:.0f} km")
         soc = f"Auto {car_soc:.0f}%, gebraucht {required_soc}%"
         if level == 1:
+            bis = price_deadline.strftime("%H:%M") if price_deadline else "?"
             return (
                 "Auto anstecken für günstiges Laden",
-                f"{fahrt}. {soc}. Günstig laden geht nur bis "
-                f"{price_deadline.strftime('%H:%M') if price_deadline else '?'}.",
+                f"{fahrt}. {soc}. Günstig laden geht nur bis {bis}.",
                 False,
             )
         if level == 2:
+            bis = price_deadline.strftime("%H:%M") if price_deadline else "bald"
             mehr = f" Später wird's ~{penalty_eur:.2f} € teurer." if penalty_eur else ""
             return (
                 "Letzter günstiger Ladeslot",
-                f"{fahrt}. {soc}. Billigfenster schließt "
-                f"{price_deadline.strftime('%H:%M') if price_deadline else 'bald'}."
-                f"{mehr}",
+                f"{fahrt}. {soc}. Billigfenster schließt {bis}.{mehr}",
                 True,
             )
+        ab = latest_feasible.strftime("%H:%M") if latest_feasible else "jetzt"
+        los = departure.strftime("%H:%M")
         return (
             "Auto anstecken — Zeit wird knapp",
-            f"{fahrt}. {soc}. Ab "
-            f"{latest_feasible.strftime('%H:%M') if latest_feasible else 'jetzt'} "
-            f"reicht die Zeit bis {departure.strftime('%H:%M')} nicht mehr.",
+            f"{fahrt}. {soc}. Ab {ab} reicht die Zeit bis {los} nicht mehr.",
             True,
         )
 
