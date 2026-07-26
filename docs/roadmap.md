@@ -1,6 +1,6 @@
 # Roadmap
 
-Stand: 2026-06-17, v0.18.0.
+Stand: 2026-07-26, v0.19.0.
 
 ## Plan-Reife pro UC
 
@@ -22,10 +22,14 @@ vorausgeplant statt reaktiv.
 Schlafzimmer-eigene Schwellen (Proxon-Schlafraum-Soll statt OG-Mittel) +
 evtl. Schlafzimmer-Klima Auto-Mode wenn Sonja zustimmt.
 
-### v0.19 — UC4a → EMHASS *(Kandidat)*
+### v0.20 — UC4a → EMHASS *(Kandidat)*
 
 T300-Solltemperatur als deferrable in EMHASS — analog UC4b-Pattern
 (Forward-Plan + Confirmation). Schließt die letzte Lücke zum Leitprinzip.
+
+Dazu gehört das Gegenstück: die **Wallbox als EMHASS-Deferrable entfernen**.
+UC6 folgt dem Wallbox-Plan seit v0.19 nicht mehr, EMHASS rechnet Batterie und
+Heizstab aber weiter unter der Annahme, dass sie es tut.
 
 ### Welle 5/6 — UC9 Hardware *(User-blocked)*
 
@@ -67,3 +71,5 @@ T300-Solltemperatur als deferrable in EMHASS — analog UC4b-Pattern
 | v0.18.9 | Legionellen plan-aware (PV-primär + Grace-Fallback), Arm-nach-Act-Fix, 6h-Lauf-Deckel |
 | v0.18.10 | Legionellen: 3-Stufen-Preiseskalation (early-PV/level-gated/hard), Ziel 58.5°C (Boost-Semantik), LF1/LF2 verworfen |
 | v0.18.11 | Legionellen 65°C via Boost-Ziel-Swap (Reg 2003, Restore + Restart-Resume), 12h-Deckel, PV-Start-Cutoff 13h |
+| v0.18.13 | **UC2-Reparatur**: Sleep-Ausnahme, Abfahrt statt Termin, evcc-REST statt kaputtem Service, Plan-Lifecycle persistent, Testsuite (119 Tests) |
+| v0.19.0 | **Ladepolitik auf eine Regel** (`normal` raus, Sonne-Gate 4,2 kW), **eine Anstecken-Erinnerung** statt Preis-Eskalation, Aufrundung auf 5er-Stufen repariert |

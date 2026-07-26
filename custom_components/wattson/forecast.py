@@ -237,8 +237,10 @@ def calculate_required_soc(
     soc_with_margin = soc_pct + safety_margin_percent
     soc_with_margin = max(soc_with_margin, 5)
     soc_with_margin = min(soc_with_margin, 100)
-    # Aufrunden auf round_step
-    return int(((soc_with_margin + round_step - 1) // round_step) * round_step)
+    # Aufrunden auf round_step. math.ceil, nicht der Integer-Trick
+    # `(x + step - 1) // step` — der rundet bei Fließkomma-Resten unter 1 ab
+    # (90.1 ergab 90 statt 95) und hat damit knappe Fahrten zu knapp geplant.
+    return min(int(math.ceil(soc_with_margin / round_step) * round_step), 100)
 
 
 @dataclass(frozen=True)
@@ -247,13 +249,25 @@ class TripCandidate:
     title: str
     location: str
     calendar: str
-    start: datetime          # tz-aware
+    start: datetime          # tz-aware, Termin-BEGINN (nicht Abfahrt)
     distance_km: float       # einfache Strecke
     required_soc: int        # für Hin+Rück inkl. Marge
     uid: str = ""
+    travel_minutes: int = 0  # einfache Fahrzeit laut Routing
 
     def satisfied_by(self, car_soc: float) -> bool:
         return car_soc >= self.required_soc
+
+    def departure(self, ready_buffer_minutes: int) -> datetime:
+        """Spätester Zeitpunkt, zu dem das Auto geladen dastehen muss.
+
+        Termin-Beginn minus Fahrzeit minus Fertigmach-Puffer. Ohne die
+        Fahrzeit zielte der Ladeplan auf den Termin-Beginn — bei 71 min
+        Anfahrt wäre das Auto erst fertig, wenn man längst unterwegs ist.
+        """
+        return self.start - timedelta(
+            minutes=self.travel_minutes + ready_buffer_minutes
+        )
 
 
 @dataclass(frozen=True)
@@ -431,6 +445,69 @@ def pull_out_of_quiet_hours(
     return boundary - timedelta(minutes=1)
 
 
+@dataclass(frozen=True)
+class ChargeDecision:
+    """Ergebnis der Lademodus-Entscheidung."""
+    mode: str      # "now" | "minpv" | "pv"
+    reason: str
+
+
+def decide_charge_mode(
+    *,
+    car_connected: bool,
+    plan_active: bool,
+    plan_at_risk: bool,
+    price_level: str,
+    pv_surplus_w: int,
+    car_soc: float,
+    limit_soc: int,
+    cheap_levels: tuple[str, ...],
+    always_charge_levels: tuple[str, ...],
+    pv_surplus_min_w: int,
+) -> ChargeDecision:
+    """Lademodus nach der Alltagsregel bestimmen.
+
+    Die Regel in Worten: laden, wenn der Strom sau günstig ist — oder wenn er
+    günstig ist und die Sonne scheint. Dazu ein Fahrplan, wenn ein Termin es
+    verlangt. Sonst nur PV-Überschuss.
+
+    Bewusst NICHT enthalten: `normal` als Ladefreigabe. Tibbers Level sind
+    relativ zum gleitenden Mittel, und `normal` reicht damit bis rund 115 %
+    davon — Ende Juli 2026 also bis ~35 ct. Das ist keine Ladefreigabe,
+    sondern der Normalpreis.
+
+    `now` überstimmt den Fahrplan und lädt preisblind; deshalb nur, wenn der
+    Plan zeitlich nicht mehr durchkommt (`plan_at_risk`).
+    """
+    if not car_connected:
+        return ChargeDecision("pv", "Auto nicht angeschlossen")
+
+    if plan_active and plan_at_risk:
+        return ChargeDecision("now", "Fahrplan schafft es zeitlich nicht mehr")
+
+    if car_soc >= limit_soc:
+        return ChargeDecision("pv", f"SOC {car_soc:.0f}% ≥ Limit {limit_soc}%")
+
+    if price_level in always_charge_levels:
+        return ChargeDecision("minpv", f"Strom {price_level} — laden")
+
+    sun = pv_surplus_w >= pv_surplus_min_w
+    if price_level in cheap_levels and sun:
+        return ChargeDecision(
+            "minpv", f"Strom {price_level} + PV {pv_surplus_w} W — laden"
+        )
+
+    if plan_active:
+        # Der Plan läuft in `pv`: evcc kennt den Tarif und sucht sich die
+        # günstigsten Slots selbst. `minpv` würde ihn unterlaufen, weil es
+        # unabhängig vom Preis dauernd mit Mindeststrom aus dem Netz zieht.
+        return ChargeDecision("pv", "Fahrplan aktiv — evcc wählt die Slots")
+
+    if price_level in cheap_levels:
+        return ChargeDecision("pv", f"Strom {price_level}, aber keine Sonne")
+    return ChargeDecision("pv", f"Strom {price_level} — nur PV-Überschuss")
+
+
 def needs_forced_charging(
     plan_set: bool,
     trip_start: datetime | None,
@@ -455,48 +532,87 @@ def needs_forced_charging(
     return (trip_start - now) <= timedelta(hours=fallback_hours)
 
 
-def reminder_stage_due_times(
-    price_deadline: datetime | None,
-    latest_feasible: datetime | None,
-    stage1_lead_min: int,
-    stage2_lead_min: int,
-    stage3_buffer_min: int,
-    quiet_start_h: int,
-    quiet_end_h: int,
-) -> dict[int, datetime | None]:
-    """Fälligkeit der drei Eskalationsstufen, aus der Nachtruhe vorgezogen.
+@dataclass(frozen=True)
+class PluginReminder:
+    """Eine Erinnerung, das Auto anzustecken."""
+    kind: str      # "ankunft" | "fahrt"
+    title: str
+    message: str
+    urgent: bool
 
-    Stufen 1+2 hängen an der Preis-Deadline, Stufe 3 an der Machbarkeitsgrenze
-    (und ist damit preisunabhängig — sie feuert auch ohne Forecast).
+
+def plugin_reminder_due(
+    *,
+    car_home: bool,
+    car_plugged: bool,
+    car_soc: float,
+    comfort_soc: int,
+    trip_required_soc: int | None,
+    trip_title: str,
+    trip_at_risk: bool,
+    minutes_since_arrival: float | None,
+    arrival_window_min: int,
+) -> PluginReminder | None:
+    """Ist eine Anstecken-Erinnerung fällig?
+
+    Bewusst EINE Sorte Meldung statt gestaffelter Preis-Eskalation. Das Einzige,
+    was ein Mensch beisteuern muss, ist das Kabel — alles andere entscheidet das
+    System selbst. Also gibt es auch nur eine Bitte, und die heißt "steck an".
+
+    Der Zeitpunkt trägt die halbe Wirkung: beim Heimkommen steht man neben dem
+    Auto, das Kabel ist zwei Meter weg. Dieselbe Meldung abends auf dem Sofa
+    wird weggewischt. Deshalb ist das Ankunftsfenster der Normalfall; ohne
+    Ankunftsbezug meldet nur noch die gefährdete Fahrt.
+
+    Seltenheit ist Teil der Funktion: eine Erinnerung, die oft kommt, wird
+    ignoriert — und mit ihr die eine wichtige. Darum liegt `comfort_soc`
+    bewusst niedrig.
     """
-    def _due(when: datetime | None, minutes: int) -> datetime | None:
-        if when is None:
-            return None
-        return pull_out_of_quiet_hours(
-            when - timedelta(minutes=minutes), quiet_start_h, quiet_end_h
+    if not car_home or car_plugged:
+        return None
+
+    braucht_fahrt = (
+        trip_required_soc is not None and car_soc < trip_required_soc
+    )
+
+    # Gefährdete Fahrt meldet unabhängig von der Ankunft — sonst verpasst man
+    # sie, wenn das Auto schon länger ungenutzt dasteht.
+    if braucht_fahrt and trip_at_risk:
+        return PluginReminder(
+            kind="fahrt",
+            title="Auto anstecken — Zeit wird knapp",
+            message=(
+                f"{trip_title}: gebraucht {trip_required_soc} %, "
+                f"drin sind {car_soc:.0f} %. Bitte anstecken."
+            ),
+            urgent=True,
         )
 
-    return {
-        1: _due(price_deadline, stage1_lead_min),
-        2: _due(price_deadline, stage2_lead_min),
-        3: _due(latest_feasible, stage3_buffer_min),
-    }
+    frisch_angekommen = (
+        minutes_since_arrival is not None
+        and minutes_since_arrival <= arrival_window_min
+    )
+    if not frisch_angekommen:
+        return None
 
-
-def current_reminder_stage(
-    now: datetime, stage_due: dict[int, datetime | None]
-) -> int:
-    """Höchste fällige Stufe (0 = noch nichts).
-
-    Höchste gewinnt: zieht die Nachtruhe zwei Stufen auf dieselbe Zeit, wird
-    die dringendere gemeldet statt beide.
-    """
-    stage = 0
-    for candidate in sorted(stage_due):
-        due = stage_due[candidate]
-        if due is not None and now >= due:
-            stage = candidate
-    return stage
+    if braucht_fahrt:
+        return PluginReminder(
+            kind="ankunft",
+            title="Auto anstecken",
+            message=(
+                f"ORA bei {car_soc:.0f} % — {trip_title} braucht "
+                f"{trip_required_soc} %. Bitte anstecken."
+            ),
+            urgent=False,
+        )
+    if car_soc < comfort_soc:
+        return PluginReminder(
+            kind="ankunft",
+            title="Auto anstecken",
+            message=f"ORA bei {car_soc:.0f} % — bitte anstecken.",
+            urgent=False,
+        )
+    return None
 
 
 @dataclass(frozen=True)

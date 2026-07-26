@@ -95,6 +95,7 @@ ENTITY_EVCC_PHASES      = "sensor.evcc_auto_phases_active"
 ENTITY_EVCC_MAX_CURRENT = "select.evcc_auto_max_current"
 # Ist-Zustand des evcc-Fahrplans — Wahrheitsquelle statt eigenem Gedächtnis
 ENTITY_EVCC_PLAN_SOC    = "sensor.evcc_auto_effective_plan_soc"
+ENTITY_EVCC_LIMIT_SOC   = "sensor.evcc_auto_effective_limit_soc"
 ENTITY_EVCC_PLAN_TIME   = "sensor.evcc_auto_effective_plan_time"
 ENTITY_EVCC_SOC       = "sensor.evcc_auto_vehicle_soc"
 ENTITY_EVCC_RANGE     = "sensor.evcc_auto_vehicle_range"
@@ -122,7 +123,17 @@ UC6_MODE_HOLD_MINUTES = 10  # v0.17.1: gesenkt von 15 — Confirmation übernimm
 # minpv für "günstig laden auch ohne Vollüberschuss", now nur bei echtem Notfall.
 UC6_NOW_SOC_THRESHOLD_PCT     = 50     # SOC < X% + Trip-Termin → now
 UC6_NOW_TRIP_URGENT_HOURS     = 12     # Trip in < X h → now
-UC6_MINPV_PRICE_LEVELS        = ("very_cheap", "cheap", "normal")
+# Ladefreigabe nach Tibber-Level (Christian, 25.07.2026):
+# "very cheap ist natürlich very cheap, also saugünstig. Cheap sollte uns
+#  ausreichen." — `normal` bleibt bewusst DRAUSSEN: Tibbers Level sind relativ
+# zum gleitenden Mittel, `normal` reicht bis ~115% davon (Ende Juli 2026 rund
+# 35 ct) und ist damit keine Ladefreigabe, sondern der Normalpreis.
+UC6_MINPV_PRICE_LEVELS        = ("very_cheap", "cheap")
+# Diese Level laden auch ohne Sonne (Preis allein reicht)
+UC6_ALWAYS_CHARGE_LEVELS      = ("very_cheap",)
+# Ab so viel PV-Überschuss gilt "die Sonne scheint". 3-phasig braucht die
+# Wallbox min. 4,14 kW; darunter würde minpv die Differenz aus dem Netz ziehen.
+UC6_SUN_SURPLUS_MIN_W         = 4200
 # Downshift (Richtung "weniger laden") braucht Confirmation gegen Replan-Jitter
 UC6_DOWNSHIFT_CONFIRMATION_CYCLES = 2  # 2 Cycles in Folge "kein Bedarf mehr"
 
@@ -206,11 +217,19 @@ SLEEP_EXEMPT_UCS = ("uc2",)
 # letzten bezahlbaren Ladefensters (siehe forecast.plan_charge_window).
 # Mehrpreis pro kWh, der noch als „günstig genug" gilt
 TRIP_REMINDER_TOLERANCE_EUR_PER_KWH = 0.02
-# Vorlauf der Stufen relativ zur Preis-Deadline
-TRIP_REMINDER_STAGE1_LEAD_MIN = 90     # Vorwarnung
-TRIP_REMINDER_STAGE2_LEAD_MIN = 20     # letzter Aufruf, mit Mehrkosten im Text
-# Machbarkeits-Notnagel: Vorlauf vor dem spätesten noch reichenden Anstecken
-TRIP_REMINDER_STAGE3_BUFFER_MIN = 30
+# v0.19: EINE Erinnerung statt gestaffelter Preis-Eskalation.
+# Das Einzige, was ein Mensch beisteuern muss, ist das Kabel — also gibt es
+# auch nur eine Bitte. Gemeldet wird beim Heimkommen (da steht man neben dem
+# Auto) oder wenn eine Fahrt zeitlich zu kippen droht.
+ENTITY_CAR_LOCATION = "device_tracker.gwm_ora_03_location"
+# Unter diesem SOC beim Heimkommen erinnern. Bewusst niedrig: eine Meldung,
+# die oft kommt, wird ignoriert — und mit ihr die eine wichtige. 40 % sind
+# beim ORA noch gut 120 km, für einen normalen Tag reichlich.
+PLUGIN_COMFORT_SOC = 40
+# So lange nach der Ankunft gilt "gerade heimgekommen"
+PLUGIN_ARRIVAL_WINDOW_MIN = 20
+# Nicht öfter als alle N Minuten erinnern (pro Heimaufenthalt)
+PLUGIN_REMINDER_COOLDOWN_MIN = 180
 # Ladeleistung für die Bedarfsrechnung (3×16 A). Fällt zurück, wenn evcc
 # keine Phasen/Ströme liefert.
 TRIP_CHARGE_POWER_FALLBACK_KW = 11.04
@@ -218,7 +237,9 @@ TRIP_CHARGE_POWER_FALLBACK_KW = 11.04
 TRIP_CHARGE_LOSS_FACTOR = 1.10
 
 # Plan-Charging — Wattson setzt Plan max 1× pro Event, identifiziert via uid
-EVCC_PLAN_BUFFER_MINUTES = 30  # Plan zielt N Min vor Event-Start
+# Fertigmach-Puffer VOR der Abfahrt (nicht vor dem Termin): Abfahrt ist
+# Termin-Beginn minus Fahrzeit, davon nochmal diese Minuten abgezogen.
+EVCC_PLAN_BUFFER_MINUTES = 30
 
 # ── Use Cases (für Override-Manager + UI-Switches/Sensoren/Buttons) ──
 # Tuple: (uc_id, slug, display_name, default_enabled)

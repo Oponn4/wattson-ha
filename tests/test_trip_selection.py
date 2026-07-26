@@ -143,11 +143,70 @@ class TestVollerPfadAbRohdaten:
 
 class TestRequiredSocRechnung:
     def test_kuralpe_ergibt_90_prozent(self):
-        """Live gegen gmaps geprüft: 100,6 km, ORA 03 (20 kWh/100km, 63 kWh, 26%)."""
+        """Live gegen gmaps geprüft: 100,6 km, ORA 03 (20 kWh/100km, 63 kWh, 26%).
+
+        Rohwert 89,87 % — knapp unter der 90er-Stufe, landet also auf 90.
+        """
         assert calculate_required_soc(100.6, 20, 63, 26) == 90
 
-    def test_tennis_ergibt_30_prozent(self):
-        assert calculate_required_soc(6.557, 20, 63, 26) == 30
+    def test_tennis_ergibt_35_prozent(self):
+        """Rohwert 30,16 % → nächste 5er-Stufe ist 35, nicht 30."""
+        assert calculate_required_soc(6.557, 20, 63, 26) == 35
 
     def test_deckelt_auf_100(self):
         assert calculate_required_soc(500, 20, 63, 26) == 100
+
+    def test_rundet_bei_kleinem_rest_auf(self):
+        """Regression: der Integer-Trick `(x + step - 1) // step` rundete
+        Fließkomma-Reste unter 1 ab — 90,13 % ergab 90 statt 95 und plante
+        damit knappe Fahrten zu knapp."""
+        assert calculate_required_soc(101.0, 20, 63, 26) == 95
+
+    def test_exakte_stufe_bleibt_stehen(self):
+        """100,8 km ergeben exakt 90,0 % — aufrunden darf hier nicht greifen."""
+        assert calculate_required_soc(100.8, 20, 63, 26) == 90
+
+
+class TestAbfahrtszeit:
+    """Regression: die Fahrzeit muss in die Abfahrt einfließen.
+
+    Vorher zielte der Ladeplan auf den Termin-BEGINN minus Puffer. Bei der
+    Fahrt am 26.07. (Termin 12:00, 71 min Anfahrt) wäre das Auto erst um
+    11:30 fertig gewesen — 41 min nachdem man hätte losfahren müssen.
+    """
+
+    TERMIN = datetime(2026, 7, 26, 12, 0, tzinfo=BERLIN)
+
+    def _trip(self, travel_min: int) -> TripCandidate:
+        return TripCandidate(
+            title="Wolfgangs Geburtstag", location="Kuralpe 2",
+            calendar="calendar.barchen", start=self.TERMIN,
+            distance_km=100.6, required_soc=90, uid="uid-1",
+            travel_minutes=travel_min,
+        )
+
+    def test_fahrzeit_wird_abgezogen(self):
+        got = self._trip(71).departure(30)
+        assert got == datetime(2026, 7, 26, 10, 19, tzinfo=BERLIN)
+
+    def test_frueher_als_der_alte_wert(self):
+        """Der alte Wert (Beginn − 30 min) lag 71 min zu spät."""
+        alt = self.TERMIN - timedelta(minutes=30)
+        neu = self._trip(71).departure(30)
+        assert (alt - neu) == timedelta(minutes=71)
+
+    def test_ohne_fahrzeit_wie_bisher(self):
+        """Fehlt die Routing-Angabe, bleibt es beim reinen Puffer."""
+        assert self._trip(0).departure(30) == self.TERMIN - timedelta(minutes=30)
+
+    def test_puffer_und_fahrzeit_addieren_sich(self):
+        assert self._trip(45).departure(15) == self.TERMIN - timedelta(minutes=60)
+
+    def test_lange_anfahrt_kann_auf_vortag_fallen(self):
+        weit = TripCandidate(
+            title="Weit weg", location="X", calendar="c",
+            start=datetime(2026, 7, 26, 9, 0, tzinfo=BERLIN),
+            distance_km=600, required_soc=100, travel_minutes=420,
+        )
+        got = weit.departure(30)
+        assert got == datetime(2026, 7, 26, 1, 30, tzinfo=BERLIN)
