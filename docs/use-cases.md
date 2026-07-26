@@ -1,14 +1,14 @@
 # Use Cases
 
-Stand: v0.18.1 (2026-06-17). Alle live außer UC9 (Hardware-blocked).
+Stand: v0.19.0 (2026-07-26). Alle live außer UC9 (Hardware-blocked).
 
 | UC | Was | Seit |
 |---|---|---|
 | [UC1](#uc1--soc-warnung) | SOC-Warnung <20% | früh |
-| [UC2](#uc2--kalender-vorladen) | Kalender-Trip → required SOC → evcc-Plan | v0.11 |
+| [UC2](#uc2--kalender-vorladen) | Kalender-Trip → required SOC → evcc-Plan + Anstecken-Erinnerung | v0.11 |
 | [UC4a](#uc4a--t300-solltemperatur) | T300-Soll nach Tibber-Fenster | früh |
 | [UC4b](#uc4b--e-heizstab-plan-aware) | Heizstab plan-aware (EMHASS deferrable0) | v0.16.0 |
-| [UC6](#uc6--e-auto-lademodus-3-level) | E-Auto 3-Level pv/minpv/now (EMHASS deferrable1) | v0.17.1 |
+| [UC6](#uc6--e-auto-lademodus-3-level) | E-Auto 3-Level pv/minpv/now, eine Preisregel | v0.17.1 |
 | [UC9](#uc9--1p3p-umschaltung) | 1P/3P-Umschaltung | ⛔ blocked |
 | [UC10](#uc10--e3dc-discharge-steuerung) | E3DC maxDischargePower = EMHASS p_batt | v0.12/0.13 |
 | [UC11](#uc11--klima-og-advisor) | Klima OG Advisor (Notify statt Aktion) | v0.14.1 |
@@ -21,12 +21,38 @@ Push bei Auto-SOC < 20%. Bewusst reaktiv (Sicherheitsnetz).
 
 ## UC2 — Kalender-Vorladen
 
-Nächstes relevantes Event aus `calendar.amazone` (Location vorhanden, kein
-Teams/Patchday) → Google Distance Matrix (gecacht, 7 Tage TTL) →
-`required_soc = (km × 2) × Verbrauch / 63 kWh + 25% Marge` →
-`evcc_intg.set_vehicle_plan` (startdate = Event − 30 min, evcc plant die
-günstigsten Stunden selbst). Sensor: `sensor.wattson_naechste_fahrt`.
-Erbt UC6-Override: hat der User den Mode manuell gesetzt, greift UC2 nicht ein.
+Alle künftigen Events der konfigurierten Kalender (`auto_calendars`, Location
+vorhanden, kein Teams/Patchday) → Google Distance Matrix (gecacht, 7 Tage TTL)
+→ `required_soc = (km × 2) × Verbrauch / Kapazität + safety_margin_percent`,
+aufgerundet auf 5er-Stufen. Die Marge sind **Prozentpunkte, additiv** (Default
+26) — sie deckt die Verbrauchsunsicherheit ab, deshalb bleibt `Verbrauch` ein
+Jahresmittelwert (20 kWh/100km; gemessen 16,7 Stadt / 22,7 Autobahn beladen).
+
+**Abfahrt statt Termin (v0.18.13):** Ziel des Plans ist
+`Termin − Fahrzeit − Puffer`, nicht der Termin selbst. Vorher zielte der Plan
+auf den Terminbeginn und das Auto war regelmäßig nach der Abfahrt fertig.
+
+**Plan-Schreibweg (v0.18.13):** direkt per evcc-REST
+(`POST /api/vehicles/{name}/plan/soc/{soc}/{rfc3339}`), nicht über
+`evcc_intg.set_vehicle_plan` — der Service meldet Erfolg, setzt aber nichts.
+Erfolg gilt erst bei bestätigter Quittung im Response-Body. evcc sucht die
+günstigen Stunden bis zur Deadline selbst.
+
+Bei mehreren offenen Fahrten liefert die früheste die Deadline, die
+teuerste den Ziel-SOC. Plan-Lifecycle persistiert (`misc.uc2_plan`), damit ein
+Neustart keine Phantom-Pläne hinterlässt. UC2 läuft **auch im Schlafmodus**
+(`SLEEP_EXEMPT_UCS`) — ein Plan für den Morgen entsteht sonst nie.
+
+Sensor: `sensor.wattson_naechste_fahrt`. Erbt UC6-Override: hat der User den
+Mode manuell gesetzt, greift UC2 nicht ein.
+
+**Anstecken-Erinnerung (v0.19):** eine Sorte Meldung statt gestaffelter
+Preis-Eskalation. Auslöser: Heimkommen mit SOC unter `PLUGIN_COMFORT_SOC` (40)
+innerhalb `PLUGIN_ARRIVAL_WINDOW_MIN` (20 min) — da steht man neben dem Auto —
+oder eine Fahrt, die zeitlich zu kippen droht (dann dringend). Kein Preis und
+kein Betrag im Text; die Bitte lautet „steck an". Angesteckt schweigt sie
+immer, ein Quittungsknopf ist damit unnötig. Cooldown
+`PLUGIN_REMINDER_COOLDOWN_MIN` (180 min).
 
 ## UC4a — T300-Solltemperatur
 
@@ -90,16 +116,39 @@ Action-Automation: `automation.wattson_heizstab_safety_action`.
 
 ## UC6 — E-Auto-Lademodus (3-Level)
 
+Seit **v0.19** eine einzige Regel (`forecast.decide_charge_mode`), vorher eine
+über Jahre gewachsene Bedingungskette. Reihenfolge:
+
 | Mode | Bedingung |
 |---|---|
-| `now` | SOC < 50% **und** (Trip < 12h **oder** EMHASS-Plan-Slot ≥ 500W), oder Trip-Plan mit Required-SOC nicht erreicht + Trip < 12h |
-| `minpv` | Trip-Plan aktiv (Plan greifen lassen), oder im EMHASS-Plan-Slot, oder `price_level ∈ {very_cheap, cheap, normal}` + SOC < Target |
-| `pv` | Default — SOC voll oder expensive ohne Plan |
+| `now` | Fahrplan aktiv **und** zeitlich gefährdet — überstimmt alles |
+| `minpv` | `very_cheap`, oder `cheap` **und** PV-Überschuss ≥ `UC6_SUN_SURPLUS_MIN_W` (4200 W) |
+| `pv` | alles andere — inklusive `normal` |
 
-Plan-aware via `deferrables_schedule` (deferrable1). Anti-Jitter:
-`mode_rank = {now:3, minpv:2, pv:1, off:0}` — Upshift sofort, Downshift erst
-nach 2 Cycles Confirmation. `UC6_MODE_HOLD_MINUTES = 10`.
-Design-Präferenz: lieber länger `minpv` als pv↔now-Pendeln.
+Begründung der Schwellen: Tibber-Level sind **relativ zum rollierenden
+Mittel** (very_cheap < 60 %, cheap 60–90 %, normal 90–115 %). Bei ~31 ct Mittel
+reicht `normal` bis rund 35,6 ct — das ist keine Ladefreigabe, deshalb ist
+`normal` bewusst draußen (`UC6_MINPV_PRICE_LEVELS`). Die 4200 W entsprechen
+dem 3-phasigen Minimum; darunter zöge `minpv` die Differenz aus dem Netz.
+
+Ein aktiver Fahrplan läuft in `pv`, nicht `minpv`: evcc kennt den Tarif und
+sucht die Slots selbst, `minpv` würde den Plan preisunabhängig unterlaufen.
+Billiger Strom lädt trotzdem — das schadet dem Planziel nicht.
+
+Vorbedingungen: abgesteckt → `pv`; SOC ≥ Limit → `pv`, außer bei gefährdetem
+Fahrplan. Anti-Jitter: `mode_rank = {now:3, minpv:2, pv:1, off:0}` — Upshift
+sofort, Downshift erst nach 2 Cycles Confirmation. `UC6_MODE_HOLD_MINUTES = 10`.
+
+**Hausbatterie:** `batteryDischargeControl` steht in evcc auf `true` (Runtime,
+`POST /api/batterydischargecontrol/true` — **nicht** in `evcc.yaml`, dort
+lässt der Site-Schema-Check evcc mit `FATAL: 'core.Site' has invalid keys`
+nicht mehr starten). Ohne das entlud der Hausspeicher ins Auto; am 25.07.2026
+nachgewiesen mit 68 % → 13 % in 80 min bei 1,44 kW.
+
+**Offen:** EMHASS plant die Wallbox weiterhin als `deferrable1`, UC6 folgt
+diesem Plan seit v0.19 aber nicht mehr. Solange EMHASS Batterie und Heizstab
+unter der Annahme rechnet, dass die Wallbox mitspielt, ist das inkonsistent —
+die Wallbox sollte als Deferrable raus.
 
 ## UC9 — 1P/3P-Umschaltung
 
