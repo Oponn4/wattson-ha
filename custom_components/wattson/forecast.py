@@ -237,8 +237,10 @@ def calculate_required_soc(
     soc_with_margin = soc_pct + safety_margin_percent
     soc_with_margin = max(soc_with_margin, 5)
     soc_with_margin = min(soc_with_margin, 100)
-    # Aufrunden auf round_step
-    return int(((soc_with_margin + round_step - 1) // round_step) * round_step)
+    # Aufrunden auf round_step. math.ceil, nicht der Integer-Trick
+    # `(x + step - 1) // step` — der rundet bei Fließkomma-Resten unter 1 ab
+    # (90.1 ergab 90 statt 95) und hat damit knappe Fahrten zu knapp geplant.
+    return min(int(math.ceil(soc_with_margin / round_step) * round_step), 100)
 
 
 @dataclass(frozen=True)
