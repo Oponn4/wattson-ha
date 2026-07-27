@@ -743,18 +743,19 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         if s.sleep_mode:
             _LOGGER.info("Schlafmodus — nur stille Planung (%s)", ", ".join(SLEEP_EXEMPT_UCS))
             s.t300_target = s.t300_solltemperatur
-            s.evcc_target = s.evcc_mode
             s.t300_reason = "Schlafmodus"
-            s.evcc_reason = "Schlafmodus"
             for uc_id, _slug, _display, _default in UC_DEFINITIONS:
                 if uc_id in SLEEP_EXEMPT_UCS:
                     continue
                 s.uc_status[uc_id] = "schlafmodus"
                 s.uc_reason[uc_id] = "Schlafmodus aktiv"
-            # UC2 rechnet weiter: nachts liegende Billigfenster müssen erreichbar
-            # bleiben. Setzt nur einen evcc-Plan — keine Aktorik, kein Push.
+            # UC2 und UC6 rechnen weiter: nachts liegen die günstigen Stunden,
+            # und beide sind lautlos — UC2 setzt einen evcc-Plan, UC6 einen
+            # select-Wert. Keine Hausaktorik, kein Push. Der Plugin-Reminder
+            # bleibt draußen, der würde wecken.
             sleep_actions: list[str] = []
             await self._run_trip_planning(s, now, sleep_actions)
+            await self._run_charge_mode(s, now, sleep_actions)
             s.last_actions = ["Schlafmodus aktiv", *sleep_actions]
             self._prev = s
             return s
@@ -833,6 +834,36 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         # ── Anstecken-Erinnerung (v0.19) — braucht keinen Termin ──────────
         await self._handle_plugin_reminder(s, now, actions)
 
+        # ── UC6/UC7: evcc Modus (siehe _run_charge_mode) ──────────────────
+        await self._run_charge_mode(s, now, actions)
+
+        # ── UC1: Niedrig-SOC Warnung ──────────────────────────────────────────
+        if s.car_soc > 0 and s.car_soc < SOC_WARNUNG and not s.low_soc_notified:
+            msg = f"ORA 03 Akku niedrig: {s.car_soc:.0f}% ({s.car_range} km)"
+            _LOGGER.warning("UC1: %s", msg)
+            actions.append(await self._act(
+                "notify", NOTIFY_SERVICE.split(".")[1],
+                message=msg, title="⚡ Wattson: Niedriger Ladestand",
+            ))
+            s.low_soc_notified = True
+        elif s.car_soc >= SOC_WARNUNG:
+            s.low_soc_notified = False
+
+        s.last_actions = actions if actions else ["Keine Änderungen"]
+        self._prev = s
+        return s
+
+    async def _run_charge_mode(
+        self, s: WattsonData, now: datetime, actions: list[str]
+    ) -> None:
+        """UC6/UC7: evcc-Lademodus setzen.
+
+        Eigene Methode, weil der Schlafzweig sie ebenfalls braucht: der
+        Modus ist lautlos (ein select-Write, kein Push, keine Hausaktorik),
+        und nachts liegen die günstigen Stunden. Vor v0.19.1 lief UC6 im
+        Schlafmodus nicht und die Preisregel war bis zum manuellen
+        "Guten Morgen" wirkungslos.
+        """
         # ── UC6/UC7: evcc Modus — v0.17.1: 3-Level + plan-aware ──────────
         # 3-phasig + 5.2 kWp PV → pv lädt selten autonom; minpv ist Workhorse.
         # now nur bei echtem Notfall (SOC<50 + Trip urgent). Downshift
@@ -922,22 +953,6 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             s.evcc_reason = "Auto nicht angeschlossen"
             s.uc_status.setdefault("uc6", self._uc_idle_status("uc6"))
         s.uc_reason["uc6"] = s.evcc_reason
-
-        # ── UC1: Niedrig-SOC Warnung ──────────────────────────────────────────
-        if s.car_soc > 0 and s.car_soc < SOC_WARNUNG and not s.low_soc_notified:
-            msg = f"ORA 03 Akku niedrig: {s.car_soc:.0f}% ({s.car_range} km)"
-            _LOGGER.warning("UC1: %s", msg)
-            actions.append(await self._act(
-                "notify", NOTIFY_SERVICE.split(".")[1],
-                message=msg, title="⚡ Wattson: Niedriger Ladestand",
-            ))
-            s.low_soc_notified = True
-        elif s.car_soc >= SOC_WARNUNG:
-            s.low_soc_notified = False
-
-        s.last_actions = actions if actions else ["Keine Änderungen"]
-        self._prev = s
-        return s
 
     async def _fetch_calendar_events(
         self, entity_ids: list[str], hours: int

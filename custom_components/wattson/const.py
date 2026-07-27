@@ -131,9 +131,14 @@ UC6_NOW_TRIP_URGENT_HOURS     = 12     # Trip in < X h → now
 UC6_MINPV_PRICE_LEVELS        = ("very_cheap", "cheap")
 # Diese Level laden auch ohne Sonne (Preis allein reicht)
 UC6_ALWAYS_CHARGE_LEVELS      = ("very_cheap",)
-# Ab so viel PV-Überschuss gilt "die Sonne scheint". 3-phasig braucht die
-# Wallbox min. 4,14 kW; darunter würde minpv die Differenz aus dem Netz ziehen.
-UC6_SUN_SURPLUS_MIN_W         = 4200
+# Ab so viel PV-Überschuss gilt "die Sonne scheint".
+#
+# War in v0.19.0 auf 4200 (= 3-phasiges Wallbox-Minimum 3×230×6 A). Das war ein
+# Denkfehler: diese Schwelle gehört zum `pv`-Modus, wo NUR Überschuss fließen
+# soll. In `minpv` ist der Netzanteil Absicht — "Minimum plus PV". Bei 5,2 kWp
+# wurde 4200 W in 30 Tagen genau einmal erreicht (Spitze 4233 W, drei Stunden
+# über 4000), der cheap-Zweig war damit toter Code.
+UC6_SUN_SURPLUS_MIN_W         = 1700  # = PV_SURPLUS_ON, Haus-Definition von "Sonne"
 # Downshift (Richtung "weniger laden") braucht Confirmation gegen Replan-Jitter
 UC6_DOWNSHIFT_CONFIRMATION_CYCLES = 2  # 2 Cycles in Folge "kein Bedarf mehr"
 
@@ -210,7 +215,7 @@ TRIP_MAX_EVENTS_EVALUATED = 8
 # Aktorik im Haus und keine Notification. UC2 setzt nur einen evcc-Plan —
 # ohne diese Ausnahme wären nachts liegende Billigfenster unerreichbar
 # (im Winter der Normalfall).
-SLEEP_EXEMPT_UCS = ("uc2",)
+SLEEP_EXEMPT_UCS = ("uc2", "uc6")
 
 # ── UC2 Plug-in-Reminder ──────────────────────────────────────────────
 # Auslöser ist NICHT der Abstand zur Abfahrt, sondern die Schließkante des

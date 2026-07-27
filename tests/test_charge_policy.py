@@ -65,6 +65,13 @@ class TestPreisregel:
         assert mode(price_level="expensive", pv_surplus_w=10000) == "pv"
         assert mode(price_level="very_expensive", pv_surplus_w=10000) == "pv"
 
+    def test_sonnenschwelle_ist_erreichbar(self):
+        """v0.19.1: war 4200 W (3-phasiges Wallbox-Minimum). Bei 5,2 kWp in
+        30 Tagen genau einmal erreicht — der cheap-Zweig war toter Code. Die
+        Schwelle gehört zum `pv`-Modus; in `minpv` ist der Netzanteil Absicht."""
+        assert SUN_MIN < 4140, "über dem 3-phasigen Minimum wird sie kaum erreicht"
+        assert SUN_MIN == const.PV_SURPLUS_ON, "soll die Haus-Definition von Sonne sein"
+
     def test_normal_ist_nicht_in_der_freigabe(self):
         """Regression gegen die alte Konstante mit drei Leveln."""
         assert "normal" not in CHEAP
