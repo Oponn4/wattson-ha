@@ -199,6 +199,25 @@ nachgewiesen mit 68 % → 13 % in 80 min bei 1,44 kW.
 ✅ Die Wallbox ist seit 2026-07-26 **kein EMHASS-Deferrable** mehr — UC6 folgt
 dem Plan nicht mehr, also darf EMHASS auch nicht mit ihm rechnen.
 
+### Totband am Hitze-Zweig (v0.20.1)
+
+Der Off-Zweig hatte seit jeher eine Hysterese (`off_c = trigger_c −
+COOL_ABLUFT_HYSTERESE_C`), der Hitze-Zweig nicht — dort stand ein blankes
+`abluft >= heat_c`.
+
+Am 27.07.2026 pendelte die Abluft ab 18:50 zwischen 25,0 und 25,4 °C, also um
+die (adaptive) Hitze-Schwelle. Ergebnis: ein Tick sah den oberen Wert und
+schaltete die Kühlung ein, der nächste sah den unteren, und die Grundregel
+(„kein PV-Überschuss, nicht in cheapest_4h, expensive") schaltete wieder aus.
+Sägezahn: rund 5 Minuten an, 25 Minuten aus, dazu ein Push pro Zyklus.
+Selbstverstärkend, weil die kurze Kühlung die Temperatur drückt.
+
+`forecast.heat_active` hat jetzt dasselbe Totband: einschalten ab `heat_c`,
+ausschalten erst unter `heat_c − COOL_ABLUFT_HYSTERESE_C`. Der laufende
+Zustand ist das Gedächtnis, es braucht keine eigene Zustandsvariable. Die
+Heat-Notify feuert zudem nur noch beim Einschalten, nicht mehr stündlich
+während des Laufs.
+
 ## UC9 — 1P/3P-Umschaltung
 
 Shelly-Lasttrenner soll L2+L3 abklemmen für 1P-PV-Laden (5.2 kWp liefert nie

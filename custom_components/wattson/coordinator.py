@@ -176,6 +176,7 @@ from .forecast import (
     decide_charge_mode,
     deferrable_slot_at,
     event_key,
+    heat_active,
     humidex,
     is_in_window,
     most_expensive_window,
@@ -1864,7 +1865,21 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         trigger_c, heat_c, korrekturen = self._compute_cool_thresholds(s)
         off_c = trigger_c - COOL_ABLUFT_HYSTERESE_C
         expensive = s.price_level in UC12_EXPENSIVE_LEVELS
-        hitze = s.abluft_temp >= heat_c
+        # v0.20.1: Totband auch am Hitze-Zweig. Ohne das entscheidet ein blankes
+        # `>=` über eine Schwelle, um die die Abluft herumpendelt: Tick sieht
+        # 25,4 -> Kühlung an, nächster Tick sieht 25,1 -> die Grundregel schaltet
+        # wieder aus. Am 27.07.2026 lief das ab 18:50 als Sägezahn, 5 min an /
+        # 25 min aus, mit einem Push pro Zyklus. Der Off-Zweig hatte seine
+        # Hysterese längst (off_c), der Hitze-Zweig nicht.
+        #
+        # Der laufende Zustand ist das Gedächtnis: einmal wegen Hitze an, bleibt
+        # es an, bis die Abluft unter heat_c - Hysterese fällt.
+        hitze = heat_active(
+            abluft_c=s.abluft_temp,
+            heat_c=heat_c,
+            hysteresis_c=COOL_ABLUFT_HYSTERESE_C,
+            currently_cooling=s.cool_enable_on,
+        )
         scale_info = (
             f"Trigger {trigger_c:.1f}°C / Heat {heat_c:.1f}°C "
             f"(Außen-Forecast max {s.forecast_max_temp_c:.1f}°C"
@@ -1896,9 +1911,13 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
                     f"Hitze {s.abluft_temp:.1f}°C ≥ {heat_c:.1f}°C — "
                     f"Kühlung trotz {grund_bruch} ({scale_info})"
                 )
-                await self._uc12_send_heat_notify(
-                    s, now, actions, heat_c, grund_bruch,
-                )
+                # Nur beim Einschalten melden, nicht während des Laufs: sonst
+                # kommt im Totband stündlich ein Push für einen Zustand, den
+                # der Nutzer längst kennt.
+                if not s.cool_enable_on:
+                    await self._uc12_send_heat_notify(
+                        s, now, actions, heat_c, grund_bruch,
+                    )
             else:
                 reason = (
                     f"Hitze {s.abluft_temp:.1f}°C ≥ {heat_c:.1f}°C ({scale_info})"
