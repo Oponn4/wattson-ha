@@ -452,32 +452,80 @@ class ChargeDecision:
     reason: str
 
 
+def charge_threshold_ct(
+    slots: list[PriceSlot],
+    *,
+    needed_kwh: float,
+    power_kw: float,
+    now: datetime,
+    until: datetime | None = None,
+    floor_ct: float = 0.0,
+) -> float | None:
+    """Ab welchem Preis lohnt Laden — aus Bedarf und Kurve, nicht aus Geschmack.
+
+    Nimmt die günstigsten Slots im Fenster, bis der Bedarf gedeckt ist, und
+    gibt den Preis des teuersten davon zurück. Alles darunter ist "günstig
+    genug", alles darüber nicht.
+
+    Das ersetzt sowohl feste Cent-Grenzen als auch Tibbers Level. Eine feste
+    Grenze altert (20 ct sind im Sommer günstig und im Winter unerreichbar),
+    und Tibbers Level hängen am gleitenden Mittel statt am eigenen Bedarf.
+    Diese Schwelle wandert von selbst mit Saison, Kurve und Ladezustand: viel
+    nachzuladen weitet sie, wenig verengt sie.
+
+    Gibt None, wenn keine Preisdaten vorliegen — dann bleibt nur der Fahrplan.
+    """
+    if needed_kwh <= 0 or power_kw <= 0:
+        return floor_ct or None
+
+    window = [
+        sl for sl in slots
+        if sl.end > now and (until is None or sl.start < until)
+    ]
+    if not window:
+        return None
+
+    slot_hours = 0.25  # PriceSlot ist eine Viertelstunde
+    needed_slots = max(1, math.ceil(needed_kwh / (power_kw * slot_hours)))
+
+    prices = sorted(sl.price * 100.0 for sl in window)
+    if needed_slots >= len(prices):
+        # Fenster reicht ohnehin nicht — dann ist jeder Slot nötig.
+        return max(prices[-1], floor_ct)
+
+    return max(prices[needed_slots - 1], floor_ct)
+
+
 def decide_charge_mode(
     *,
     car_connected: bool,
     plan_active: bool,
     plan_at_risk: bool,
-    price_level: str,
+    price_ct: float | None,
+    threshold_ct: float | None,
+    eeg_ct: float,
     pv_surplus_w: int,
     car_soc: float,
     limit_soc: int,
-    cheap_levels: tuple[str, ...],
-    always_charge_levels: tuple[str, ...],
     pv_surplus_min_w: int,
 ) -> ChargeDecision:
-    """Lademodus nach der Alltagsregel bestimmen.
+    """Lademodus bestimmen.
 
-    Die Regel in Worten: laden, wenn der Strom sau günstig ist — oder wenn er
-    günstig ist und die Sonne scheint. Dazu ein Fahrplan, wenn ein Termin es
-    verlangt. Sonst nur PV-Überschuss.
+    Vier Regime, jedes mit einem Grund statt einer Geschmacksgrenze:
 
-    Bewusst NICHT enthalten: `normal` als Ladefreigabe. Tibbers Level sind
-    relativ zum gleitenden Mittel, und `normal` reicht damit bis rund 115 %
-    davon — Ende Juli 2026 also bis ~35 ct. Das ist keine Ladefreigabe,
-    sondern der Normalpreis.
+    * Fahrplan kippt zeitlich      -> `now`, überstimmt alles
+    * Preis unter Einspeisevergütung -> `now`, Netzstrom ist dann billiger als
+      die eigene Sonne. Greift selten (2 von 7 Monaten 2026, nur bei
+      Negativpreisen im Frühjahr) und kostet nichts, wenn nicht.
+    * Preis unter der Bedarfsschwelle -> `minpv`, Netzminimum plus alle Sonne.
+      Das Arbeitspferd, besonders im Winter, wo "relativ günstig" absolut
+      immer noch teuer ist.
+    * sonst                        -> `pv`, nur Überschuss.
 
-    `now` überstimmt den Fahrplan und lädt preisblind; deshalb nur, wenn der
-    Plan zeitlich nicht mehr durchkommt (`plan_at_risk`).
+    Warum nicht `smartCostLimit` in evcc statt `now`: das Limit ist dort ein
+    Schalter auf Volllast unabhängig von der Sonne. Für das EEG-Regime ist das
+    genau richtig, für das Winter-Regime falsch — ein Knopf kann beide nicht.
+    Also entscheidet Wattson und evcc führt aus.
     """
     if not car_connected:
         return ChargeDecision("pv", "Auto nicht angeschlossen")
@@ -488,24 +536,30 @@ def decide_charge_mode(
     if car_soc >= limit_soc:
         return ChargeDecision("pv", f"SOC {car_soc:.0f}% ≥ Limit {limit_soc}%")
 
-    if price_level in always_charge_levels:
-        return ChargeDecision("minpv", f"Strom {price_level} — laden")
+    if price_ct is None:
+        return ChargeDecision("pv", "keine Preisdaten — nur PV-Überschuss")
 
-    sun = pv_surplus_w >= pv_surplus_min_w
-    if price_level in cheap_levels and sun:
+    if price_ct <= eeg_ct:
         return ChargeDecision(
-            "minpv", f"Strom {price_level} + PV {pv_surplus_w} W — laden"
+            "now", f"{price_ct:.1f} ct ≤ Einspeisevergütung {eeg_ct:.1f} ct"
         )
 
+    if threshold_ct is not None and price_ct <= threshold_ct:
+        return ChargeDecision(
+            "minpv", f"{price_ct:.1f} ct ≤ Bedarfsschwelle {threshold_ct:.1f} ct"
+        )
+
+    sun = pv_surplus_w >= pv_surplus_min_w
     if plan_active:
-        # Der Plan läuft in `pv`: evcc kennt den Tarif und sucht sich die
-        # günstigsten Slots selbst. `minpv` würde ihn unterlaufen, weil es
-        # unabhängig vom Preis dauernd mit Mindeststrom aus dem Netz zieht.
         return ChargeDecision("pv", "Fahrplan aktiv — evcc wählt die Slots")
 
-    if price_level in cheap_levels:
-        return ChargeDecision("pv", f"Strom {price_level}, aber keine Sonne")
-    return ChargeDecision("pv", f"Strom {price_level} — nur PV-Überschuss")
+    if threshold_ct is None:
+        return ChargeDecision("pv", f"{price_ct:.1f} ct, keine Schwelle bekannt")
+
+    hint = f", PV {pv_surplus_w} W" if sun else ""
+    return ChargeDecision(
+        "pv", f"{price_ct:.1f} ct > Schwelle {threshold_ct:.1f} ct{hint}"
+    )
 
 
 def needs_forced_charging(

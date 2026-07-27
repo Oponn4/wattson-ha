@@ -13,9 +13,12 @@ from homeassistant.util import dt as dt_util
 
 from .const import (
     AWAY_LONG_HOURS,
+    BASELINE_READY_HOUR,
+    BASELINE_SOC,
     BATTERIE_KAPAZITAT_KWH,
     BATTERY_FULL,
     BATTERY_NOT_FULL,
+    CHARGE_THRESHOLD_HORIZON_H,
     CLIMATE_COOL_OFFSET_C,
     CLIMATE_ECO_OFFSET_C,
     CLIMATE_PEAK_OFFSET_C,
@@ -36,6 +39,7 @@ from .const import (
     DEFAULT_EVCC_URL,
     DOMAIN,
     E3DC_MAX_DISCHARGE_W,
+    EEG_VERGUETUNG_CT,
     EMHASS_BATT_DISCHARGE_MIN_W,
     EMHASS_DEFERRABLE_ON_MIN_W,
     EMHASS_MAX_PLAN_AGE_H,
@@ -135,9 +139,7 @@ from .const import (
     TRIP_REMINDER_TOLERANCE_EUR_PER_KWH,
     UC4B_CONFIRMATION_CYCLES,
     UC4B_REMINDER_COOLDOWN_MIN,
-    UC6_ALWAYS_CHARGE_LEVELS,
     UC6_DOWNSHIFT_CONFIRMATION_CYCLES,
-    UC6_MINPV_PRICE_LEVELS,
     UC6_MODE_HOLD_MINUTES,
     UC6_NOW_TRIP_URGENT_HOURS,
     UC6_SUN_SURPLUS_MIN_W,
@@ -157,6 +159,7 @@ from .const import (
     UC14_SOC_MAX_PCT,
     UC14_TOPUP_OVERHEAD_FACTOR,
     UC_DEFINITIONS,
+    WALLBOX_POWER_KW,
 )
 from .e3dc_client import E3DCClient
 from .evcc_client import EvccClient
@@ -166,6 +169,7 @@ from .forecast import (
     PriceSlot,
     TripCandidate,
     calculate_required_soc,
+    charge_threshold_ct,
     cheapest_window,
     consecutive_cheap_minutes_from_now,
     cost_from,
@@ -256,6 +260,7 @@ class WattsonData:
     trip_calendar: str = ""
     trip_start: datetime | None = None       # Termin-Beginn
     trip_departure: datetime | None = None   # Abfahrt = Beginn − Fahrzeit − Puffer
+    charge_threshold_ct: float | None = None  # v0.20: gerechnete Ladefreigabe
     trip_travel_minutes: int | None = None
     trip_distance_km: float | None = None
     trip_required_soc: int | None = None
@@ -853,6 +858,33 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         self._prev = s
         return s
 
+    def _charge_threshold(
+        self, s: WattsonData, now: datetime, limit_soc: int
+    ) -> float | None:
+        """Bedarfsschwelle in ct — ab wann ist Laden günstig genug?
+
+        Bedarf ist der Weg bis zum Ladelimit; Fenster ist die nächste Abfahrt,
+        sonst CHARGE_THRESHOLD_HORIZON_H. Ohne Fahrzeugkapazität oder ohne
+        Preisforecast gibt es keine Schwelle — dann bleibt der Fahrplan.
+        """
+        cfg = self._trip_cfg
+        if cfg is None or not s.forecast_slots:
+            return None
+        missing_pct = max(0.0, limit_soc - s.car_soc)
+        if missing_pct <= 0:
+            return None
+        needed_kwh = missing_pct / 100.0 * cfg.vehicle_capacity
+        until = s.trip_departure or (
+            now + timedelta(hours=CHARGE_THRESHOLD_HORIZON_H)
+        )
+        return charge_threshold_ct(
+            s.forecast_slots,
+            needed_kwh=needed_kwh,
+            power_kw=WALLBOX_POWER_KW,
+            now=now,
+            until=until,
+        )
+
     async def _run_charge_mode(
         self, s: WattsonData, now: datetime, actions: list[str]
     ) -> None:
@@ -875,16 +907,24 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             # Oszillation, gegen die Downshift-Zähler und Hysterese gebaut
             # wurden. Jetzt: UC2 setzt den Plan, evcc führt ihn in `pv` aus,
             # UC6 greift nur noch für Preis-Freigabe und den Notfall.
+            #
+            # v0.20: Freigabe über eine gerechnete Schwelle statt Tibber-Level.
+            # Level hängen am gleitenden Mittel, nicht am eigenen Bedarf — und
+            # eine feste Cent-Grenze altert (20 ct sind im Sommer günstig und
+            # im Winter unerreichbar).
+            limit_soc = self._ival(ENTITY_EVCC_LIMIT_SOC) or SOC_TARGET
+            threshold_ct = self._charge_threshold(s, now, limit_soc)
+            s.charge_threshold_ct = threshold_ct
             decision = decide_charge_mode(
                 car_connected=True,
                 plan_active=s.trip_plan_set,
                 plan_at_risk=self._trip_needs_forced_charging(s, now),
-                price_level=s.price_level,
+                price_ct=(s.price * 100.0) if s.price else None,
+                threshold_ct=threshold_ct,
+                eeg_ct=EEG_VERGUETUNG_CT,
                 pv_surplus_w=s.pv_surplus,
                 car_soc=s.car_soc,
-                limit_soc=self._ival(ENTITY_EVCC_LIMIT_SOC) or SOC_TARGET,
-                cheap_levels=UC6_MINPV_PRICE_LEVELS,
-                always_charge_levels=UC6_ALWAYS_CHARGE_LEVELS,
+                limit_soc=limit_soc,
                 pv_surplus_min_w=UC6_SUN_SURPLUS_MIN_W,
             )
             raw_target = decision.mode
@@ -2471,6 +2511,7 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         ]
         if not candidates:
             s.trip_reason = "kein relevanter Termin in Sicht"
+            await self._run_baseline_plan(s, cfg, now, actions)
             return
 
         binding = select_binding_trip(candidates, s.car_soc)
@@ -2487,6 +2528,7 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         if binding is None:
             s.trip_reason = (f"SOC {s.car_soc:.0f}% ≥ benötigt {shown.required_soc}% "
                              f"({shown.title}, {shown.distance_km:.0f} km)")
+            await self._run_baseline_plan(s, cfg, now, actions)
             return
 
         required_soc = binding.required_soc
@@ -2600,6 +2642,80 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             )
             await self._override.async_drop_action(ENTITY_EVCC_PLAN_SOC)
         return None
+
+    async def _run_baseline_plan(
+        self, s: WattsonData, cfg: WattsonTripConfig, now: datetime,
+        actions: list[str],
+    ) -> None:
+        """Grundplan ohne Termin: bis BASELINE_READY_HOUR mindestens BASELINE_SOC.
+
+        Ohne Kalendertermin gab es bisher gar keinen Fahrplan. Dann hing alles
+        an der Preisschwelle, und nichts garantierte einen Ladezustand — das
+        Auto konnte bei 26 % stehen bleiben, wenn das Billigfenster mal schmal
+        war. Mit einem Grundplan hat evcc immer etwas zu optimieren und wählt
+        Leistung und Slots selbst; die Schwelle ist dann nur noch Zugabe.
+
+        Ein Termin-Fahrplan hat Vorrang: diese Methode läuft nur, wenn keiner
+        gesetzt wurde.
+        """
+        if s.car_soc >= BASELINE_SOC:
+            s.trip_reason = (f"{s.trip_reason} — Grundplan nicht nötig "
+                             f"(SOC {s.car_soc:.0f}% ≥ {BASELINE_SOC}%)")
+            return
+
+        ready = now.replace(
+            hour=BASELINE_READY_HOUR, minute=0, second=0, microsecond=0
+        )
+        if ready <= now:
+            ready += timedelta(days=1)
+
+        plan_key = f"baseline:{BASELINE_SOC}:{ready.date().isoformat()}"
+        if (self._ival(ENTITY_EVCC_PLAN_SOC) == BASELINE_SOC
+                and self._stored_plan_key() == plan_key):
+            s.trip_plan_set = True
+            s.trip_reason = (f"Grundplan aktiv: {BASELINE_SOC}% bis "
+                             f"{ready.strftime('%d.%m %H:%M')}")
+            return
+
+        blocked = await self._trip_plan_blocked()
+        if blocked:
+            s.trip_reason = f"Grundplan nicht gesetzt — {blocked}"
+            s.uc_status["uc2"] = blocked
+            s.uc_reason["uc2"] = s.trip_reason
+            return
+
+        _LOGGER.info("UC2: Grundplan %d%% bis %s (SOC %.0f%%)",
+                     BASELINE_SOC, ready.strftime("%d.%m %H:%M"), s.car_soc)
+        prev_plan_soc = self._state(ENTITY_EVCC_PLAN_SOC)
+        if self._dry_run:
+            act_desc = (f"DRY-RUN: Grundplan {BASELINE_SOC}% bis "
+                        f"{ready.isoformat()}")
+            _LOGGER.info("[DRY-RUN] %s", act_desc)
+        else:
+            ok = await self._evcc.set_vehicle_plan(
+                cfg.evcc_vehicle_name, BASELINE_SOC, ready,
+            )
+            if not ok:
+                s.trip_reason = "Grundplan setzen fehlgeschlagen (evcc-API)"
+                s.uc_status["uc2"] = "fehler"
+                s.uc_reason["uc2"] = s.trip_reason
+                return
+            await self._override.async_record_action(
+                "uc2", ENTITY_EVCC_PLAN_SOC, BASELINE_SOC,
+                prev_value=prev_plan_soc,
+            )
+            await self._override.async_set_misc(MISC_UC2_PLAN, {
+                "key": plan_key,
+                "uid": "baseline",
+                "titel": "Grundplan",
+                "soc": BASELINE_SOC,
+                "abfahrt": ready.isoformat(),
+            })
+            act_desc = (f"Grundplan {BASELINE_SOC}% bis "
+                        f"{ready.strftime('%d.%m %H:%M')}")
+        actions.append(act_desc)
+        s.trip_plan_set = True
+        s.trip_reason = act_desc
 
     def _stored_plan(self) -> dict | None:
         """Von UC2 gesetzter Fahrplan, persistiert (übersteht HA-Restart)."""

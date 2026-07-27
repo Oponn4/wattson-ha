@@ -123,14 +123,6 @@ UC6_MODE_HOLD_MINUTES = 10  # v0.17.1: gesenkt von 15 — Confirmation übernimm
 # minpv für "günstig laden auch ohne Vollüberschuss", now nur bei echtem Notfall.
 UC6_NOW_SOC_THRESHOLD_PCT     = 50     # SOC < X% + Trip-Termin → now
 UC6_NOW_TRIP_URGENT_HOURS     = 12     # Trip in < X h → now
-# Ladefreigabe nach Tibber-Level (Christian, 25.07.2026):
-# "very cheap ist natürlich very cheap, also saugünstig. Cheap sollte uns
-#  ausreichen." — `normal` bleibt bewusst DRAUSSEN: Tibbers Level sind relativ
-# zum gleitenden Mittel, `normal` reicht bis ~115% davon (Ende Juli 2026 rund
-# 35 ct) und ist damit keine Ladefreigabe, sondern der Normalpreis.
-UC6_MINPV_PRICE_LEVELS        = ("very_cheap", "cheap")
-# Diese Level laden auch ohne Sonne (Preis allein reicht)
-UC6_ALWAYS_CHARGE_LEVELS      = ("very_cheap",)
 # Ab so viel PV-Überschuss gilt "die Sonne scheint".
 #
 # War in v0.19.0 auf 4200 (= 3-phasiges Wallbox-Minimum 3×230×6 A). Das war ein
@@ -139,6 +131,25 @@ UC6_ALWAYS_CHARGE_LEVELS      = ("very_cheap",)
 # wurde 4200 W in 30 Tagen genau einmal erreicht (Spitze 4233 W, drei Stunden
 # über 4000), der cheap-Zweig war damit toter Code.
 UC6_SUN_SURPLUS_MIN_W         = 1700  # = PV_SURPLUS_ON, Haus-Definition von "Sonne"
+
+# ── v0.20: Schwelle rechnen statt setzen ─────────────────────────────────────
+# Einspeisevergütung. Darunter ist Netzstrom billiger als die eigene Sonne, dann
+# wird mit voller Leistung geladen. Vertragswert, altert nicht. Greift selten:
+# 2026 nur April und Mai (Negativpreise), Jan–Jul-Minima sonst 11,7–18,0 ct.
+EEG_VERGUETUNG_CT             = 11.1
+# Ladeleistung der Wallbox für die Bedarfsrechnung (3-phasig, 16 A).
+WALLBOX_POWER_KW              = 11.0
+# Horizont für die Bedarfsschwelle, wenn kein Termin die Grenze setzt.
+CHARGE_THRESHOLD_HORIZON_H    = 24
+
+# ── v0.20: Grundplan ─────────────────────────────────────────────────────────
+# Ohne Kalendertermin gab es bisher gar keinen Fahrplan — dann hing alles an
+# Schwellen und nichts garantierte einen Ziel-SOC. Der Grundplan sorgt dafür,
+# dass evcc immer etwas zu optimieren hat: bis BASELINE_READY_HOUR mindestens
+# BASELINE_SOC. Ein Termin-Fahrplan hat Vorrang und überschreibt ihn.
+BASELINE_SOC                  = 50
+BASELINE_READY_HOUR           = 7
+
 # Downshift (Richtung "weniger laden") braucht Confirmation gegen Replan-Jitter
 UC6_DOWNSHIFT_CONFIRMATION_CYCLES = 2  # 2 Cycles in Folge "kein Bedarf mehr"
 
