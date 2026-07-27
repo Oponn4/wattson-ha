@@ -167,6 +167,14 @@ class TestBedarfsschwelle:
         s = slots_from([10, 20], self.NOW)
         assert threshold(s, needed_kwh=0.0, power_kw=POWER, now=self.NOW) is None
 
+    def test_leeres_fenster_liefert_keine_schwelle(self):
+        """Randfall, den der Coordinator abfangen muss: liegt `until` in der
+        Vergangenheit, bleibt kein Slot übrig. Beim Lauf gegen Livedaten am
+        27.07.2026 (19:57, Abfahrt 17:18) fiel UC6 dadurch stumm auf `pv`."""
+        s = slots_from([10, 20, 30], self.NOW)
+        assert threshold(s, needed_kwh=5.0, power_kw=POWER, now=self.NOW,
+                         until=self.NOW - timedelta(hours=1)) is None
+
     def test_untergrenze_wird_respektiert(self):
         s = slots_from([2, 3, 4], self.NOW)
         got = threshold(s, needed_kwh=2.75, power_kw=POWER, now=self.NOW,

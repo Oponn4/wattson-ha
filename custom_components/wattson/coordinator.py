@@ -866,6 +866,12 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         Bedarf ist der Weg bis zum Ladelimit; Fenster ist die nächste Abfahrt,
         sonst CHARGE_THRESHOLD_HORIZON_H. Ohne Fahrzeugkapazität oder ohne
         Preisforecast gibt es keine Schwelle — dann bleibt der Fahrplan.
+
+        Eine bereits verstrichene Abfahrt darf das Fenster NICHT begrenzen:
+        `s.trip_departure` bleibt nach dem Termin stehen, das Fenster wäre leer
+        und die Schwelle dauerhaft None — UC6 fiele stumm auf `pv` zurück.
+        Aufgefallen beim Lauf gegen Livedaten am 27.07.2026 um 19:57, Abfahrt
+        war 17:18.
         """
         cfg = self._trip_cfg
         if cfg is None or not s.forecast_slots:
@@ -874,8 +880,11 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         if missing_pct <= 0:
             return None
         needed_kwh = missing_pct / 100.0 * cfg.vehicle_capacity
-        until = s.trip_departure or (
-            now + timedelta(hours=CHARGE_THRESHOLD_HORIZON_H)
+        horizon = now + timedelta(hours=CHARGE_THRESHOLD_HORIZON_H)
+        until = (
+            s.trip_departure
+            if s.trip_departure is not None and s.trip_departure > now
+            else horizon
         )
         return charge_threshold_ct(
             s.forecast_slots,
