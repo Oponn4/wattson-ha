@@ -1,6 +1,6 @@
 # Use Cases
 
-Stand: v0.19.0 (2026-07-26). Alle live außer UC9 (Hardware-blocked).
+Stand: v0.20.0 (2026-07-27). Alle live außer UC9 (Hardware-blocked).
 
 | UC | Was | Seit |
 |---|---|---|
@@ -8,7 +8,7 @@ Stand: v0.19.0 (2026-07-26). Alle live außer UC9 (Hardware-blocked).
 | [UC2](#uc2--kalender-vorladen) | Kalender-Trip → required SOC → evcc-Plan + Anstecken-Erinnerung | v0.11 |
 | [UC4a](#uc4a--t300-solltemperatur) | T300-Soll nach Tibber-Fenster | früh |
 | [UC4b](#uc4b--e-heizstab-plan-aware) | Heizstab plan-aware (EMHASS deferrable0) | v0.16.0 |
-| [UC6](#uc6--e-auto-lademodus-3-level) | E-Auto 3-Level pv/minpv/now, eine Preisregel | v0.17.1 |
+| [UC6](#uc6--e-auto-lademodus-3-level) | E-Auto 3-Level pv/minpv/now, gerechnete Preisschwelle | v0.17.1 |
 | [UC9](#uc9--1p3p-umschaltung) | 1P/3P-Umschaltung | ⛔ blocked |
 | [UC10](#uc10--e3dc-discharge-steuerung) | E3DC maxDischargePower = EMHASS p_batt | v0.12/0.13 |
 | [UC11](#uc11--klima-og-advisor) | Klima OG Advisor (Notify statt Aktion) | v0.14.1 |
@@ -45,6 +45,14 @@ Neustart keine Phantom-Pläne hinterlässt. UC2 läuft **auch im Schlafmodus**
 
 Sensor: `sensor.wattson_naechste_fahrt`. Erbt UC6-Override: hat der User den
 Mode manuell gesetzt, greift UC2 nicht ein.
+
+**Grundplan (v0.20):** Steht kein Termin an — oder deckt der SOC den Bedarf
+schon — setzt UC2 trotzdem einen Fahrplan: `BASELINE_SOC` (50 %) bis
+`BASELINE_READY_HOUR` (07:00). Ohne den gab es an terminlosen Tagen gar keinen
+Plan, dann hing alles an der Preisschwelle und nichts garantierte einen
+Ladezustand. Mit Plan hat evcc immer etwas zu optimieren und wählt Leistung wie
+Slots selbst. Ein Termin-Fahrplan hat Vorrang und überschreibt ihn; liegt der
+SOC schon über 50 %, passiert nichts.
 
 **Anstecken-Erinnerung (v0.19):** eine Sorte Meldung statt gestaffelter
 Preis-Eskalation. Auslöser: Heimkommen mit SOC unter `PLUGIN_COMFORT_SOC` (40)
@@ -116,28 +124,71 @@ Action-Automation: `automation.wattson_heizstab_safety_action`.
 
 ## UC6 — E-Auto-Lademodus (3-Level)
 
-Seit **v0.19** eine einzige Regel (`forecast.decide_charge_mode`), vorher eine
-über Jahre gewachsene Bedingungskette. Reihenfolge:
+Seit **v0.20** hängt die Freigabe an einer **gerechneten Schwelle**, nicht mehr
+an Tibber-Leveln (`forecast.decide_charge_mode`). Vier Regime:
 
 | Mode | Bedingung |
 |---|---|
 | `now` | Fahrplan aktiv **und** zeitlich gefährdet — überstimmt alles |
-| `minpv` | `very_cheap`, oder `cheap` **und** PV-Überschuss ≥ `UC6_SUN_SURPLUS_MIN_W` (4200 W) |
-| `pv` | alles andere — inklusive `normal` |
+| `now` | Preis ≤ `EEG_VERGUETUNG_CT` (11,1 ct) — Volllast aus dem Netz |
+| `minpv` | Preis ≤ Bedarfsschwelle — Netzminimum plus alle Sonne |
+| `pv` | alles andere |
 
-Begründung der Schwellen: Tibber-Level sind **relativ zum rollierenden
-Mittel** (very_cheap < 60 %, cheap 60–90 %, normal 90–115 %). Bei ~31 ct Mittel
-reicht `normal` bis rund 35,6 ct — das ist keine Ladefreigabe, deshalb ist
-`normal` bewusst draußen (`UC6_MINPV_PRICE_LEVELS`). Die 4200 W entsprechen
-dem 3-phasigen Minimum; darunter zöge `minpv` die Differenz aus dem Netz.
+### Warum keine feste Grenze und keine Level
+
+Eine feste Cent-Grenze altert. 20 ct sind Ende Juli günstig; im Januar liegt
+das Tagesminimum bei 18,0 ct und der Monatsmittelwert bei 30,9 — dieselbe
+Grenze würde dort fast nie greifen, da bräuchte es 30 oder im Winter 60.
+
+Tibber-Level lösen es nicht: sie hängen am gleitenden Mittel, nicht am eigenen
+Bedarf. `normal` reicht bis ~115 % des Mittels, also Ende Juli 2026 bis ~35 ct.
+
+`charge_threshold_ct` rechnet stattdessen: nimm die günstigsten Slots im
+Fenster bis zur Abfahrt, bis der Bedarf gedeckt ist, und nimm den Preis des
+teuersten davon. Die Schwelle wandert damit von selbst mit Saison, Kurve und
+Ladezustand — viel nachzuladen weitet sie, wenig verengt sie. Kein Parameter,
+den man nachprüfen müsste.
+
+> [!warning] Eine **verstrichene** Abfahrt darf das Fenster nicht begrenzen.
+> `s.trip_departure` bleibt nach dem Termin stehen; als Fensterende genommen
+> findet sich kein Slot mehr, die Schwelle ist `None` und UC6 fällt stumm auf
+> `pv`. Gefunden am 27.07.2026 beim Lauf gegen Livedaten (19:57, Abfahrt war
+> 17:18). Liegt die Abfahrt in der Vergangenheit, gilt der 24-h-Horizont.
+
+### Warum nicht evccs `smartCostLimit`
+
+Naheliegend, aber es kann nur eines der Regime. Laut evcc-Doku schaltet das
+Limit auf *fast-charging* „regardless of solar production". Für Preise unter
+der Einspeisevergütung ist das genau richtig — Netzstrom ist dann billiger als
+die eigene Sonne. Im Winter, wo „relativ günstig" absolut immer noch teuer
+ist, ist es falsch; dort will man `minpv`. Ein Knopf kann beide nicht, deshalb
+entscheidet Wattson und evcc führt aus.
+
+Das EEG-Regime greift selten: 2026 nur April und Mai, mit Negativpreisen bis
+−41 ct. Jan–Jul-Minima lagen sonst bei 11,7–18,0 ct. Es kostet nichts, wenn es
+nicht greift.
+
+### Sonnenschwelle
+
+`UC6_SUN_SURPLUS_MIN_W` = 1700 W (= `PV_SURPLUS_ON`). Stand in v0.19.0 auf
+4200 W, dem 3-phasigen Wallbox-Minimum — ein Denkfehler: diese Schwelle gehört
+zum `pv`-Modus, wo nur Überschuss fließen soll. In `minpv` ist der Netzanteil
+Absicht. Bei 5,2 kWp wurde 4200 W in 30 Tagen genau einmal erreicht (Spitze
+4233 W, drei Stunden über 4000), der Zweig war toter Code.
+
+### Sonstiges
 
 Ein aktiver Fahrplan läuft in `pv`, nicht `minpv`: evcc kennt den Tarif und
 sucht die Slots selbst, `minpv` würde den Plan preisunabhängig unterlaufen.
-Billiger Strom lädt trotzdem — das schadet dem Planziel nicht.
 
 Vorbedingungen: abgesteckt → `pv`; SOC ≥ Limit → `pv`, außer bei gefährdetem
 Fahrplan. Anti-Jitter: `mode_rank = {now:3, minpv:2, pv:1, off:0}` — Upshift
 sofort, Downshift erst nach 2 Cycles Confirmation. `UC6_MODE_HOLD_MINUTES = 10`.
+
+Seit **v0.19.1** läuft UC6 auch im **Schlafmodus** (`SLEEP_EXEMPT_UCS`). Er
+schreibt nur einen select-Wert — kein Push, keine Hausaktorik — und die
+günstigen Stunden liegen gerade nachts. Vorher war die Preisregel bis zum
+manuellen „Guten Morgen" wirkungslos; der Schlafmodus endet nur dadurch.
 
 **Hausbatterie:** `batteryDischargeControl` steht in evcc auf `true` (Runtime,
 `POST /api/batterydischargecontrol/true` — **nicht** in `evcc.yaml`, dort
@@ -145,10 +196,8 @@ lässt der Site-Schema-Check evcc mit `FATAL: 'core.Site' has invalid keys`
 nicht mehr starten). Ohne das entlud der Hausspeicher ins Auto; am 25.07.2026
 nachgewiesen mit 68 % → 13 % in 80 min bei 1,44 kW.
 
-**Offen:** EMHASS plant die Wallbox weiterhin als `deferrable1`, UC6 folgt
-diesem Plan seit v0.19 aber nicht mehr. Solange EMHASS Batterie und Heizstab
-unter der Annahme rechnet, dass die Wallbox mitspielt, ist das inkonsistent —
-die Wallbox sollte als Deferrable raus.
+✅ Die Wallbox ist seit 2026-07-26 **kein EMHASS-Deferrable** mehr — UC6 folgt
+dem Plan nicht mehr, also darf EMHASS auch nicht mit ihm rechnen.
 
 ## UC9 — 1P/3P-Umschaltung
 
