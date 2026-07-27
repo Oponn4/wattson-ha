@@ -452,6 +452,28 @@ class ChargeDecision:
     reason: str
 
 
+def heat_active(
+    *,
+    abluft_c: float,
+    heat_c: float,
+    hysteresis_c: float,
+    currently_cooling: bool,
+) -> bool:
+    """Gilt "echte Hitze" — mit Totband gegen Schwingen.
+
+    Einschalten ab `heat_c`, ausschalten erst unter `heat_c - hysteresis_c`.
+    Ohne das entscheidet ein blankes `>=` über eine Schwelle, um die die
+    Abluft herumpendelt: ein Tick sieht 25,4 und schaltet die Kühlung ein, der
+    nächste sieht 25,1 und die Grundregel schaltet wieder aus. Am 27.07.2026
+    lief das als Sägezahn — 5 min an, 25 min aus, ein Push pro Zyklus.
+
+    Der laufende Zustand ist das Gedächtnis, deshalb braucht es keine eigene
+    Zustandsvariable.
+    """
+    schwelle = (heat_c - hysteresis_c) if currently_cooling else heat_c
+    return abluft_c >= schwelle
+
+
 def charge_threshold_ct(
     slots: list[PriceSlot],
     *,
