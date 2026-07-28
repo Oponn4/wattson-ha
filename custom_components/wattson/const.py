@@ -141,6 +141,14 @@ EEG_VERGUETUNG_CT             = 11.1
 WALLBOX_POWER_KW              = 11.0
 # Horizont für die Bedarfsschwelle, wenn kein Termin die Grenze setzt.
 CHARGE_THRESHOLD_HORIZON_H    = 24
+# Totband um die Bedarfsschwelle (v0.20.2). Die Schwelle wird jeden Tick neu
+# gerechnet und wandert dabei: der 24-h-Fensterrand schiebt sich weiter und
+# `needed_slots` springt in ganzen Schritten durch das sortierte Preisarray.
+# Liegt der Preis dicht daneben, kippt jede Mini-Verschiebung die Entscheidung.
+# Am 28.07.2026 gemessen: 17,9 ct gegen eine Schwelle von 18,0 ct, minpv→pv→minpv
+# innerhalb von 35 Minuten. Hold-Zeit und Downshift-Confirmation begrenzen nur
+# die Rate, sie verhindern das Kippen nicht — das tut erst ein Totband.
+CHARGE_THRESHOLD_HYSTERESE_CT = 0.5
 
 # ── v0.20: Grundplan ─────────────────────────────────────────────────────────
 # Ohne Kalendertermin gab es bisher gar keinen Fahrplan — dann hing alles an
@@ -149,6 +157,10 @@ CHARGE_THRESHOLD_HORIZON_H    = 24
 # BASELINE_SOC. Ein Termin-Fahrplan hat Vorrang und überschreibt ihn.
 BASELINE_SOC                  = 50
 BASELINE_READY_HOUR           = 7
+# uid des Grundplans. Er stammt aus keinem Kalendertermin — die Stale-Erkennung
+# in UC2 muss ihn deshalb überspringen, sonst löscht sie ihn im Tick nach dem
+# Setzen wieder weg (gemessen 27.07.2026 ab 21:36: setzen/löschen im Wechsel).
+BASELINE_PLAN_UID             = "baseline"
 
 # Downshift (Richtung "weniger laden") braucht Confirmation gegen Replan-Jitter
 UC6_DOWNSHIFT_CONFIRMATION_CYCLES = 2  # 2 Cycles in Folge "kein Bedarf mehr"

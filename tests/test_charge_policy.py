@@ -25,6 +25,8 @@ PriceSlot = forecast.PriceSlot
 EEG = const.EEG_VERGUETUNG_CT
 SUN_MIN = const.UC6_SUN_SURPLUS_MIN_W
 POWER = const.WALLBOX_POWER_KW
+BAND = const.CHARGE_THRESHOLD_HYSTERESE_CT
+BAND_OVER = BAND + 0.1
 
 BASE: ClassVar[dict] = {
     "car_connected": True,
@@ -37,6 +39,8 @@ BASE: ClassVar[dict] = {
     "car_soc": 50.0,
     "limit_soc": 80,
     "pv_surplus_min_w": SUN_MIN,
+    "current_mode": None,
+    "threshold_band_ct": BAND,
 }
 
 
@@ -106,6 +110,76 @@ class TestVorbedingungen:
 
     def test_limit_schlaegt_preis_aber_nicht_notfall(self):
         assert mode(car_soc=95.0, plan_active=True, plan_at_risk=True) == "now"
+
+
+class TestTotband:
+    """v0.20.2 — Totband gegen das Kippen an der Schwelle.
+
+    Anders als bei UC12 pendelt hier nicht der Messwert um die Schwelle,
+    sondern die Schwelle um den Messwert: sie wird jeden Tick neu gerechnet,
+    der 24-h-Fensterrand wandert und `needed_slots` springt in ganzen
+    Schritten durch das sortierte Preisarray.
+    """
+
+    def test_einstieg_bleibt_an_der_schwelle(self):
+        """Das Band gilt nur nach oben — sonst würde es die Freigabe verschleppen."""
+        assert mode(price_ct=18.1, threshold_ct=18.0, current_mode="pv") == "pv"
+
+    def test_laufendes_minpv_bleibt_im_band(self):
+        """Der Fall vom 28.07.: 17,9 ct, Schwelle rutscht auf 17,6."""
+        assert mode(price_ct=17.9, threshold_ct=17.6, current_mode="minpv") == "minpv"
+
+    def test_erst_ueber_dem_band_zurueck_auf_pv(self):
+        assert mode(price_ct=18.0 + BAND_OVER, threshold_ct=18.0,
+                    current_mode="minpv") == "pv"
+
+    def test_genau_am_bandrand_noch_minpv(self):
+        assert mode(price_ct=18.0 + BAND, threshold_ct=18.0,
+                    current_mode="minpv") == "minpv"
+
+    def test_ohne_current_mode_wie_bisher(self):
+        """Altes Verhalten bleibt, wenn niemand den laufenden Modus mitgibt."""
+        assert mode(price_ct=18.1, threshold_ct=18.0) == "pv"
+
+    def test_band_hebelt_das_limit_nicht_aus(self):
+        assert mode(price_ct=17.9, threshold_ct=17.6, current_mode="minpv",
+                    car_soc=90.0, limit_soc=90) == "pv"
+
+    def test_begruendung_nennt_das_totband(self):
+        d = decide(**{**BASE, "price_ct": 17.9, "threshold_ct": 17.6,
+                      "current_mode": "minpv",
+                      "threshold_band_ct": const.CHARGE_THRESHOLD_HYSTERESE_CT})
+        assert "Totband" in d.reason
+
+
+class TestKeinPingPong:
+    """Der reale Verlauf vom 28.07.2026, 12:49–13:25."""
+
+    # Preis lag konstant bei 17,9 ct; die gerechnete Schwelle wanderte.
+    SCHWELLEN: ClassVar[list[float]] = [
+        18.0, 18.0, 17.9, 17.8, 17.6, 17.5, 17.7, 17.9, 18.0, 18.1, 17.8, 17.6,
+    ]
+    PREIS: ClassVar[float] = 17.9
+
+    def _wechsel(self, band: float) -> int:
+        current = "pv"
+        wechsel = 0
+        for schwelle in self.SCHWELLEN:
+            neu = decide(**{**BASE, "price_ct": self.PREIS,
+                            "threshold_ct": schwelle,
+                            "current_mode": current,
+                            "threshold_band_ct": band}).mode
+            if neu != current:
+                wechsel += 1
+            current = neu
+        return wechsel
+
+    def test_mit_totband_nur_der_einstieg(self):
+        assert self._wechsel(const.CHARGE_THRESHOLD_HYSTERESE_CT) == 1
+
+    def test_ohne_totband_haette_es_gependelt(self):
+        """Gegenprobe: ohne Band kippt dieselbe Kurve mehrfach."""
+        assert self._wechsel(0.0) > 1
 
 
 class TestBegruendungLesbar:

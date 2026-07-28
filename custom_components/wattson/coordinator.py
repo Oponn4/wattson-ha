@@ -13,12 +13,14 @@ from homeassistant.util import dt as dt_util
 
 from .const import (
     AWAY_LONG_HOURS,
+    BASELINE_PLAN_UID,
     BASELINE_READY_HOUR,
     BASELINE_SOC,
     BATTERIE_KAPAZITAT_KWH,
     BATTERY_FULL,
     BATTERY_NOT_FULL,
     CHARGE_THRESHOLD_HORIZON_H,
+    CHARGE_THRESHOLD_HYSTERESE_CT,
     CLIMATE_COOL_OFFSET_C,
     CLIMATE_ECO_OFFSET_C,
     CLIMATE_PEAK_OFFSET_C,
@@ -185,6 +187,7 @@ from .forecast import (
     parse_deferrable_schedule,
     parse_tibber_response,
     plan_charge_window,
+    plan_is_stale,
     plugin_reminder_due,
     relevant_events,
     select_binding_trip,
@@ -936,6 +939,8 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
                 car_soc=s.car_soc,
                 limit_soc=limit_soc,
                 pv_surplus_min_w=UC6_SUN_SURPLUS_MIN_W,
+                current_mode=s.evcc_mode,
+                threshold_band_ct=CHARGE_THRESHOLD_HYSTERESE_CT,
             )
             raw_target = decision.mode
             raw_reason = decision.reason
@@ -2734,7 +2739,7 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             )
             await self._override.async_set_misc(MISC_UC2_PLAN, {
                 "key": plan_key,
-                "uid": "baseline",
+                "uid": BASELINE_PLAN_UID,
                 "titel": "Grundplan",
                 "soc": BASELINE_SOC,
                 "abfahrt": ready.isoformat(),
@@ -2782,9 +2787,11 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         stored = self._stored_plan()
         if not stored:
             return
-        uid = stored.get("uid")
-        still_there = any(event_key(ev, now.tzinfo) == uid for ev in events)
-        if still_there:
+        if not plan_is_stale(
+            stored_uid=stored.get("uid"),
+            event_uids=[event_key(ev, now.tzinfo) for ev in events],
+            baseline_uid=BASELINE_PLAN_UID,
+        ):
             return
 
         # Nur löschen, wenn evcc überhaupt noch unseren Plan hält
