@@ -1,6 +1,6 @@
 # Use Cases
 
-Stand: v0.20.0 (2026-07-27). Alle live außer UC9 (Hardware-blocked).
+Stand: v0.20.2 (2026-07-28). Alle live außer UC9 (Hardware-blocked).
 
 | UC | Was | Seit |
 |---|---|---|
@@ -53,6 +53,13 @@ Plan, dann hing alles an der Preisschwelle und nichts garantierte einen
 Ladezustand. Mit Plan hat evcc immer etwas zu optimieren und wählt Leistung wie
 Slots selbst. Ein Termin-Fahrplan hat Vorrang und überschreibt ihn; liegt der
 SOC schon über 50 %, passiert nichts.
+
+Der Grundplan trägt die uid `BASELINE_PLAN_UID` und ist von der Stale-Erkennung
+**ausgenommen** (`forecast.plan_is_stale`). Er stammt aus keinem Kalendertermin,
+also findet die uid-Suche nie etwas — ohne die Ausnahme las die Aufräumroutine
+das als „Termin abgesagt" und löschte den Plan im Tick nach dem Setzen. Am
+27.07.2026 ab 21:36 lief genau das im Wechsel weiter, die Zusage stand nie
+wirklich in evcc (Fix v0.20.2).
 
 **Anstecken-Erinnerung (v0.19):** eine Sorte Meldung statt gestaffelter
 Preis-Eskalation. Auslöser: Heimkommen mit SOC unter `PLUGIN_COMFORT_SOC` (40)
@@ -133,6 +140,21 @@ an Tibber-Leveln (`forecast.decide_charge_mode`). Vier Regime:
 | `now` | Preis ≤ `EEG_VERGUETUNG_CT` (11,1 ct) — Volllast aus dem Netz |
 | `minpv` | Preis ≤ Bedarfsschwelle — Netzminimum plus alle Sonne |
 | `pv` | alles andere |
+
+### Totband um die Bedarfsschwelle (v0.20.2)
+
+Läuft `minpv` bereits, darf der Preis bis `Schwelle + CHARGE_THRESHOLD_HYSTERESE_CT`
+(0,5 ct) steigen, bevor auf `pv` zurückgefallen wird. Der Einstieg bleibt bei der
+gerechneten Schwelle — das Band gilt nur nach oben, sonst würde es die Freigabe
+verschleppen. Laufender Modus ist das Gedächtnis, wie bei `heat_active`.
+
+Anders als bei UC12 pendelt hier nicht der Messwert um die Schwelle, sondern die
+**Schwelle um den Messwert**: sie wird jeden Tick neu gerechnet, der 24-h-Fensterrand
+wandert und `needed_slots` springt in ganzen Schritten durch das sortierte
+Preisarray. Am 28.07.2026 gemessen: Preis konstant 17,9 ct, Schwelle 18,0 ct →
+`minpv` 12:49, `pv` 13:14, `minpv` 13:24. `UC6_MODE_HOLD_MINUTES` (10) und die
+Downshift-Confirmation (2 Cycles) erklären die Abstände — sie begrenzen die Rate,
+verhindern das Kippen aber nicht.
 
 ### Warum keine feste Grenze und keine Level
 

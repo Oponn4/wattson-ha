@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from conftest import forecast
+from conftest import const, forecast
 
 BERLIN = timezone(timedelta(hours=2))
 NOW = datetime(2026, 7, 25, 16, 0, tzinfo=BERLIN)
@@ -108,3 +108,38 @@ class TestVerschwundenErkennung:
         """
         ohne_ort = {k: v for k, v in MIT_UID.items() if k != "location"}
         assert self._weg(MIT_UID["uid"], [ohne_ort]) is False
+
+
+class TestGrundplanUeberlebt:
+    """v0.20.2 — der Grundplan darf nicht als verwaister Termin gelöscht werden.
+
+    Er stammt bewusst aus keinem Kalendertermin, also findet die uid-Suche nie
+    etwas. Die Aufräumroutine las das als "Termin abgesagt" und löschte den
+    Plan im Tick nach dem Setzen. Am 27.07.2026 ab 21:36 lief das im Wechsel
+    weiter — die Zusage "50 % bis 07:00" stand nie wirklich in evcc.
+    """
+
+    BASELINE = const.BASELINE_PLAN_UID
+
+    def _stale(self, stored_uid, events: list[dict]) -> bool:
+        return forecast.plan_is_stale(
+            stored_uid=stored_uid,
+            event_uids=[event_uid(ev) for ev in events],
+            baseline_uid=self.BASELINE,
+        )
+
+    def test_grundplan_ohne_termine_bleibt(self):
+        assert self._stale(self.BASELINE, []) is False
+
+    def test_grundplan_neben_fremdem_termin_bleibt(self):
+        assert self._stale(self.BASELINE, [MIT_UID]) is False
+
+    def test_echter_termin_wird_weiter_aufgeraeumt(self):
+        """Die Ausnahme darf die eigentliche Aufgabe nicht aushebeln."""
+        assert self._stale(MIT_UID["uid"], []) is True
+
+    def test_echter_termin_bleibt_wenn_da(self):
+        assert self._stale(MIT_UID["uid"], [MIT_UID]) is False
+
+    def test_ohne_plan_nichts_zu_tun(self):
+        assert self._stale(None, []) is False

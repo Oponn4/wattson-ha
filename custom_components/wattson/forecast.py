@@ -530,6 +530,8 @@ def decide_charge_mode(
     car_soc: float,
     limit_soc: int,
     pv_surplus_min_w: int,
+    current_mode: str | None = None,
+    threshold_band_ct: float = 0.0,
 ) -> ChargeDecision:
     """Lademodus bestimmen.
 
@@ -548,6 +550,13 @@ def decide_charge_mode(
     Schalter auf Volllast unabhängig von der Sonne. Für das EEG-Regime ist das
     genau richtig, für das Winter-Regime falsch — ein Knopf kann beide nicht.
     Also entscheidet Wattson und evcc führt aus.
+
+    `threshold_band_ct` ist das Totband der Bedarfsschwelle (v0.20.2): läuft
+    bereits `minpv`, darf der Preis bis `Schwelle + Band` steigen, bevor auf
+    `pv` zurückgefallen wird. Der laufende Modus ist das Gedächtnis, genau wie
+    bei `heat_active` — keine zusätzliche Zustandsvariable. Nötig, weil hier
+    nicht der Messwert um die Schwelle pendelt, sondern die Schwelle um den
+    Messwert: sie wird jeden Tick neu gerechnet und springt in Slot-Schritten.
     """
     if not car_connected:
         return ChargeDecision("pv", "Auto nicht angeschlossen")
@@ -566,10 +575,20 @@ def decide_charge_mode(
             "now", f"{price_ct:.1f} ct ≤ Einspeisevergütung {eeg_ct:.1f} ct"
         )
 
-    if threshold_ct is not None and price_ct <= threshold_ct:
-        return ChargeDecision(
-            "minpv", f"{price_ct:.1f} ct ≤ Bedarfsschwelle {threshold_ct:.1f} ct"
-        )
+    if threshold_ct is not None:
+        # Totband nur nach oben und nur, solange minpv schon läuft: der
+        # Einstieg bleibt bei der gerechneten Schwelle, der Ausstieg bekommt
+        # Luft. Umgekehrt würde das Band die Freigabe verschleppen.
+        band = threshold_band_ct if current_mode == "minpv" else 0.0
+        if price_ct <= threshold_ct + band:
+            im_band = band > 0.0 and price_ct > threshold_ct
+            grund = (
+                f"{price_ct:.1f} ct ≤ Bedarfsschwelle {threshold_ct:.1f} ct"
+                f" + Totband {band:.1f} ct"
+                if im_band
+                else f"{price_ct:.1f} ct ≤ Bedarfsschwelle {threshold_ct:.1f} ct"
+            )
+            return ChargeDecision("minpv", grund)
 
     sun = pv_surplus_w >= pv_surplus_min_w
     if plan_active:
@@ -582,6 +601,30 @@ def decide_charge_mode(
     return ChargeDecision(
         "pv", f"{price_ct:.1f} ct > Schwelle {threshold_ct:.1f} ct{hint}"
     )
+
+
+def plan_is_stale(
+    *,
+    stored_uid: str | None,
+    event_uids: list[str],
+    baseline_uid: str,
+) -> bool:
+    """Ist der gespeicherte Fahrplan verwaist — gehört er zu keinem Termin mehr?
+
+    Der Grundplan ist ausgenommen. Er stammt bewusst aus keinem Kalendertermin,
+    also findet die Suche nach seiner uid nie etwas, und die Aufräumroutine
+    hielt ihn für einen abgesagten Termin. Ergebnis am 27.07.2026 ab 21:36:
+    UC2 setzte den Grundplan, der nächste Tick löschte ihn wieder, im Wechsel
+    bis in die Nacht — die Zusage "50 % bis 07:00" stand nie wirklich in evcc.
+
+    Als reine Funktion herausgezogen, weil der Coordinator Home Assistant
+    importiert und in den Tests nicht ladbar ist.
+    """
+    if stored_uid is None:
+        return False
+    if stored_uid == baseline_uid:
+        return False
+    return stored_uid not in event_uids
 
 
 def needs_forced_charging(
