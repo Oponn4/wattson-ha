@@ -158,6 +158,8 @@ from .const import (
     UC14_FORCE_CHARGE_W,
     UC14_MIN_SPREAD_CT_KWH,
     UC14_MIN_WINDOW_MINUTES,
+    UC14_P_BATT_DEADBAND_W,
+    UC14_P_BATT_HOLD_CYCLES,
     UC14_SOC_MAX_PCT,
     UC14_TOPUP_OVERHEAD_FACTOR,
     UC_DEFINITIONS,
@@ -178,6 +180,7 @@ from .forecast import (
     decide_charge_mode,
     deferrable_slot_at,
     event_key,
+    grid_charge_holds,
     heat_active,
     humidex,
     is_in_window,
@@ -378,6 +381,9 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         self._uc6_last_set_target: str | None = None
         # UC14-Grid-Charge: Memo für POST-verify (nächster cycle prüft ob persistiert)
         self._uc14_active: bool = False
+        # Ticks in Folge ohne EMHASS-Ladewunsch — Kappe gegen den
+        # Hänger, wenn p_batt dauerhaft auf 0.00 stehen bleibt.
+        self._uc14_nonneg_ticks: int = 0
         self._last_max_charge: int | None = None
         # UC11-Advisor: Notify-Cooldown pro Raum
         self._uc11_last_notify_utc: dict[str, datetime] = {}
@@ -422,6 +428,7 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         if uc_id == "uc14":
             self._last_max_charge = None
             self._uc14_active = False
+            self._uc14_nonneg_ticks = 0
         if uc_id == "uc6":
             # Mode-Hysterese vergessen damit nächster Cycle sauber neu greift
             self._uc6_last_mode_change_utc = None
@@ -2196,7 +2203,22 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             _set_inactive("EMHASS nicht verfügbar")
             return
         if s.emhass_p_batt_plan >= 0:
-            await self._end_uc14_grid_charge_if_active(s, actions, "EMHASS p_batt≥0")
+            self._uc14_nonneg_ticks += 1
+        else:
+            self._uc14_nonneg_ticks = 0
+        if not grid_charge_holds(
+            p_batt_w=s.emhass_p_batt_plan,
+            band_w=UC14_P_BATT_DEADBAND_W,
+            active=self._uc14_active,
+            nonneg_ticks=self._uc14_nonneg_ticks,
+            max_nonneg_ticks=UC14_P_BATT_HOLD_CYCLES,
+        ):
+            grund = (
+                f"EMHASS p_batt≥0 seit {self._uc14_nonneg_ticks} Cycles"
+                if self._uc14_nonneg_ticks >= UC14_P_BATT_HOLD_CYCLES
+                else "EMHASS p_batt≥0"
+            )
+            await self._end_uc14_grid_charge_if_active(s, actions, grund)
             _set_inactive(f"EMHASS will nicht laden (p_batt={s.emhass_p_batt_plan:.0f}W)")
             return
         if s.battery_soc >= UC14_SOC_MAX_PCT:

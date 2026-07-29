@@ -1,6 +1,6 @@
 # Roadmap
 
-Stand: 2026-07-28, v0.20.2.
+Stand: 2026-07-29, v0.20.3.
 
 ## Plan-Reife pro UC
 
