@@ -138,12 +138,10 @@ class TestUC14Netzladen:
     def test_das_echte_ende_wird_erkannt(self):
         """Die 30-Minuten-Null muss beenden — sonst hinge UC14 an 1500 W."""
         active = True
-        nonneg = 0
-        for _ in range(self.KAPPE):
-            nonneg += 1
+        for tick in range(1, self.KAPPE + 1):
             active = grid_holds(
                 p_batt_w=0.0, band_w=self.BAND, active=active,
-                nonneg_ticks=nonneg, max_nonneg_ticks=self.KAPPE,
+                nonneg_ticks=tick, max_nonneg_ticks=self.KAPPE,
             )
         assert active is False
 
