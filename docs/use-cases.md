@@ -1,6 +1,6 @@
 # Use Cases
 
-Stand: v0.20.2 (2026-07-28). Alle live außer UC9 (Hardware-blocked).
+Stand: v0.20.3 (2026-07-29). Alle live außer UC9 (Hardware-blocked).
 
 | UC | Was | Seit |
 |---|---|---|
@@ -313,3 +313,39 @@ Aktion: `set_power_limits(charge=1500, discharge=0)`. Ende: charge zurück auf
 Default, discharge bleibt 0 — UC10 übernimmt im selben Cycle. POST-Verify im
 Folge-Cycle (E3DC-Self-Reset-Problematik).
 Why 11 ct: ~15% Round-Trip-Verlust + Marge, EEG-Vergütung als Opportunity-Cost.
+
+**Totband + Kappe am Ladewunsch (v0.20.3):** `p_batt` zappelt um die Null und
+fällt dabei auf exakt 0.00 — am 29.07.2026 zwischen 09:30 und 11:40 real −1500,
+0.00, −414, −189, −36, 0.00, −11.89. Jeder Nulldurchgang beendete UC14, der
+nächste Tick startete es neu: fünf E3DC-Schreibvorgänge in vier Stunden, während
+`sensor.wattson_netzladen_batterie_status` durchgehend `aktiv` zeigte.
+
+`forecast.grid_charge_holds` hält jetzt bis `UC14_P_BATT_DEADBAND_W` (200 W).
+**Ein Band allein reicht hier nicht:** 0.00 ist ein Wert, auf dem der Sensor
+stehen bleiben kann (EMHASS publiziert nicht neu) — er käme nie über die
+Bandgrenze und UC14 liefe endlos mit 1500 W aus dem Netz. Deshalb zusätzlich
+`UC14_P_BATT_HOLD_CYCLES` (3): so viele Ticks in Folge ohne Ladewunsch beenden
+es trotzdem. Am 29.07. hätte genau das gegriffen — Zacken um 10:35 und 10:55
+gehalten, die 30-Minuten-Null ab 11:00 beendet.
+
+## Totband als gemeinsames Muster
+
+Drei Vorfälle im Juli 2026 hatten dieselbe Ursache: ein blankes `>=`/`<=` gegen
+eine Schwelle, alle 5 Minuten neu ausgewertet, und ein Signal, das genau darum
+herum pendelt.
+
+| UC | Datum | Was pendelte | Folge |
+|---|---|---|---|
+| UC12 | 27.07. | Abluft um die Hitze-Schwelle | Kühlung sägte, ein Push pro Zyklus |
+| UC6 | 28.07. | die **Schwelle** um den Preis | Lademodus kippte minpv↔pv |
+| UC14 | 29.07. | EMHASS `p_batt` um die Null | E3DC-Schreibsalve |
+
+Gemeinsames Primitiv: `forecast.deadband_hold`. Eingeschaltet wird immer an der
+nackten Schwelle, das Band verbreitert nur den Ausstieg — andersherum würde es
+die Reaktion verschleppen. Der laufende Zustand ist das Gedächtnis, keine
+zusätzliche Zustandsvariable.
+
+**Wann ein Band nicht genügt:** wenn der Sperrwert ein Wert ist, auf dem das
+Signal stehen bleiben kann (UC14: `p_batt == 0`). Dann gehört eine Zähler-Kappe
+dazu. Bei UC12 und UC6 kann das nicht passieren — Abluft und Preis stehen nie
+exakt auf der Schwelle fest.

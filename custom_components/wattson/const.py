@@ -178,6 +178,16 @@ UC14_CHARGE_POWER_KW   = 1.5       # E3DC max-Charge-Power Hardware
 UC14_MIN_WINDOW_MINUTES = 30       # Floor — unter 30 min lohnt Setup nicht
 UC14_TOPUP_OVERHEAD_FACTOR = 1.1   # +10% Puffer für Lade-Verluste am Top
 UC14_FORCE_CHARGE_W = 1500         # max_charge_power während UC14 aktiv (Hardware-Max)
+# Totband um den EMHASS-Ladewunsch (v0.20.3). p_batt zappelt um die Null und
+# fällt dabei auf exakt 0.00 — am 29.07.2026 zwischen 09:30 und 11:40 real
+# −1500, 0.00, −414, −189, −36, 0.00, −11.89. Jeder Nulldurchgang beendete UC14,
+# der nächste Tick startete es neu: fünf E3DC-Schreibvorgänge in vier Stunden,
+# während der Status durchgehend "aktiv" war.
+UC14_P_BATT_DEADBAND_W = 200
+# Kappe gegen den Hänger: bleibt p_batt dauerhaft ≥ 0 (EMHASS publiziert nicht
+# neu), käme es nie über die Bandgrenze und UC14 liefe endlos mit 1500 W aus dem
+# Netz. Nach so vielen Ticks in Folge ohne Ladewunsch endet es trotzdem.
+UC14_P_BATT_HOLD_CYCLES = 3
 
 # forecast.solar (PV Forecast)
 ENTITY_PV_FC_NOW       = "sensor.power_production_now"               # W

@@ -452,6 +452,75 @@ class ChargeDecision:
     reason: str
 
 
+def deadband_hold(
+    *,
+    value: float,
+    threshold: float,
+    band: float,
+    active: bool,
+    direction: str = "above",
+    strict: bool = False,
+) -> bool:
+    """Schwellenvergleich mit Totband — der laufende Zustand ist das Gedächtnis.
+
+    Das gemeinsame Muster hinter drei Vorfällen im Juli 2026, die alle gleich
+    aussahen: ein blankes `>=`/`<=` gegen eine Schwelle, alle 5 Minuten neu
+    ausgewertet, und ein Signal, das genau darum herum pendelt.
+
+    * UC12 (27.07.): Abluft pendelte um die Hitze-Schwelle, Kühlung sägte
+    * UC6  (28.07.): die *Schwelle* wanderte um den Preis, Lademodus kippte
+    * UC14 (29.07.): EMHASS `p_batt` fiel kurz auf 0 und zurück
+
+    Einschalten passiert immer an der nackten Schwelle; das Band verbreitert
+    nur den Ausstieg. Andersherum würde es die Reaktion verschleppen.
+
+    `direction="above"`  aktiv ab `value >= threshold`, aus unter `threshold - band`
+    `direction="below"`  aktiv ab `value <= threshold`, aus über `threshold + band`
+    `strict=True`        macht aus `>=`/`<=` ein `>`/`<` — UC14 braucht das, weil
+                         `p_batt == 0` dort ausdrücklich "nicht laden" heißt.
+
+    Wichtig: ein Band allein reicht nicht, wenn das Signal auf dem Sperrwert
+    stehen bleiben kann. Dann hält es ewig. Für solche Fälle gehört eine
+    Zähler-Kappe dazu, siehe `grid_charge_holds`.
+    """
+    if direction == "above":
+        limit = threshold - band if active else threshold
+        return value > limit if strict else value >= limit
+    limit = threshold + band if active else threshold
+    return value < limit if strict else value <= limit
+
+
+def grid_charge_holds(
+    *,
+    p_batt_w: float,
+    band_w: float,
+    active: bool,
+    nonneg_ticks: int,
+    max_nonneg_ticks: int,
+) -> bool:
+    """UC14: hält das Netzladen — Totband gegen Zacken, Kappe gegen Hänger.
+
+    EMHASS liefert `p_batt < 0` für "laden". Der Wert zappelt aber um die Null:
+    am 29.07.2026 zwischen 09:30 und 11:40 real −1500, 0.00, −414, −189, −36,
+    0.00, −11.89 … Jeder Nulldurchgang beendete UC14 und der nächste Tick
+    startete es neu — fünf Schreibvorgänge an die E3DC in vier Stunden,
+    während `sensor.wattson_netzladen_batterie_status` durchgehend "aktiv" war.
+
+    Das Band allein wäre hier gefährlich: bleibt der Plan dauerhaft auf 0,00
+    stehen (kommt vor, wenn EMHASS nicht neu publiziert), käme er nie über die
+    Bandgrenze und UC14 liefe endlos mit 1500 W aus dem Netz. Deshalb zusätzlich
+    die Kappe: `max_nonneg_ticks` Ticks in Folge ohne Ladewunsch beenden es
+    trotzdem. Am 29.07. hätte genau das gegriffen — die kurzen Zacken um 10:35
+    und 10:55 gehalten, die 30-Minuten-Null ab 11:00 beendet.
+    """
+    if nonneg_ticks >= max_nonneg_ticks:
+        return False
+    return deadband_hold(
+        value=p_batt_w, threshold=0.0, band=band_w,
+        active=active, direction="below", strict=True,
+    )
+
+
 def heat_active(
     *,
     abluft_c: float,
@@ -468,10 +537,13 @@ def heat_active(
     lief das als Sägezahn — 5 min an, 25 min aus, ein Push pro Zyklus.
 
     Der laufende Zustand ist das Gedächtnis, deshalb braucht es keine eigene
-    Zustandsvariable.
+    Zustandsvariable. Seit v0.20.3 nur noch eine benannte Anwendung von
+    `deadband_hold` — die Semantik ist unverändert.
     """
-    schwelle = (heat_c - hysteresis_c) if currently_cooling else heat_c
-    return abluft_c >= schwelle
+    return deadband_hold(
+        value=abluft_c, threshold=heat_c, band=hysteresis_c,
+        active=currently_cooling, direction="above",
+    )
 
 
 def charge_threshold_ct(
@@ -580,7 +652,10 @@ def decide_charge_mode(
         # Einstieg bleibt bei der gerechneten Schwelle, der Ausstieg bekommt
         # Luft. Umgekehrt würde das Band die Freigabe verschleppen.
         band = threshold_band_ct if current_mode == "minpv" else 0.0
-        if price_ct <= threshold_ct + band:
+        if deadband_hold(
+            value=price_ct, threshold=threshold_ct, band=band,
+            active=current_mode == "minpv", direction="below",
+        ):
             im_band = band > 0.0 and price_ct > threshold_ct
             grund = (
                 f"{price_ct:.1f} ct ≤ Bedarfsschwelle {threshold_ct:.1f} ct"
