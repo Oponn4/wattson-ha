@@ -74,3 +74,5 @@ EMHASS-Deferrable mehr.
 | v0.19.0 | **Ladepolitik auf eine Regel** (`normal` raus, Sonne-Gate 4,2 kW), **eine Anstecken-Erinnerung** statt Preis-Eskalation, Aufrundung auf 5er-Stufen repariert |
 | v0.19.1 | UC6 läuft im Schlafmodus mit (sonst bis zum manuellen „Guten Morgen" stumm); Sonnenschwelle 4200 → 1700 W, war bei 5,2 kWp toter Code |
 | v0.20.0 | **Ladefreigabe gerechnet statt gesetzt** (`charge_threshold_ct`): günstigste Slots bis zur Abfahrt statt fester Cent-Grenze oder Tibber-Level. EEG-Regime für Negativpreise. **Grundplan 50 % bis 07:00** ohne Termin |
+| v0.20.1–3 | Totband gegen Sägezahn: UC12-Hitze-Zweig, UC6/UC2-Bedarfsschwelle, UC14 |
+| v0.20.4 | **Hand-Eingriff wird wieder respektiert**: `async_observe` bestätigt Writes im Tick (`confirmed` war nie True), `user_touch_at` aus dem State-Context als eindeutiges Hand-Signal, `failed_write` nur noch innerhalb von 2 Ticks. Vorher schaltete UC12 ein manuelles Aus nach 44 s wieder ein |

@@ -68,9 +68,34 @@ dreiwertiges Verdikt:
 - `failed_write` — Zielwert kam nie an, Ist == Zustand vor der Aktion
   (z.B. Modbus-Glitch): kein Override, Wattson schreibt erneut.
   Vorher wurde ein eigener fehlgeschlagener Write als User-Eingriff
-  fehlgedeutet (Phantom-Override uc12/uc4b, 2026-07-06)
+  fehlgedeutet (Phantom-Override uc12/uc4b, 2026-07-06).
+  Gilt nur innerhalb `FAILED_WRITE_GRACE` (2 Ticks + Slack) — danach hätte
+  `async_observe` den Wert längst bestätigt, also war es doch ein Eingriff
 - `override` — Wert weicht ab, nachdem er einmal bestätigt war (oder auf einen
   dritten Wert): echter User-Eingriff → Cooldown bis Mitternacht
+
+### Bestätigung + Hand-Erkennung (v0.20.4)
+
+Zwei Lücken, durch die UC12 am 31.07.2026 das manuelle Aus 44 s später wieder
+überschrieb:
+
+1. **`confirmed` wurde nie gesetzt.** `async_check_action` läuft nur aus
+   `_try_act`, und das nur, wenn Wattson etwas ändern will. Im eingeschwungenen
+   Zustand wurde ein Record deshalb nie bestätigt, und jedes spätere Hand-Aus
+   fiel in den `failed_write`-Zweig (Ist == `prev_value`) → Retry statt
+   Override. Fix: `async_observe()` läuft jeden Tick für alle
+   `tracked_entities()` (Coordinator: `_observe_tracked_entities`), bestätigt
+   ohne zu handeln.
+2. **Wertevergleich ist bei Binär-Entities mehrdeutig** — „User schaltet
+   zurück" und „Write kam nie an" sehen identisch aus. Fix: `user_touch_at` aus
+   dem State-Context. HA hängt an jede Änderung den auslösenden Context; ein
+   Klick (UI/App/Sprache) trägt eine `user_id`, Integrations-Service-Calls
+   nicht. Ein Touch nach dem letzten Wattson-Write ist damit eindeutig ein
+   Eingriff — auch ganz ohne Action-Record (Neustart, UC war aus).
+
+`armed_at` pro UC (persistiert) verhindert dabei Dauersperren: UC-Switch an
+oder Resume setzen die Marke, ältere Hand-Eingriffe zählen danach nicht mehr.
+Ohne Record und ohne `armed_at` greift `USER_TOUCH_TTL` (12 h).
 
 ## Rahmenbedingungen
 

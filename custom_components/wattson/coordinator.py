@@ -455,6 +455,21 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             return default
         return state.state
 
+    def _user_touch_at(self, entity_id: str) -> datetime | None:
+        """Zeitpunkt der letzten Änderung, die HA einem Menschen zuschreibt.
+
+        HA hängt an jeden State den Context des auslösenden Vorgangs. Ein Klick
+        im Dashboard, in der App oder per Sprachbefehl trägt eine `user_id`;
+        Service-Calls aus Integrationen (also auch Wattsons eigene) tragen keine.
+        Damit ist ein Hand-Eingriff eindeutig erkennbar — im Gegensatz zum
+        Wertevergleich, der „User schaltet zurück" und „Write kam nicht an"
+        nicht unterscheiden kann.
+        """
+        state = self.hass.states.get(entity_id)
+        if state is None or state.context is None or not state.context.user_id:
+            return None
+        return state.last_changed
+
     def _attr(self, entity_id: str, attribute: str, default=None):
         state = self.hass.states.get(entity_id)
         if state is None:
@@ -566,7 +581,10 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         # User-Eingriff seit letzter Wattson-Aktion? (v0.18.7: dreiwertig —
         # ein nie angekommener Write ist KEIN Override, sondern Retry-Fall)
         current = self._state(entity_id)
-        verdict = await self._override.async_check_action(entity_id, current)
+        verdict = await self._override.async_check_action(
+            entity_id, current,
+            user_touch_at=self._user_touch_at(entity_id), uc_id=uc_id,
+        )
         if verdict == "override":
             await self._override.async_record_override(uc_id, entity_id, current)
             remaining = self._override.cooldown_remaining_minutes(uc_id)
@@ -591,11 +609,22 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         _LOGGER.info("Aktion: %s", desc)
         return True, desc
 
+    async def _observe_tracked_entities(self) -> None:
+        """Jeden Tick prüfen, ob Wattsons letzte Writes tatsächlich anliegen."""
+        for entity_id in self._override.tracked_entities():
+            await self._override.async_observe(entity_id, self._state(entity_id))
+
     async def _async_update_data(self) -> WattsonData:
         s = WattsonData(dry_run=self._dry_run)
 
         if not self._trend_seeded:
             await self._seed_abluft_trend_from_history()
+
+        # Angekommene Writes bestätigen. Muss VOR den UC-Handlern laufen und
+        # unabhängig davon, ob dieser Tick etwas ändern will: nur so wird ein
+        # Record je bestätigt und ein späteres Hand-Aus als Override erkannt
+        # statt als fehlgeschlagener Write (v0.20.4).
+        await self._observe_tracked_entities()
 
         # Zustand lesen
         s.price         = self._fval(ENTITY_PRICE)
@@ -2684,7 +2713,10 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             return f"user-override ({remaining}min Rest)"
 
         current = self._state(ENTITY_EVCC_PLAN_SOC)
-        verdict = await self._override.async_check_action(ENTITY_EVCC_PLAN_SOC, current)
+        verdict = await self._override.async_check_action(
+            ENTITY_EVCC_PLAN_SOC, current,
+            user_touch_at=self._user_touch_at(ENTITY_EVCC_PLAN_SOC), uc_id="uc2",
+        )
         if verdict == "override":
             await self._override.async_record_override("uc2", ENTITY_EVCC_PLAN_SOC, current)
             remaining = self._override.cooldown_remaining_minutes("uc2")
