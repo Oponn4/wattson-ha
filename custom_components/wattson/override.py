@@ -11,11 +11,31 @@ from typing import Any
 from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
 
+from .const import SCAN_INTERVAL_SECONDS
+
 _LOGGER = logging.getLogger(__name__)
 
 STATE_FILE_NAME = "wattson_state.json"
 FLOAT_TOLERANCE = 0.5         # °C oder generischer numerischer Slack
 MIN_COOLDOWN_HOURS = 2        # nicht weniger als 2h Cooldown, selbst spätabends
+
+# Werte, bei denen keine Aussage möglich ist (Entity transient weg)
+UNKNOWN_VALUES = ("unavailable", "unknown", "none", "")
+
+# Wie lange ein unbestätigter Write als „vielleicht nur nicht angekommen" gilt.
+# Zwei Coordinator-Ticks plus Slack: bis dahin hätte `async_observe` den
+# Zielwert längst einmal gesehen und den Record bestätigt.
+FAILED_WRITE_GRACE = timedelta(seconds=2 * SCAN_INTERVAL_SECONDS + 60)
+
+# Ohne Action-Record (Neustart, Resume, UC frisch eingeschaltet) zählt ein
+# Hand-Eingriff nur, wenn er noch halbwegs frisch ist — sonst sperrt ein Klick
+# von vorgestern Wattson bis in alle Ewigkeit aus.
+USER_TOUCH_TTL = timedelta(hours=12)
+
+
+def is_unknown(value: Any) -> bool:
+    """True wenn der Wert keine Aussage erlaubt (None/unavailable/unknown)."""
+    return value is None or str(value).strip().lower() in UNKNOWN_VALUES
 
 
 @dataclass
@@ -78,6 +98,11 @@ class OverrideManager:
         self._actions: dict[str, ActionRecord] = {}
         self._overrides: dict[str, OverrideRecord] = {}
         self._misc: dict[str, Any] = {}
+        # Zeitpunkt, ab dem Wattson für einen UC „scharf" ist: gesetzt beim
+        # Einschalten des UC-Switches und beim Resume. Hand-Eingriffe davor
+        # zählen nicht mehr als Override — der User hat gerade selbst gesagt,
+        # dass Wattson wieder übernehmen soll.
+        self._armed_at: dict[str, datetime] = {}
 
     # ── Persistence ──────────────────────────────────────────────────────────
 
@@ -116,6 +141,14 @@ class OverrideManager:
 
         self._misc = dict(data.get("misc") or {})
 
+        for uc_id, raw in (data.get("armed_at") or {}).items():
+            if uc_id not in self._ucs:
+                continue
+            try:
+                self._armed_at[uc_id] = datetime.fromisoformat(raw)
+            except (ValueError, TypeError) as e:
+                _LOGGER.warning("armed_at für %s ignoriert: %s", uc_id, e)
+
         for uc_id, raw in (data.get("overrides") or {}).items():
             if uc_id not in self._ucs:
                 continue
@@ -133,6 +166,7 @@ class OverrideManager:
         data = {
             "uc_enabled": self._enabled,
             "misc": self._misc,
+            "armed_at": {uc: ts.isoformat() for uc, ts in self._armed_at.items()},
             "actions": {
                 ent: {
                     "value": rec.value,
@@ -173,6 +207,10 @@ class OverrideManager:
         if uc_id not in self._ucs:
             return
         self._enabled[uc_id] = value
+        if value:
+            # Einschalten heißt: „übernimm wieder" — alte Hand-Eingriffe sind
+            # damit abgegolten und dürfen den ersten Tick nicht blockieren.
+            self._armed_at[uc_id] = dt_util.now()
         await self._async_persist()
 
     # ── Misc key/value (JSON-persistiert, z.B. legionella_last_done) ────────
@@ -199,6 +237,52 @@ class OverrideManager:
     def get_last_action(self, entity_id: str) -> ActionRecord | None:
         return self._actions.get(entity_id)
 
+    def tracked_entities(self) -> list[str]:
+        """Entities mit offenem Action-Record — Kandidaten für `async_observe`."""
+        return list(self._actions)
+
+    async def async_observe(
+        self, entity_id: str, current_value: Any, tolerance: float = FLOAT_TOLERANCE,
+    ) -> bool:
+        """Ist-Zustand beobachten, ohne zu handeln. Returns True wenn bestätigt wurde.
+
+        Muss jeden Tick für alle getrackten Entities laufen. Grund: `confirmed`
+        wurde bis v0.20.3 ausschließlich in `async_check_action` gesetzt, und die
+        läuft nur aus `_try_act` — also nur, wenn Wattson etwas ändern will. Im
+        eingeschwungenen Zustand (Wattson will genau das, was anliegt) wurde ein
+        Record deshalb NIE bestätigt, und ein späteres manuelles Zurückschalten
+        sah für immer aus wie ein fehlgeschlagener Write. Genau so hat UC12 am
+        31.07.2026 um 23:06 die Kühlung 44 s nach dem Hand-Aus wieder eingeschaltet.
+        """
+        last = self._actions.get(entity_id)
+        if last is None or last.confirmed or is_unknown(current_value):
+            return False
+        if not values_equal(last.value, current_value, tolerance):
+            return False
+        last.confirmed = True
+        await self._async_persist()
+        _LOGGER.debug(
+            "Action auf %s bestätigt (Ist=%s == gesetzt=%s)",
+            entity_id, current_value, last.value,
+        )
+        return True
+
+    def _user_touch_counts(
+        self, user_touch_at: datetime, last: ActionRecord | None, uc_id: str | None,
+    ) -> bool:
+        """Zählt ein Hand-Eingriff als Override?
+
+        Ja, wenn er nach dem letzten Wattson-Write UND nach dem letzten
+        „übernimm wieder"-Signal (UC-Switch an / Resume) liegt. Ohne beides
+        entscheidet die TTL, damit ein uralter Klick Wattson nicht ewig sperrt.
+        """
+        floor: datetime | None = self._armed_at.get(uc_id) if uc_id else None
+        if last is not None:
+            floor = max(floor, last.set_at) if floor else last.set_at
+        if floor is not None:
+            return user_touch_at > floor
+        return dt_util.now() - user_touch_at <= USER_TOUCH_TTL
+
     async def async_drop_action(self, entity_id: str) -> None:
         """Action-Record verwerfen (z.B. nach erkanntem Write-Fehlschlag)."""
         if self._actions.pop(entity_id, None) is not None:
@@ -208,6 +292,7 @@ class OverrideManager:
 
     async def async_check_action(
         self, entity_id: str, current_value: Any, tolerance: float = FLOAT_TOLERANCE,
+        user_touch_at: datetime | None = None, uc_id: str | None = None,
     ) -> str:
         """Verdikt über die letzte Wattson-Aktion vs. Ist-Zustand.
 
@@ -217,6 +302,13 @@ class OverrideManager:
                            (z.B. Modbus-Glitch); Caller darf erneut schreiben
           "override"     — jemand hat den Wert verstellt → User-Eingriff
 
+        `user_touch_at` ist der Zeitpunkt der letzten Zustandsänderung, die HA
+        einem echten Menschen zuordnet (State-Context mit `user_id` — UI, App,
+        Sprachbefehl). Das ist das einzige eindeutige Signal: Wattsons eigene
+        Service-Calls tragen nie eine user_id. Damit wird ein Hand-Eingriff auch
+        dann erkannt, wenn gar kein Action-Record existiert (nach Neustart oder
+        wenn der User den Schalter angefasst hat, ohne dass Wattson je schrieb).
+
         Wenn current_value None oder 'unavailable'/'unknown' ist → "ok":
         Entity ist transient weg (z.B. Modbus-Reconnect, Coordinator-Refresh).
         Entscheidung wird vertagt statt einen Phantom-Override auszulösen, der
@@ -224,23 +316,31 @@ class OverrideManager:
 
         Ein unbestätigter Record, dessen Ist wieder dem prev_value entspricht,
         gilt als fehlgeschlagener Write und NICHT als Override — das war die
-        Phantom-Override-Quelle (uc12/uc4b, 2026-07-06 00:06). Kehrt der Wert
-        NACH einmaliger Bestätigung zum alten Zustand zurück, ist es ein User.
+        Phantom-Override-Quelle (uc12/uc4b, 2026-07-06 00:06). Das gilt aber nur
+        innerhalb von FAILED_WRITE_GRACE: danach hätte `async_observe` den Wert
+        längst bestätigt, also war es doch ein Eingriff. Kehrt der Wert NACH
+        einmaliger Bestätigung zum alten Zustand zurück, ist es ohnehin ein User.
         """
+        if is_unknown(current_value):
+            return "ok"
+
         last = self._actions.get(entity_id)
-        if last is None:
-            return "ok"
-        if current_value is None or str(current_value).strip().lower() in (
-            "unavailable", "unknown", "none", ""
-        ):
-            return "ok"
-        if values_equal(last.value, current_value, tolerance):
+        if last is not None and values_equal(last.value, current_value, tolerance):
             if not last.confirmed:
                 last.confirmed = True
                 await self._async_persist()
             return "ok"
+
+        # Ab hier weicht der Ist-Wert von dem ab, was Wattson wollte/setzte.
+        if user_touch_at is not None and self._user_touch_counts(user_touch_at, last, uc_id):
+            return "override"
+
+        if last is None:
+            return "ok"
         if not last.confirmed and values_equal(last.prev_value, current_value, tolerance):
-            return "failed_write"
+            if dt_util.now() - last.set_at <= FAILED_WRITE_GRACE:
+                return "failed_write"
+            return "override"
         return "override"
 
     async def async_record_override(
@@ -287,6 +387,10 @@ class OverrideManager:
         if uc_id in self._overrides:
             rec = self._overrides.pop(uc_id)
             self._actions.pop(rec.entity_id, None)
+            # Ohne diese Marke würde der Hand-Eingriff, der den Override
+            # ausgelöst hat, im nächsten Tick sofort wieder als Override zählen
+            # (sein State-Context bleibt ja am Entity hängen) — Resume wäre wirkungslos.
+            self._armed_at[uc_id] = dt_util.now()
             await self._async_persist()
             _LOGGER.info("UC %s: Override per Resume gelöscht", uc_id)
 
