@@ -6,7 +6,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
-from homeassistant.core import HomeAssistant
+from homeassistant.core import CoreState, HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
@@ -693,7 +693,7 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
                         _LOGGER.warning("EMHASS-Plan veraltet (%.1fh) — Heuristik-Fallback", age_h)
                         if not self._emhass_stale_notified and not self._dry_run:
                             self._emhass_stale_notified = True
-                            await self._hass.services.async_call(
+                            await self.hass.services.async_call(
                                 "notify", NOTIFY_SERVICE.split(".", 1)[1],
                                 {"title": "Wattson ⚠️ EMHASS-Plan veraltet",
                                  "message": f"EMHASS liefert {age_h:.0f}h alten Plan — optimize.sh prüfen!"},
@@ -786,6 +786,27 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             s.t300_tank_temp, s.t300_solltemperatur,
             s.car_soc, "an" if s.car_connected else "weg", s.evcc_mode,
         )
+
+        if self.hass.state is not CoreState.running:
+            # Warmup: der erste Tick kommt aus async_config_entry_first_refresh
+            # und lief am 15.08.2026 sieben Sekunden zu früh — weder
+            # calendar.get_events noch tibber.get_prices waren da ("Action not
+            # found"), UC2 meldete `fehler`. Gelesen wird trotzdem, damit die
+            # Sensoren Werte zeigen; gehandelt nicht. Eine Entscheidung aus
+            # halb geladenem Zustand ist schlechter als gar keine: ohne Tibber
+            # fällt die Schwelle weg und UC6 kippte auf `pv`, ohne Kalender
+            # sähe UC2 keine Fahrt. Sobald HA läuft, stößt __init__ sofort
+            # einen echten Tick an (async_at_started) — kein Warten auf die
+            # nächsten 5 Minuten.
+            _LOGGER.info("HA startet noch (%s) — Tick nur lesend", self.hass.state)
+            s.t300_target = s.t300_solltemperatur
+            s.t300_reason = "HA startet noch"
+            for uc_id, _slug, _display, _default in UC_DEFINITIONS:
+                s.uc_status[uc_id] = "startet"
+                s.uc_reason[uc_id] = "HA startet noch — kein Eingriff"
+            s.last_actions = ["HA startet noch — kein Eingriff"]
+            self._prev = s
+            return s
 
         if s.sleep_mode:
             _LOGGER.info("Schlafmodus — nur stille Planung (%s)", ", ".join(SLEEP_EXEMPT_UCS))

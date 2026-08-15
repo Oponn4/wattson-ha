@@ -97,6 +97,18 @@ Zwei Lücken, durch die UC12 am 31.07.2026 das manuelle Aus 44 s später wieder
 oder Resume setzen die Marke, ältere Hand-Eingriffe zählen danach nicht mehr.
 Ohne Record und ohne `armed_at` greift `USER_TOUCH_TTL` (12 h).
 
+## Warmup beim HA-Start (v0.20.6)
+
+Solange `hass.state is not CoreState.running`, liest der Tick nur und handelt
+nicht; alle UCs melden `startet`. Grund: der erste Refresh kommt aus
+`async_config_entry_first_refresh()` und lief am 15.08.2026 sieben Sekunden zu
+früh — `calendar.get_events` und `tibber.get_prices` waren noch nicht
+registriert („Action not found"), UC2 meldete `fehler`. Fehlende Daten sind
+nicht neutral: ohne Tibber fällt die Bedarfsschwelle weg und UC6 kippt auf
+`pv`, ohne Kalender sieht UC2 keine Fahrt. Damit die Pause nicht bis zum
+nächsten Intervall dauert, stößt `__init__` per `async_at_started` sofort einen
+echten Tick an, sobald HA fertig ist.
+
 ## Rahmenbedingungen
 
 - Tick: alle 5 Minuten (`SCAN_INTERVAL_SECONDS = 300`)
