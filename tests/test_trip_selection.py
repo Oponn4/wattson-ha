@@ -142,29 +142,51 @@ class TestVollerPfadAbRohdaten:
 
 
 class TestRequiredSocRechnung:
+    """Puffer ist seit v0.20.5 relativ zur Fahrt, plus 5 % Restreserve."""
+
     def test_kuralpe_ergibt_90_prozent(self):
         """Live gegen gmaps geprüft: 100,6 km, ORA 03 (20 kWh/100km, 63 kWh, 26%).
 
-        Rohwert 89,87 % — knapp unter der 90er-Stufe, landet also auf 90.
+        Fahrstrom 63,9 % × 1,26 = 80,5 %, + 5 % Restreserve = 85,5 → Stufe 90.
+        Für die lange Fahrt ändert der relative Puffer praktisch nichts.
         """
         assert calculate_required_soc(100.6, 20, 63, 26) == 90
 
-    def test_tennis_ergibt_35_prozent(self):
-        """Rohwert 30,16 % → nächste 5er-Stufe ist 35, nicht 30."""
-        assert calculate_required_soc(6.557, 20, 63, 26) == 35
+    def test_tennis_ergibt_15_prozent(self):
+        """Kurzstrecke: 4,2 % Fahrstrom × 1,26 + 5 = 10,2 → Stufe 15.
+
+        Mit dem alten fixen Aufschlag waren es 35 % — für 13 km Hin und
+        zurück. Genau dieser Unsinn hat den Grundplan-Vorfall verschärft.
+        """
+        assert calculate_required_soc(6.557, 20, 63, 26) == 15
+
+    def test_termin_zuhause_braucht_nur_die_reserve(self):
+        """0 km (Besuch kommt zu uns) → nur die Restreserve, Minimum 5 %."""
+        assert calculate_required_soc(0.0, 20, 63, 26) == 5
 
     def test_deckelt_auf_100(self):
         assert calculate_required_soc(500, 20, 63, 26) == 100
 
     def test_rundet_bei_kleinem_rest_auf(self):
         """Regression: der Integer-Trick `(x + step - 1) // step` rundete
-        Fließkomma-Reste unter 1 ab — 90,13 % ergab 90 statt 95 und plante
-        damit knappe Fahrten zu knapp."""
-        assert calculate_required_soc(101.0, 20, 63, 26) == 95
+        Fließkomma-Reste unter 1 ab — 85,8 % ergäbe damit 85 statt 90 und
+        plante knappe Fahrten zu knapp."""
+        assert calculate_required_soc(101.0, 20, 63, 26) == 90
 
     def test_exakte_stufe_bleibt_stehen(self):
-        """100,8 km ergeben exakt 90,0 % — aufrunden darf hier nicht greifen."""
-        assert calculate_required_soc(100.8, 20, 63, 26) == 90
+        """50 km bei 100 kWh/25 % ergeben exakt 30,0 % — nicht weiterrunden.
+
+        Glatte Parameter mit Absicht: 63 kWh trifft keine Stufe exakt, und ein
+        Fließkomma-Rest im letzten Bit würde den Test zufällig kippen.
+        """
+        assert calculate_required_soc(50, 20, 100, 25) == 30
+
+    def test_marge_wirkt_multiplikativ(self):
+        """Doppelte Strecke → doppelter Puffer (vorher: gleicher Puffer)."""
+        ohne_reserve = {"arrival_reserve_percent": 0}
+        kurz = calculate_required_soc(10, 20, 100, 50, 1, **ohne_reserve)
+        lang = calculate_required_soc(20, 20, 100, 50, 1, **ohne_reserve)
+        assert (kurz, lang) == (6, 12)
 
 
 class TestAbfahrtszeit:
