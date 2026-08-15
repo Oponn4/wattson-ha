@@ -161,6 +161,14 @@ BASELINE_READY_HOUR           = 7
 # in UC2 muss ihn deshalb überspringen, sonst löscht sie ihn im Tick nach dem
 # Setzen wieder weg (gemessen 27.07.2026 ab 21:36: setzen/löschen im Wechsel).
 BASELINE_PLAN_UID             = "baseline"
+# Harte Reserve (v0.20.5). Der Grundplan war preisblind: er zog jeden Morgen auf
+# BASELINE_SOC, auch wenn alle anstehenden Fahrten längst gedeckt waren. Am
+# 15.08.2026 um 06:02 lud er deshalb bei 37,5 ct von 48 auf 51 % — die einzige
+# Fahrt des Tages (Spieleabend, 13 km) brauchte 40 %, und das Billigfenster lag
+# mittags bei 18 ct. Deckt der SOC alle Fahrten, entfällt der Grundplan; unter
+# dieser Grenze bleibt er trotzdem, damit für Ungeplantes Reichweite dasteht
+# (30 % ≈ 110 km beim ORA). 0 schaltet die Reserve ab.
+BASELINE_FLOOR_SOC            = 30
 
 # Downshift (Richtung "weniger laden") braucht Confirmation gegen Replan-Jitter
 UC6_DOWNSHIFT_CONFIRMATION_CYCLES = 2  # 2 Cycles in Folge "kein Bedarf mehr"
@@ -224,7 +232,13 @@ DEFAULT_CALENDAR_ENTITY      = "calendar.amazone"  # deprecated
 DEFAULT_AUTO_CALENDARS       = ["calendar.arbeit", "calendar.barchen"]
 DEFAULT_VEHICLE_CONSUMPTION  = 20.0   # kWh/100km
 DEFAULT_VEHICLE_CAPACITY     = 63.0   # kWh
-DEFAULT_SAFETY_MARGIN        = 25     # %
+DEFAULT_SAFETY_MARGIN        = 25     # % RELATIV zum Fahrstrom (v0.20.5)
+# Restreserve nach der Rückkehr — der einzige noch fixe Anteil. Bis v0.20.4 war
+# der GESAMTE Puffer fix (25–30 Prozentpunkte): eine 4-km-Fahrt verlangte damit
+# 35 % SOC, obwohl sie 2,6 % braucht. Seither skaliert der Puffer mit der
+# Strecke (Umweg, Stau, Kälte tun das auch) und nur diese kleine Reserve bleibt
+# absolut, damit man nicht mit 0 % heimkommt. 0 = ganz ohne Reserve.
+TRIP_ARRIVAL_RESERVE_SOC     = 5      # %
 DEFAULT_EVCC_VEHICLE_NAME    = "ora"
 DEFAULT_EVENT_LOOKAHEAD      = 36     # h
 DEFAULT_EVCC_URL             = "http://10.42.2.203:7070"  # CT 102

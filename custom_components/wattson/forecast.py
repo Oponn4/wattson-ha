@@ -5,7 +5,7 @@ import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta, tzinfo
 
-from .const import ALL_DAY_DEPARTURE_HOUR
+from .const import ALL_DAY_DEPARTURE_HOUR, TRIP_ARRIVAL_RESERVE_SOC
 
 
 @dataclass(frozen=True)
@@ -230,11 +230,21 @@ def calculate_required_soc(
     capacity_kwh: float,
     safety_margin_percent: int,
     round_step: int = 5,
+    arrival_reserve_percent: int = TRIP_ARRIVAL_RESERVE_SOC,
 ) -> int:
-    """SOC% nötig für Hin+Rückfahrt + Sicherheitspuffer, gerundet auf round_step%."""
+    """SOC% nötig für Hin+Rückfahrt + Puffer, gerundet auf round_step%.
+
+    Der Puffer ist RELATIV zur Fahrt (v0.20.5). Vorher wurden die Prozentpunkte
+    fix aufgeschlagen, und das skalierte falsch herum: „Sonjas Eltern kommen"
+    (4 km, 2,6 % Fahrstrom) verlangte 35 % SOC, während 100 km mit denselben
+    30 Punkten auskommen mussten. Umweg, Stau und Kälte wachsen aber mit der
+    Strecke. Fix bleibt nur `arrival_reserve_percent`: was nach der Rückkehr
+    im Akku stehen soll.
+    """
     energy_needed_kwh = (distance_km * 2.0) * consumption_kwh_100km / 100.0
     soc_pct = (energy_needed_kwh / capacity_kwh) * 100.0
-    soc_with_margin = soc_pct + safety_margin_percent
+    soc_with_margin = soc_pct * (1.0 + safety_margin_percent / 100.0)
+    soc_with_margin += arrival_reserve_percent
     soc_with_margin = max(soc_with_margin, 5)
     soc_with_margin = min(soc_with_margin, 100)
     # Aufrunden auf round_step. math.ceil, nicht der Integer-Trick
@@ -310,6 +320,39 @@ def select_binding_trip(
         required_soc=soc_driver.required_soc,
         soc_driver=soc_driver,
     )
+
+
+def baseline_plan_needed(
+    *,
+    car_soc: float,
+    candidates: list[TripCandidate],
+    baseline_soc: int,
+    floor_soc: int,
+) -> bool:
+    """Braucht es den Grundplan überhaupt noch?
+
+    Der Grundplan ist ein Boden, keine Optimierung: er kennt den Strompreis
+    nicht und zog bis v0.20.4 jeden Morgen stur auf `baseline_soc`. Am
+    15.08.2026 um 06:02 hieß das 11 kW aus dem Netz zu 37,5 ct, um von 48 auf
+    51 % zu kommen — obwohl die einzige Fahrt des Tages (13 km) 40 % brauchte
+    und mittags 18 ct anstanden.
+
+    Sind alle bekannten Fahrten vom aktuellen SOC gedeckt, ist der Boden
+    überflüssig und der Preis darf entscheiden (UC6 lädt dann im Billigfenster).
+    `floor_soc` bleibt als harte Reserve darunter: die Kandidatenliste kennt nur
+    den Kalender, nicht die Spontanfahrt.
+
+    Als reine Funktion herausgezogen — der Coordinator importiert Home
+    Assistant und ist in den Tests nicht ladbar.
+    """
+    if car_soc >= baseline_soc:
+        return False
+    if car_soc < floor_soc:
+        return True
+    if not candidates:
+        # Ohne Kalendereintrag sagt nichts, dass der SOC reicht — Boden bleibt.
+        return True
+    return any(not c.satisfied_by(car_soc) for c in candidates)
 
 
 SLOT_HOURS = 0.25  # PriceSlot-Länge

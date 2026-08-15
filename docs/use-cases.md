@@ -23,10 +23,25 @@ Push bei Auto-SOC < 20%. Bewusst reaktiv (Sicherheitsnetz).
 
 Alle künftigen Events der konfigurierten Kalender (`auto_calendars`, Location
 vorhanden, kein Teams/Patchday) → Google Distance Matrix (gecacht, 7 Tage TTL)
-→ `required_soc = (km × 2) × Verbrauch / Kapazität + safety_margin_percent`,
-aufgerundet auf 5er-Stufen. Die Marge sind **Prozentpunkte, additiv** (Default
-26) — sie deckt die Verbrauchsunsicherheit ab, deshalb bleibt `Verbrauch` ein
-Jahresmittelwert (20 kWh/100km; gemessen 16,7 Stadt / 22,7 Autobahn beladen).
+→ `required_soc = (km × 2) × Verbrauch / Kapazität × (1 + safety_margin_percent)
++ TRIP_ARRIVAL_RESERVE_SOC`, aufgerundet auf 5er-Stufen. Sie deckt die
+Verbrauchsunsicherheit ab, deshalb bleibt `Verbrauch` ein Jahresmittelwert
+(20 kWh/100km; gemessen 16,7 Stadt / 22,7 Autobahn beladen).
+
+**Relative Marge (v0.20.5):** Bis v0.20.4 waren es **additive Prozentpunkte**,
+und das skalierte falsch herum — 4 km verlangten 35 % SOC (2,6 % Fahrstrom +
+30 Punkte), während 100 km mit denselben 30 Punkten auskommen mussten. Umweg,
+Stau und Kälte wachsen aber mit der Strecke. Jetzt multiplikativ; fix bleibt nur
+`TRIP_ARRIVAL_RESERVE_SOC` (5 %) als Restladung nach der Rückkehr. Wirkung bei
+Marge 30: Tennis 6,6 km 35 → 15 %, Spieleabend 12,8 km 40 → 20 %, Kuralpe
+100,6 km 95 → 90 %.
+
+**Heimadresse:** `home_address` muss die **Hausadresse** sein, nicht der Ort.
+Stand bis 15.08.2026 auf „Limburg an der Lahn, Germany" (Stadt-Zentroid) —
+damit maß gmaps jede Strecke ab Innenstadt, und ein Termin **im eigenen Haus**
+(„Sonjas Eltern kommen", Location = eigene Adresse) kam als 4,1-km-Fahrt an.
+Mit korrekter Adresse ergibt so ein Termin 0 km und damit nur die Restreserve —
+ein Keyword-Filter für Besuchstermine erübrigt sich.
 
 **Abfahrt statt Termin (v0.18.13):** Ziel des Plans ist
 `Termin − Fahrzeit − Puffer`, nicht der Termin selbst. Vorher zielte der Plan
@@ -46,13 +61,22 @@ Neustart keine Phantom-Pläne hinterlässt. UC2 läuft **auch im Schlafmodus**
 Sensor: `sensor.wattson_naechste_fahrt`. Erbt UC6-Override: hat der User den
 Mode manuell gesetzt, greift UC2 nicht ein.
 
-**Grundplan (v0.20):** Steht kein Termin an — oder deckt der SOC den Bedarf
-schon — setzt UC2 trotzdem einen Fahrplan: `BASELINE_SOC` (50 %) bis
-`BASELINE_READY_HOUR` (07:00). Ohne den gab es an terminlosen Tagen gar keinen
-Plan, dann hing alles an der Preisschwelle und nichts garantierte einen
-Ladezustand. Mit Plan hat evcc immer etwas zu optimieren und wählt Leistung wie
-Slots selbst. Ein Termin-Fahrplan hat Vorrang und überschreibt ihn; liegt der
-SOC schon über 50 %, passiert nichts.
+**Grundplan (v0.20):** Steht kein Termin an, setzt UC2 trotzdem einen Fahrplan:
+`BASELINE_SOC` (50 %) bis `BASELINE_READY_HOUR` (07:00). Ohne den gab es an
+terminlosen Tagen gar keinen Plan, dann hing alles an der Preisschwelle und
+nichts garantierte einen Ladezustand. Mit Plan hat evcc immer etwas zu
+optimieren und wählt Leistung wie Slots selbst. Ein Termin-Fahrplan hat Vorrang
+und überschreibt ihn; liegt der SOC schon über 50 %, passiert nichts.
+
+**Deckungs-Gate (v0.20.5):** Sind alle anstehenden Fahrten vom aktuellen SOC
+gedeckt, entfällt der Grundplan — und ein noch stehender wird aus evcc gelöscht
+(`_clear_baseline_plan`, nur Pläne mit `BASELINE_PLAN_UID`). Der Boden kennt
+den Strompreis nicht: am 15.08.2026 um 06:02 zog er 11 kW zu 37,5 ct, um von 48
+auf 51 % zu kommen, während die einzige Fahrt des Tages (13 km) 40 % brauchte
+und mittags 18 ct anstanden. Als harte Reserve bleibt `BASELINE_FLOOR_SOC`
+(30 %): darunter greift der Grundplan immer, denn der Kalender kennt nur die
+geplanten Fahrten. Entscheidung liegt in `forecast.baseline_plan_needed`,
+Tests in `tests/test_baseline_plan.py`.
 
 Der Grundplan trägt die uid `BASELINE_PLAN_UID` und ist von der Stale-Erkennung
 **ausgenommen** (`forecast.plan_is_stale`). Er stammt aus keinem Kalendertermin,

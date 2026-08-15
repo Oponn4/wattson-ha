@@ -12,5 +12,5 @@
   "documentation": "https://github.com/Oponn4/wattson-ha",
   "iot_class": "local_polling",
   "requirements": [],
-  "version": "0.20.4"
+  "version": "0.20.5"
 }

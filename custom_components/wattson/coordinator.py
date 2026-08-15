@@ -13,6 +13,7 @@ from homeassistant.util import dt as dt_util
 
 from .const import (
     AWAY_LONG_HOURS,
+    BASELINE_FLOOR_SOC,
     BASELINE_PLAN_UID,
     BASELINE_READY_HOUR,
     BASELINE_SOC,
@@ -172,6 +173,7 @@ from .forecast import (
     PluginReminder,
     PriceSlot,
     TripCandidate,
+    baseline_plan_needed,
     calculate_required_soc,
     charge_threshold_ct,
     cheapest_window,
@@ -2595,7 +2597,7 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         ]
         if not candidates:
             s.trip_reason = "kein relevanter Termin in Sicht"
-            await self._run_baseline_plan(s, cfg, now, actions)
+            await self._run_baseline_plan(s, cfg, now, actions, candidates)
             return
 
         binding = select_binding_trip(candidates, s.car_soc)
@@ -2612,7 +2614,7 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         if binding is None:
             s.trip_reason = (f"SOC {s.car_soc:.0f}% ≥ benötigt {shown.required_soc}% "
                              f"({shown.title}, {shown.distance_km:.0f} km)")
-            await self._run_baseline_plan(s, cfg, now, actions)
+            await self._run_baseline_plan(s, cfg, now, actions, candidates)
             return
 
         required_soc = binding.required_soc
@@ -2732,7 +2734,7 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
 
     async def _run_baseline_plan(
         self, s: WattsonData, cfg: WattsonTripConfig, now: datetime,
-        actions: list[str],
+        actions: list[str], candidates: list[TripCandidate],
     ) -> None:
         """Grundplan ohne Termin: bis BASELINE_READY_HOUR mindestens BASELINE_SOC.
 
@@ -2742,12 +2744,28 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         war. Mit einem Grundplan hat evcc immer etwas zu optimieren und wählt
         Leistung und Slots selbst; die Schwelle ist dann nur noch Zugabe.
 
+        Seit v0.20.5 nur noch, wenn die anstehenden Fahrten NICHT gedeckt sind
+        (oder der SOC unter die Reserve BASELINE_FLOOR_SOC fällt) — sonst zahlt
+        der Boden Höchstpreise für Reichweite, die niemand braucht.
+
         Ein Termin-Fahrplan hat Vorrang: diese Methode läuft nur, wenn keiner
         gesetzt wurde.
         """
         if s.car_soc >= BASELINE_SOC:
             s.trip_reason = (f"{s.trip_reason} — Grundplan nicht nötig "
                              f"(SOC {s.car_soc:.0f}% ≥ {BASELINE_SOC}%)")
+            return
+
+        if not baseline_plan_needed(
+            car_soc=s.car_soc, candidates=candidates,
+            baseline_soc=BASELINE_SOC, floor_soc=BASELINE_FLOOR_SOC,
+        ):
+            s.trip_reason = (
+                f"{s.trip_reason} — Grundplan nicht nötig (alle "
+                f"{len(candidates)} Fahrten gedeckt, SOC {s.car_soc:.0f}% "
+                f"≥ Reserve {BASELINE_FLOOR_SOC}%)"
+            )
+            await self._clear_baseline_plan(cfg, actions)
             return
 
         ready = now.replace(
@@ -2803,6 +2821,49 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         actions.append(act_desc)
         s.trip_plan_set = True
         s.trip_reason = act_desc
+
+    async def _clear_baseline_plan(
+        self, cfg: WattsonTripConfig, actions: list[str],
+    ) -> None:
+        """Stehenden Grundplan aus evcc nehmen, sobald er nicht mehr nötig ist.
+
+        Ohne das bliebe der Boden von gestern in evcc stehen und würde weiter
+        auf BASELINE_SOC laden — die Deckungsprüfung wäre wirkungslos, sie
+        verhindert ja nur das NEU-Setzen. Termin-Pläne bleiben unangetastet:
+        gelöscht wird nur, was die Grundplan-uid trägt.
+        """
+        stored = self._stored_plan()
+        if not stored or stored.get("uid") != BASELINE_PLAN_UID:
+            return
+
+        blocked = await self._trip_plan_blocked()
+        if blocked:
+            _LOGGER.debug("UC2: Grundplan bleibt stehen — %s", blocked)
+            return
+
+        # Nur löschen, wenn evcc überhaupt noch unseren Plan hält
+        plan_soc = self._ival(ENTITY_EVCC_PLAN_SOC)
+        if plan_soc and plan_soc == stored.get("soc"):
+            _LOGGER.info(
+                "UC2: Fahrten gedeckt — lösche Grundplan (%s%%)", plan_soc,
+            )
+            if self._dry_run:
+                # Gedächtnis NICHT leeren: in evcc steht der Plan ja weiterhin.
+                actions.append(
+                    f"DRY-RUN: evcc del_vehicle_plan({cfg.evcc_vehicle_name})"
+                )
+                return
+            if not await self._evcc.delete_vehicle_plan(cfg.evcc_vehicle_name):
+                _LOGGER.warning("UC2: Grundplan-Löschen fehlgeschlagen — Eintrag bleibt")
+                return
+            actions.append("evcc-Grundplan gelöscht (Fahrten gedeckt)")
+            await self._override.async_drop_action(ENTITY_EVCC_PLAN_SOC)
+        else:
+            _LOGGER.debug(
+                "UC2: Grundplan nicht mehr nötig, evcc hält keinen passenden "
+                "Plan (%s) — nur aufräumen", plan_soc,
+            )
+        await self._override.async_set_misc(MISC_UC2_PLAN, None)
 
     def _stored_plan(self) -> dict | None:
         """Von UC2 gesetzter Fahrplan, persistiert (übersteht HA-Restart)."""
