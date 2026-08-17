@@ -222,6 +222,44 @@ zum `pv`-Modus, wo nur Überschuss fließen soll. In `minpv` ist der Netzanteil
 Absicht. Bei 5,2 kWp wurde 4200 W in 30 Tagen genau einmal erreicht (Spitze
 4233 W, drei Stunden über 4000), der Zweig war toter Code.
 
+### evccs neues Mode-Schema (`smart` + `alwaysCharge`)
+
+evcc [PR#32490](https://github.com/evcc-io/evcc/pull/32490) ersetzt
+`off|pv|minpv|now` durch `off|smart|now` plus einen zweiten Selector
+`alwaysCharge` (`off|on|once`). `smart` ist das alte `pv`; `alwaysCharge=on`
+schiebt das Netzminimum darunter, ist also `minpv`. `once` gilt bis zum
+Abstecken.
+
+Wattson rechnet intern **weiter in `pv|minpv|now|off`** — daran hängen
+Rangordnung, Totband und Hysterese samt ihrer Herleitungen. Übersetzt wird nur
+an der Grenze (`evcc_modes.py`):
+
+| Wattson | altes evcc | neues evcc |
+|---|---|---|
+| `off` | `off` | `mode=off` |
+| `pv` | `pv` | `mode=smart`, `alwaysCharge=off` |
+| `minpv` | `minpv` | `mode=smart`, `alwaysCharge=on` |
+| `now` | `now` | `mode=now` |
+
+Welches Schema läuft, verrät der Selector selbst: hat er `minpv` in den
+Optionen, ist es das alte. Kein Versionsvergleich, keine Konfiguration —
+ha-evcc (ab 2026.8.3) baut den Selector passend zum laufenden evcc auf. Der
+`alwaysCharge`-Selector wird an seinem Optionssatz erkannt, weil seine
+Entity-ID aus dem übersetzten Namen entsteht.
+
+`alwaysCharge` wird **zuerst** geschrieben: bei `now` → `pv` stünde der
+Schalter sonst für einen Tick noch auf `on` und der Wechsel liefe durch genau
+den Zustand, den er verlässt. Bei `off` und `now` bleibt er unangetastet, dort
+ist er wirkungslos. Beide Writes gehen durch **einen** `_try_act`-Aufruf
+(`extra_writes`), damit ein Override auf einem der Selectors auch den anderen
+stoppt — sonst schriebe Wattson einen halben Modus.
+
+Warum vorgebaut, obwohl der PR noch Draft ist: CT102 zieht evcc-Updates
+viermal täglich (`evcc-guarded-update.timer`, 08/12/16/20 Uhr, Guard nur gegen
+angestecktes Auto). Ein Stable-Release mit dem neuen Schema liegt binnen
+Stunden auf der Anlage — ab dann würde UC6 auf einen Selector schreiben, der
+`minpv` nicht mehr kennt.
+
 ### Sonstiges
 
 Ein aktiver Fahrplan läuft in `pv`, nicht `minpv`: evcc kennt den Tarif und

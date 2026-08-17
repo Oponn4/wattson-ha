@@ -168,6 +168,14 @@ from .const import (
 )
 from .e3dc_client import E3DCClient
 from .evcc_client import EvccClient
+from .evcc_modes import (
+    ALWAYS_CHARGE_OPTIONS,
+    ROLE_ALWAYS_CHARGE,
+    ROLE_MODE,
+    is_new_scheme,
+    normalize_mode,
+    plan_writes,
+)
 from .forecast import (
     DeferrableSlot,
     PluginReminder,
@@ -381,6 +389,8 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         # UC6-Hysterese: verhindert 5-min-Mode-Oszillation
         self._uc6_last_mode_change_utc: datetime | None = None
         self._uc6_last_set_target: str | None = None
+        # evcc-alwaysCharge-Selector (neues Mode-Schema), lazy erkannt
+        self._evcc_always_charge_id: str | None = None
         # UC14-Grid-Charge: Memo für POST-verify (nächster cycle prüft ob persistiert)
         self._uc14_active: bool = False
         # Ticks in Folge ohne EMHASS-Ladewunsch — Kappe gegen den
@@ -456,6 +466,47 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         if state is None or state.state in ("unknown", "unavailable"):
             return default
         return state.state
+
+    # ── evcc-Mode-Schema (siehe evcc_modes) ──────────────────────────────────
+
+    def _evcc_new_scheme(self) -> bool:
+        return is_new_scheme(self._attr(ENTITY_EVCC_MODE, "options"))
+
+    def _evcc_always_charge_entity(self) -> str | None:
+        """Den `alwaysCharge`-Selector der Ladepunkt-Device finden.
+
+        Nicht als Konstante: die Entity-ID entsteht aus dem übersetzten Namen
+        ("Mit min. laden"), und sie existiert erst, nachdem evcc auf das neue
+        Schema gesprungen ist. Erkannt wird sie an ihrem Optionssatz, der im
+        evcc-Namensraum eindeutig ist. Ergebnis wird gecacht, die Suche läuft
+        also einmal nach dem Upgrade.
+        """
+        cached = self._evcc_always_charge_id
+        if cached and self.hass.states.get(cached) is not None:
+            return cached
+        for state in self.hass.states.async_all("select"):
+            if not state.entity_id.startswith("select.evcc_"):
+                continue
+            if set(state.attributes.get("options") or []) == set(ALWAYS_CHARGE_OPTIONS):
+                self._evcc_always_charge_id = state.entity_id
+                _LOGGER.info("evcc: alwaysCharge-Selector erkannt — %s", state.entity_id)
+                return state.entity_id
+        return None
+
+    def _evcc_mode_normalized(self) -> str:
+        """Ist-Modus in Wattsons Vokabular, egal welches evcc-Schema läuft."""
+        raw = self._state(ENTITY_EVCC_MODE, "pv") or "pv"
+        always_charge = None
+        if raw == "smart":
+            ac_entity = self._evcc_always_charge_entity()
+            if ac_entity is None:
+                _LOGGER.warning(
+                    "evcc steht auf 'smart', aber kein alwaysCharge-Selector "
+                    "gefunden — lese als 'pv'"
+                )
+            else:
+                always_charge = self._state(ac_entity)
+        return normalize_mode(raw, always_charge)
 
     def _user_touch_at(self, entity_id: str) -> datetime | None:
         """Zeitpunkt der letzten Änderung, die HA einem Menschen zuschreibt.
@@ -571,8 +622,17 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
     async def _try_act(
         self, uc_id: str, entity_id: str, value_for_track,
         domain: str, service: str, service_data: dict,
+        extra_writes: list[tuple[str, object, str, str, dict]] | None = None,
     ) -> tuple[bool, str]:
-        """Override-bewusste Aktion. Returns (acted, reason)."""
+        """Override-bewusste Aktion. Returns (acted, reason).
+
+        `extra_writes` sind weitere Writes, die zu *derselben* Entscheidung
+        gehören und deshalb gemeinsam stehen oder fallen müssen — je Eintrag
+        `(entity_id, value_for_track, domain, service, service_data)`. Nötig
+        seit evcc den Lademodus auf zwei Selectors verteilt (siehe
+        `evcc_modes`): ein Override auf einem der beiden muss auch den anderen
+        stoppen, sonst schriebe Wattson einen halben Modus.
+        """
         if not self._override.is_enabled(uc_id):
             return False, "disabled"
 
@@ -580,34 +640,51 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             remaining = self._override.cooldown_remaining_minutes(uc_id)
             return False, f"user-override ({remaining}min Rest)"
 
+        writes = [(entity_id, value_for_track, domain, service, service_data)]
+        writes.extend(extra_writes or [])
+
         # User-Eingriff seit letzter Wattson-Aktion? (v0.18.7: dreiwertig —
         # ein nie angekommener Write ist KEIN Override, sondern Retry-Fall)
-        current = self._state(entity_id)
-        verdict = await self._override.async_check_action(
-            entity_id, current,
-            user_touch_at=self._user_touch_at(entity_id), uc_id=uc_id,
-        )
-        if verdict == "override":
-            await self._override.async_record_override(uc_id, entity_id, current)
-            remaining = self._override.cooldown_remaining_minutes(uc_id)
-            return False, f"user-override neu erkannt ({remaining}min Rest)"
-        if verdict == "failed_write":
-            last = self._override.get_last_action(entity_id)
-            _LOGGER.warning(
-                "UC %s: Write auf %s kam nicht an (Ist=%s, gewollt=%s) — Retry",
-                uc_id, entity_id, current, last.value if last else "?",
+        # Erst alle prüfen, dann alle schreiben: ein Abbruch mittendrin ließe
+        # `mode` und `alwaysCharge` in einer Kombination zurück, die niemand
+        # entschieden hat.
+        currents: list = []
+        for w_entity, *_ in writes:
+            current = self._state(w_entity)
+            currents.append(current)
+            verdict = await self._override.async_check_action(
+                w_entity, current,
+                user_touch_at=self._user_touch_at(w_entity), uc_id=uc_id,
             )
-            await self._override.async_drop_action(entity_id)
+            if verdict == "override":
+                await self._override.async_record_override(uc_id, w_entity, current)
+                remaining = self._override.cooldown_remaining_minutes(uc_id)
+                return False, f"user-override neu erkannt ({remaining}min Rest)"
+            if verdict == "failed_write":
+                last = self._override.get_last_action(w_entity)
+                _LOGGER.warning(
+                    "UC %s: Write auf %s kam nicht an (Ist=%s, gewollt=%s) — Retry",
+                    uc_id, w_entity, current, last.value if last else "?",
+                )
+                await self._override.async_drop_action(w_entity)
 
-        desc = f"{domain}.{service}({service_data})"
+        desc = " + ".join(
+            f"{w_domain}.{w_service}({w_data})"
+            for _, _, w_domain, w_service, w_data in writes
+        )
         if self._dry_run:
             _LOGGER.info("[DRY-RUN] %s", desc)
             return True, f"DRY-RUN: {desc}"
 
-        await self.hass.services.async_call(domain, service, service_data, blocking=False)
-        await self._override.async_record_action(
-            uc_id, entity_id, value_for_track, prev_value=current,
-        )
+        for (w_entity, w_value, w_domain, w_service, w_data), current in zip(
+            writes, currents
+        ):
+            await self.hass.services.async_call(
+                w_domain, w_service, w_data, blocking=False
+            )
+            await self._override.async_record_action(
+                uc_id, w_entity, w_value, prev_value=current,
+            )
         _LOGGER.info("Aktion: %s", desc)
         return True, desc
 
@@ -641,7 +718,7 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         s.car_connected        = self._state(ENTITY_EVCC_CONNECTED) == "on"
         s.car_soc              = self._fval(ENTITY_EVCC_SOC)
         s.car_range            = self._ival(ENTITY_EVCC_RANGE)
-        s.evcc_mode            = self._state(ENTITY_EVCC_MODE, "pv") or "pv"
+        s.evcc_mode            = self._evcc_mode_normalized()
         s.sleep_mode           = self._state(ENTITY_SLEEP) == "on"
         s.low_soc_notified     = self._prev.low_soc_notified
         s.abluft_temp          = self._fval(ENTITY_PROXON_ABLUFT, 22.0)
@@ -957,6 +1034,46 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             until=until,
         )
 
+    async def _write_evcc_mode(self, target_mode: str) -> tuple[bool, str]:
+        """Wattson-Modus nach evcc schreiben — ein oder zwei Selectors.
+
+        Im neuen Schema (`off|smart|now` + `alwaysCharge`) hängt eine
+        Entscheidung an zwei Entities. Beide gehen durch denselben
+        `_try_act`-Aufruf, damit Override-Erkennung und Cooldown den Modus als
+        Ganzes sehen.
+        """
+        new_scheme = self._evcc_new_scheme()
+        writes = plan_writes(target_mode, new_scheme=new_scheme)
+
+        ac_entity = None
+        if any(role == ROLE_ALWAYS_CHARGE for role, _ in writes):
+            ac_entity = self._evcc_always_charge_entity()
+            if ac_entity is None:
+                # Ohne den Schalter wäre `smart` allein zweideutig: es hieße
+                # `pv`, auch wenn `minpv` gemeint war. Lieber gar nicht
+                # schreiben als still den falschen Modus fahren.
+                _LOGGER.error(
+                    "evcc: Ziel %s braucht den alwaysCharge-Selector, der aber "
+                    "nicht gefunden wurde — UC6 übersprungen", target_mode,
+                )
+                return False, "alwaysCharge-Selector nicht gefunden"
+
+        calls = [
+            (
+                ENTITY_EVCC_MODE if role == ROLE_MODE else ac_entity,
+                option,
+                "select",
+                "select_option",
+                {
+                    "entity_id": ENTITY_EVCC_MODE if role == ROLE_MODE else ac_entity,
+                    "option": option,
+                },
+            )
+            for role, option in writes
+        ]
+        head, *rest = calls
+        return await self._try_act("uc6", *head, extra_writes=rest or None)
+
     async def _run_charge_mode(
         self, s: WattsonData, now: datetime, actions: list[str]
     ) -> None:
@@ -1046,11 +1163,7 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
                     s.evcc_reason = f"{reason} (Hysterese: {hold_block})"
                 else:
                     _LOGGER.info("evcc: %s → %s (%s)", s.evcc_mode, target_mode, reason)
-                    acted, act_desc = await self._try_act(
-                        "uc6", ENTITY_EVCC_MODE, target_mode,
-                        "select", "select_option",
-                        {"entity_id": ENTITY_EVCC_MODE, "option": target_mode},
-                    )
+                    acted, act_desc = await self._write_evcc_mode(target_mode)
                     if acted:
                         actions.append(act_desc)
                         s.uc_status["uc6"] = "aktiv"
