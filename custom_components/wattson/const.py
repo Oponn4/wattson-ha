@@ -156,7 +156,12 @@ CHARGE_THRESHOLD_HYSTERESE_CT = 0.5
 # dass evcc immer etwas zu optimieren hat: bis BASELINE_READY_HOUR mindestens
 # BASELINE_SOC. Ein Termin-Fahrplan hat Vorrang und überschreibt ihn.
 BASELINE_SOC                  = 50
-BASELINE_READY_HOUR           = 7
+# War 7. Am 06.09.2026 hat der Grundplan deshalb 00:45–01:01 bei 31–33 ct
+# geladen (45→50 %) — das einzige Fenster vor der Deadline, während der
+# tatsächliche PV-getriebene Preisrutsch (18–27 ct) erst 08:45–09:45 kam,
+# also nach 07:00 lag. evcc sucht sich den günstigsten Slot innerhalb der
+# Deadline selbst; mit 12 bleibt der Vormittags-Dip erreichbar.
+BASELINE_READY_HOUR           = 12
 # uid des Grundplans. Er stammt aus keinem Kalendertermin — die Stale-Erkennung
 # in UC2 muss ihn deshalb überspringen, sonst löscht sie ihn im Tick nach dem
 # Setzen wieder weg (gemessen 27.07.2026 ab 21:36: setzen/löschen im Wechsel).
