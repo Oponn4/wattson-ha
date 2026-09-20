@@ -211,19 +211,16 @@ UC4B_REMINDER_COOLDOWN_MIN = 60    # Safety-Reminder: max 1/h
 #    Zähler stieg in 2 h 08 nur um 0,166 kWh (Wärmepumpe, 19 min Kompressor).
 #    1500 W hätten in der Einschaltzeit ~2 kWh gebraucht. Um 11:31 lief der Stab
 #    dagegen sofort mit — da war der Tank unter dem Sollwert.
-# Oberer Deckel für jeden von Wattson geschriebenen Warmwasser-Sollwert.
-# Im Haus sitzt **kein thermostatischer Mischer**: was im Tank steht, kommt an
-# der Armatur an. Christians Entscheidung (keine Kinder im Haus, acht Jahre
-# Betrieb mit zeitweise 70 °C im Kessel) — der Deckel ist deshalb kein
-# Komfort-Limit, sondern ein Runaway-Schutz: er greift im Normalbetrieb nie,
-# fängt aber einen künftigen Zweig ab, der versehentlich 65+ schreibt.
-# Der Legionellen-Lauf liegt bewusst darüber (64,5 °C) und meldet sich per Push.
-T300_TARGET_MAX_C          = 60.0
-# Vorrats-Ziel für ein geplantes Speicherfenster. Über dem Billig-Ziel (55),
-# weil der Tank ohnehin um 54–56 °C pendelt — mit 55 bliebe kein nutzbarer Hub.
-# Unter dem E-Heiz-Ziel des Geräts (59), damit die Wärmepumpe die Arbeit macht
-# und nicht der Stab (COP ~3 statt 1).
-T300_TEMP_SPEICHER         = 57.0
+# Obergrenze aus der MODBUS-Liste (Dok 2300, Reg 4x2000 "Normal
+# Wassertemperatur"): IST-Min 20 °C, **IST-Max 55 °C**. Höhere Werte nimmt das
+# Gerät nicht an — v0.20.11 hatte hier 57 stehen und wäre beim Schreiben
+# abgewiesen worden. Wer mehr Vorrat will, braucht Reg 4x2003 (E-Heiz, bis
+# 70 °C) plus Freigabe — das heizt dann aber mit dem Stab (COP 1) statt mit der
+# Wärmepumpe, oder die PV-Funktion (Reg 4x2010, noch nicht ausgewertet).
+T300_TARGET_MAX_C          = 55.0
+# Vorrats-Ziel für ein geplantes Speicherfenster. Gleich der Registergrenze und
+# damit gleich T300_TEMP_CHEAP: mehr geht über diesen Weg nicht.
+T300_TEMP_SPEICHER         = 55.0
 UC4B_MIN_DWELL_MIN         = 15    # min — Mindestzeit im Schaltzustand (nur Plan-/Heuristik-Zweig)
 # Ab wie weit unter dem E-Heiz-Ziel (Reg 2003) der Stab tatsächlich anspringt.
 # Drei Messpunkte, alle bei Ziel 59 °C:
