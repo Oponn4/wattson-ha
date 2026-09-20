@@ -379,6 +379,15 @@ COOL_HEAT_MAX_C            = 27.0
 PV_COOLING_MIN_W           = 1500   # W — ab diesem PV-Überschuss darf gekühlt werden
 SMART_SPREAD_THRESHOLD_EUR = 0.15   # spread >= 15ct → UC10 gewinnt vs UC12, sonst Komfort wichtiger
 
+# UC12 v0.20.9 — Totband am PV-Zweig + Mindest-Verweildauer.
+# Am 19.09.2026 pendelte der PV-Überschuss an einem Wolkentag um die 1500 W
+# (5-min-Mittel 1775/1477/1428/1327/2025 … 1557/1607/1511) und die Freigabe
+# kippte zwischen 10:46 und 14:02 zehnmal im Tick-Takt. Das Band verbreitert
+# nur den Ausstieg; der Einstieg bleibt bei PV_COOLING_MIN_W. Die Verweildauer
+# fängt ab, was das Band nicht fängt — ein Wolkenloch größer als 250 W.
+COOL_PV_HYSTERESE_W        = 250    # W — Totband am PV-Zweig
+COOL_MIN_DWELL_MIN         = 20     # min — Mindestzeit im Schaltzustand (nur weiche Zweige)
+
 # UC12 v0.17.2 — B: Humidex-Korrektur (Schwüle), C: Trend-Korrektur.
 # Beide korrigieren die v0.17-Schwellen nach unten: bei Schwüle fühlt sich
 # dieselbe Abluft wärmer an (Trigger früher), bei steigendem Trend kommt die

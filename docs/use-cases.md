@@ -346,7 +346,13 @@ B  RH-Proxy ≥ 60% (TP357 Wohnzimmer)  → trigger −0.5   # schwül fühlt si
 C  Abluft-Trend ≥ +0.3°C/h            → heat −0.5      # Hitze kommt, früher forcen
    heat    = max(heat, trigger + 0.5)                   # Heat nie unter Trigger
    off     = trigger − 1.0 (Hysterese)
+   hyst_eff = min(1.0, max(0, heat − (trigger + 0.5)))  # v0.20.9: Totband-Kappe
+   heat_eff = heat − hyst_eff, solange die Hitze der Grund ist
 ```
+
+Die Kappe sitzt am **Band**, nicht an `heat`: eine Kappe an der Schwelle
+(`max(heat, trigger + 0.5 + 1.0)`) hätte Korrektur C bei Trigger 24,0
+vollständig aufgehoben — `max(25.0, 25.5)` ist wieder 25,5.
 
 Trend-Quelle: in-memory Sample-Buffer der Abluft (60-min-Fenster, gültig ab
 20 min Spanne). Nach HA-Restart wird der Buffer einmalig aus der
@@ -355,7 +361,9 @@ der Trend ist damit sofort wieder da; ohne Recorder füllt er sich live.
 Aktive Korrekturen erscheinen im `begruendung`-Attribut von
 `sensor.wattson_kuhlung`.
 
-Entscheidung in fünf Stufen (v0.18.7):
+Entscheidung in fünf Stufen (v0.18.7), seit v0.20.9 als reine Funktion
+`forecast.cool_decision` — testbar über einen ganzen Tagesverlauf, nicht nur
+über die einzelne Schwelle:
 1. Urlaubsmodus → **aus, immer** (auch bei Hitze — niemand zu Hause)
 2. Sleep-Mode → aus, **auch bei Hitze** (Kühlung treibt Lüfterstufe auf max;
    seit v0.18.7 bricht Force-Hitze den Schlaf nicht mehr, kühlt nach Sleep-Ende)
@@ -366,6 +374,80 @@ Entscheidung in fünf Stufen (v0.18.7):
    hält an, **bricht aber bei expensive ohne PV**; sonst aus
 
 Zusätzlich Kühl-Reminder bei manuellem Override in teurem Fenster (v0.15.0).
+
+### v0.20.9 — drei Befunde vom 19.09.2026
+
+Die Freigabe stand an dem Tag 19,5 h (18.09. 13:42 → 19.09. 09:16) und danach
+noch 7 h (14:02 → 20:56, von Hand beendet), dazwischen zehn Schaltvorgänge im
+5-min-Takt. Drei unabhängige Ursachen:
+
+**1. Hitze-Totband hing am Schalter statt am Grund.** `heat_active` bekam
+`currently_cooling=s.cool_enable_on`. Damit erbte jede aus PV- oder
+Preisgründen laufende Kühlung ab `heat_c − 1 K` das Totband — und mit ihm das
+Recht, die Expensive-Sperre zu brechen. Um 19:17 meldete Wattson
+„Hitze 24.8°C ≥ 25.5°C"; verglichen wurde gegen 24,5. Echte Hitze gab es nie,
+Tagesmax war 25,1 °C. Der Parameter heißt jetzt `heat_forced` und bekommt
+`WattsonData.cool_heat_forced`: gesetzt nur vom Hitze-Zweig, gelöscht von jedem
+anderen. Nach HA-Neustart ist er False — die sichere Richtung, das Band rastet
+dann erst an der nackten Schwelle wieder ein. Die Begründung nennt seither die
+*verglichene* Schwelle plus Hinweis „Totband, Schwelle 25.5°C".
+
+**2. PV-Zweig ohne Totband.** `pv_surplus >= 1500` wurde alle 5 Minuten neu
+entschieden, während der Überschuss an einem Wolkentag genau darum pendelte
+(5-min-Mittel 1775/1477/1428/1327/2025 … 1557/1607/1511). Jetzt
+`COOL_PV_HYSTERESE_W` (250 W) als Band plus `COOL_MIN_DWELL_MIN` (20 min)
+Mindest-Verweildauer. Die Kappe gilt nur für die weichen Zweige (PV, Preis,
+Hysterese); Urlaub, Schlaf, Unter-Off und Hitze gehen sofort durch — sie
+bedeuten Komfort oder Verschwendung, nicht Optimierung.
+
+Das PV-Band hängt an `cool_pv_forced`, nicht am Schalter — dieselbe Trennung
+wie bei der Hitze. Sonst erbt eine aus `cheapest_4h` oder der Hysterese offene
+Freigabe den gesenkten Einstieg (1250 W), und ein Überschuss, der die 1500 W
+nie erreicht hat, hält die Kühlung durch ein teures Fenster.
+
+Drei Details, die beim Review aufgefallen sind:
+
+- **Merker nur bei offener Freigabe.** `_try_act` ruft den Service mit
+  `blocking=False`; „abgeschickt" ist kein „angekommen", und ein Hand-Aus fällt
+  erst einen Tick später auf. Der Coordinator schreibt den Merker deshalb nach
+  dem Write (`_uc12_set_latches`) und verrechnet ihn beim Lesen zusätzlich mit
+  dem tatsächlichen Switch-Zustand (`… and s.cool_enable_on`). Sonst spannte ein
+  verlorener Write das Band auf und UC12 meldete „Hitze 24.8°C ≥ 24.5°C" bei
+  geschlossener Freigabe.
+- **Verweildauer zählt den eigenen Write**, nicht `last_changed` des Switch
+  (`_uc12_dwell_minutes`). HA setzt `last_changed` bei jedem `unavailable`-Blip
+  und beim Restore zurück; beim flappenden Proxon-Modbus (Stale-Frame-Debt)
+  hätte die Sperre irgendwann alles aufgehalten. Sie soll das eigene Takten
+  bremsen, nicht auf Fremdzustände reagieren.
+- **Die Expensive-Sperre fällt nicht unter die Kappe.** `hysterese_gebrochen`
+  ist kein Feinschliff, sondern Schutz: unter der Kappe hätte sie bis zu vier
+  Ticks Verzug — 20 Minuten Import zum Tageshöchstpreis, um einen
+  Schaltvorgang zu sparen.
+
+> [!note] Der Fix begrenzt die Rate, nicht die Zahl
+> Im nachgestellten Verlauf (`tests/test_uc12_entscheidung.py`) fallen die
+> Schaltvorgänge von 9 auf 7, aber die kürzeste Haltezeit steigt von 5 auf
+> 20 Minuten. Mehr ist mit dieser Eingangsgröße nicht zu holen: der Überschuss
+> war an dem Tag über 20 Minuten lang wirklich weg (721/840 W um 11:35, unter
+> 500 W ab 13:15). Dann ist Ausschalten richtig und kein Sägezahn.
+
+**3. Schlafmodus fror die Freigabe ein.** Das Gate in `_async_update_data`
+kehrt vor allen Handlern zurück; UC12s eigener „Schlafmodus → aus"-Zweig war
+für eine *schon offene* Freigabe damit toter Code. Seit v0.20.9 ruft das Gate
+`_handle_uc12_cooling(..., sleep_only_off=True)`: nachts ausschalten ist
+erlaubt (das *senkt* die Lüfterstufe), einschalten bleibt gesperrt. Ein
+Hand-Eingriff schlägt das weiterhin — der Weg läuft über `_try_act`, also über
+Override-Cooldown und `user_touch_at`. Im Schlafpfad bleibt der Status
+`schlafmodus` bzw. `schlafmodus → aus`, und der Kühl-Reminder unterbleibt: sein
+Push wird ohnehin unterdrückt, hängte aber je Tick eine Zeile in
+`last_actions`. UC12 steht deshalb **nicht** in `SLEEP_EXEMPT_UCS` — die
+Ausnahme dort heißt „darf nachts frei entscheiden".
+
+Nicht Teil von v0.20.9, bewusst offen: `expensive` hängt weiter am
+Tibber-**Level**. Am 19.09. kostete die Stunde um 19:45 **33,94 ct** und das
+Level stand auf `normal` (es ist relativ zum 3-Tage-Mittel) — die Sperre hätte
+also ohnehin nicht gegriffen. Eine absolute Grenze oder ein Tages-Perzentil
+gehört dazu, ist aber eine eigene Entscheidung.
 
 ## UC14 — Netzladen
 
@@ -401,13 +483,25 @@ herum pendelt.
 | UC12 | 27.07. | Abluft um die Hitze-Schwelle | Kühlung sägte, ein Push pro Zyklus |
 | UC6 | 28.07. | die **Schwelle** um den Preis | Lademodus kippte minpv↔pv |
 | UC14 | 29.07. | EMHASS `p_batt` um die Null | E3DC-Schreibsalve |
+| UC12 | 19.09. | PV-Überschuss um die 1500 W | Freigabe kippte 10× in 3,5 h |
 
 Gemeinsames Primitiv: `forecast.deadband_hold`. Eingeschaltet wird immer an der
 nackten Schwelle, das Band verbreitert nur den Ausstieg — andersherum würde es
-die Reaktion verschleppen. Der laufende Zustand ist das Gedächtnis, keine
-zusätzliche Zustandsvariable.
+die Reaktion verschleppen.
+
+**Wem das Band gehört:** einem Grund, nicht einem Aktor. Der laufende Zustand
+darf das Gedächtnis sein, solange er eindeutig zu genau einem Grund gehört —
+UC6-Lademodus und UC14-Ladewunsch tun das. Der UC12-Kühlschalter nicht: ihn
+stellen fünf Zweige. Am 19.09.2026 stand er trotzdem im Hitze-Zweig als
+Gedächtnis, und damit erbte jede PV- oder Preis-Kühlung das Force-Recht der
+Hitze. Seit v0.20.9 trägt jeder Grund seinen eigenen Merker (`heat_forced`,
+`pv_forced`) — die „zusätzliche Zustandsvariable", die den anderen drei Fällen
+erspart bleibt.
 
 **Wann ein Band nicht genügt:** wenn der Sperrwert ein Wert ist, auf dem das
 Signal stehen bleiben kann (UC14: `p_batt == 0`). Dann gehört eine Zähler-Kappe
-dazu. Bei UC12 und UC6 kann das nicht passieren — Abluft und Preis stehen nie
-exakt auf der Schwelle fest.
+dazu. Bei Abluft und Preis passiert das nicht — sie stehen nie exakt auf der
+Schwelle fest. Der PV-Überschuss dagegen kann bei dünner Bewölkung stundenlang
+*innerhalb* des Bands liegen: dort ist die Kappe die Mindest-Verweildauer
+`COOL_MIN_DWELL_MIN`, die den Wechsel nicht verhindert, sondern seine Rate
+begrenzt.

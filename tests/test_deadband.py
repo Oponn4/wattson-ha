@@ -84,7 +84,7 @@ class TestHeatActiveUnveraendert:
             for cooling in (False, True):
                 assert forecast.heat_active(
                     abluft_c=abluft, heat_c=self.HEAT,
-                    hysteresis_c=self.HYST, currently_cooling=cooling,
+                    hysteresis_c=self.HYST, heat_forced=cooling,
                 ) is hold(
                     value=abluft, threshold=self.HEAT,
                     band=self.HYST, active=cooling, direction="above",

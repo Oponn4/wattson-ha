@@ -569,7 +569,7 @@ def heat_active(
     abluft_c: float,
     heat_c: float,
     hysteresis_c: float,
-    currently_cooling: bool,
+    heat_forced: bool,
 ) -> bool:
     """Gilt "echte Hitze" — mit Totband gegen Schwingen.
 
@@ -579,13 +579,289 @@ def heat_active(
     nächste sieht 25,1 und die Grundregel schaltet wieder aus. Am 27.07.2026
     lief das als Sägezahn — 5 min an, 25 min aus, ein Push pro Zyklus.
 
-    Der laufende Zustand ist das Gedächtnis, deshalb braucht es keine eigene
-    Zustandsvariable. Seit v0.20.3 nur noch eine benannte Anwendung von
-    `deadband_hold` — die Semantik ist unverändert.
+    `heat_forced` ist der laufende *Hitze*-Zustand, nicht der Schalter. Bis
+    v0.20.8 hieß der Parameter `currently_cooling` und bekam genau den
+    Schalter — damit erbte jede aus PV- oder Preisgründen laufende Freigabe das
+    Totband und mit ihm das Recht, die Expensive-Sperre zu brechen. Am
+    19.09.2026 lief die Kühlung deshalb ab 14:02 bis 20:56 durch und meldete um
+    19:17 „Hitze 24.8°C ≥ 25.5°C": verglichen wurde gegen 24,5, echte Hitze gab
+    es an dem Tag nie (Tagesmax 25,1 °C).
     """
     return deadband_hold(
         value=abluft_c, threshold=heat_c, band=hysteresis_c,
-        active=currently_cooling, direction="above",
+        active=heat_forced, direction="above",
+    )
+
+
+#: Zweige, die nur Energie/Preis *optimieren*. Sie dürfen den Schalter nicht im
+#: Tick-Takt umlegen, deshalb greift bei ihnen die Mindest-Verweildauer.
+#:
+#: Nicht dabei: Urlaub, Schlaf, unter Off-Schwelle, Hitze — und
+#: `hysterese_gebrochen`. Letzteres ist kein Feinschliff, sondern die
+#: Expensive-Sperre: sie beendet eine Kühlung, weil der Strom teuer geworden
+#: ist. Unter der Kappe hätte sie bis zu vier Ticks Verzug — 20 Minuten Import
+#: zum Tageshöchstpreis, um einen Schaltvorgang zu sparen.
+SOFT_COOL_KINDS = (
+    "pv", "cheapest", "hysterese", "cheapest_uc10", "aus",
+)
+
+
+@dataclass(frozen=True)
+class CoolDecision:
+    """Ergebnis der UC12-Kühlentscheidung.
+
+    `heat_forced` und `pv_forced` sind die Totband-Gedächtnisse für den nächsten
+    Tick: läuft die Freigabe *wegen Hitze* bzw. *wegen PV-Überschuss*? Ein Band
+    gehört dem Grund, nicht dem Aktor — sonst erbt jeder andere Zweig es mit.
+    """
+    cool: bool
+    reason: str
+    kind: str            # welcher Zweig entschieden hat (s. SOFT_COOL_KINDS)
+    heat_forced: bool
+    pv_forced: bool
+    heat_limit_c: float  # Hitze-Schwelle, gegen die dieser Tick verglichen hat
+
+
+def cool_decision(
+    *,
+    abluft_c: float,
+    trigger_c: float,
+    heat_c: float,
+    off_c: float,
+    hysteresis_c: float,
+    pv_surplus_w: int,
+    pv_min_w: int,
+    pv_band_w: int,
+    spread_eur: float,
+    spread_threshold_eur: float,
+    in_cheapest_4h: bool,
+    expensive: bool,
+    price_level: str,
+    urlaub: bool,
+    sleep: bool,
+    cooling_on: bool,
+    heat_forced: bool,
+    pv_forced: bool,
+    dwell_min: float | None,
+    min_dwell_min: float,
+    schwellen_info: str = "",
+) -> CoolDecision:
+    """UC12: soll die Kühl-Freigabe offen sein?
+
+    Reihenfolge wie seit v0.18.7 — Urlaub, Schlaf, Hitze, Off-Schwelle, dann
+    die Abwägung zwischen PV, Preis und Hysterese. Seit v0.20.9 als reine
+    Funktion, damit der Verlauf eines ganzen Tages im Test durchgespielt werden
+    kann statt nur die einzelne Schwelle.
+
+    Zwei Dinge sind neu, beide aus dem 19.09.2026:
+
+    * Der PV-Zweig bekommt ein Totband (`pv_band_w`) und die Entscheidung eine
+      Mindest-Verweildauer (`dwell_min` / `min_dwell_min`). Vorher entschied
+      ein blankes `pv_surplus >= 1500` alle 5 Minuten neu: zehn Schaltvorgänge
+      zwischen 10:46 und 14:02, der Kompressor kam bei keinem davon zum Laufen.
+    * `heat_forced` und `pv_forced` trennen „läuft" von „läuft aus diesem
+      Grund". Jedes Totband hängt an seinem eigenen Merker, keines am Schalter:
+      sonst erbt eine aus Preisgründen laufende Freigabe den gesenkten
+      Einstieg des PV-Zweigs oder das Force-Recht des Hitze-Zweigs — und
+      Letzteres bricht die Expensive-Sperre, die genau das verhindern soll.
+
+    Beide Merker gelten nur, solange die Freigabe tatsächlich offen ist; der
+    Aufrufer setzt sie nach dem Write (nicht nach der Entscheidung), damit ein
+    nicht angekommener Write kein Band aufspannt.
+
+    `dwell_min = None` heißt "Alter unbekannt" (Neustart, Entity fehlt) und
+    hält nichts auf: eine falsche Entscheidung sofort ist besser als eine
+    falsche Entscheidung 20 Minuten lang.
+    """
+    # Hitze-Totband: Einstieg an der nackten Schwelle, Ausstieg erst
+    # `hysteresis_c` darunter — aber nur, wenn die Hitze auch der Grund war.
+    #
+    # Das Band wird beschnitten, damit die effektive Hitze-Schwelle nicht unter
+    # den Kühl-Trigger rutscht: `heat_c` ist adaptiv und kann per Trend-Korrektur
+    # (C) bis auf `trigger + 0.5` sinken. Ungekappt vergliche der Hitze-Zweig
+    # dann gegen einen Wert *unter* dem Trigger — und genau dieser Zweig bricht
+    # die Expensive-Sperre. Gekappt wird das Band, nicht die Schwelle: eine
+    # Kappe an `heat_c` (max(heat, trigger + 0.5 + Hysterese)) hätte Korrektur C
+    # bei Trigger 24.0 vollständig aufgehoben.
+    hysteresis_eff = min(hysteresis_c, max(0.0, heat_c - (trigger_c + 0.5)))
+    heat_limit_c = heat_c - hysteresis_eff if heat_forced else heat_c
+    hitze = heat_active(
+        abluft_c=abluft_c, heat_c=heat_c, hysteresis_c=hysteresis_eff,
+        heat_forced=heat_forced,
+    )
+    hitze_txt = f"Hitze {abluft_c:.1f}°C ≥ {heat_limit_c:.1f}°C"
+    if heat_limit_c < heat_c:
+        hitze_txt += f" (Totband, Schwelle {heat_c:.1f}°C)"
+
+    if urlaub:
+        # niemand zu Hause — leeres Haus kühlen ist Verschwendung, auch bei Hitze
+        entscheidung = CoolDecision(
+            cool=False,
+            reason=f"Urlaubsmodus → aus (Abluft {abluft_c:.1f}°C)",
+            kind="urlaub", heat_forced=False, pv_forced=False,
+            heat_limit_c=heat_limit_c,
+        )
+    elif hitze and sleep:
+        # Force-Hitze bricht den Schlafmodus nicht: aktive Kühlung treibt die
+        # Lüfterstufe auf max. Kühlung startet nach Sleep-Ende.
+        entscheidung = CoolDecision(
+            cool=False,
+            reason=f"{hitze_txt}, aber Schlafmodus → aus "
+                   f"(Lüfter-Max nachts unerwünscht; kühlt nach Sleep-Ende)",
+            kind="hitze_sleep", heat_forced=False, pv_forced=False,
+            heat_limit_c=heat_limit_c,
+        )
+    elif hitze:
+        grund_bruch = f"expensive ({price_level})" if expensive else None
+        entscheidung = CoolDecision(
+            cool=True,
+            reason=(
+                f"{hitze_txt} — Kühlung trotz {grund_bruch} ({schwellen_info})"
+                if grund_bruch
+                else f"{hitze_txt} ({schwellen_info})"
+            ),
+            kind="hitze", heat_forced=True, pv_forced=False,
+            heat_limit_c=heat_limit_c,
+        )
+    elif sleep:
+        entscheidung = CoolDecision(
+            cool=False,
+            reason=f"Schlafmodus → aus (Abluft {abluft_c:.1f}°C, "
+                   f"Heat-Schwelle {heat_c:.1f}°C nicht erreicht)",
+            kind="sleep", heat_forced=False, pv_forced=False,
+            heat_limit_c=heat_limit_c,
+        )
+    elif abluft_c <= off_c:
+        entscheidung = CoolDecision(
+            cool=False,
+            reason=f"Abluft {abluft_c:.1f}°C ≤ Off-Schwelle {off_c:.1f}°C "
+                   f"({schwellen_info})",
+            kind="unter_off", heat_forced=False, pv_forced=False,
+            heat_limit_c=heat_limit_c,
+        )
+    else:
+        entscheidung = _cool_soft_decision(
+            abluft_c=abluft_c, trigger_c=trigger_c, heat_c=heat_c,
+            heat_limit_c=heat_limit_c, pv_surplus_w=pv_surplus_w,
+            pv_min_w=pv_min_w, pv_band_w=pv_band_w, spread_eur=spread_eur,
+            spread_threshold_eur=spread_threshold_eur,
+            in_cheapest_4h=in_cheapest_4h, expensive=expensive,
+            price_level=price_level, pv_forced=pv_forced,
+            cooling_on=cooling_on, schwellen_info=schwellen_info,
+        )
+
+    if (
+        entscheidung.kind in SOFT_COOL_KINDS
+        and entscheidung.cool != cooling_on
+        and dwell_min is not None
+        and dwell_min < min_dwell_min
+    ):
+        # Gehalten wird der *bestehende* Zustand, also gilt auch kein Grund
+        # dieses Ticks: beide Merker fallen. Gehalten-an heißt „ein weicher
+        # Zweig wollte aus", gehalten-aus heißt „es läuft ohnehin nichts" —
+        # in beiden Fällen darf kein Band aufgespannt bleiben.
+        return CoolDecision(
+            cool=cooling_on,
+            reason=f"{entscheidung.reason} — gehalten: erst {dwell_min:.0f} von "
+                   f"{min_dwell_min:.0f} min im Zustand "
+                   f"{'an' if cooling_on else 'aus'}",
+            kind="dwell", heat_forced=False, pv_forced=False,
+            heat_limit_c=heat_limit_c,
+        )
+    return entscheidung
+
+
+def _cool_soft_decision(
+    *,
+    abluft_c: float,
+    trigger_c: float,
+    heat_c: float,
+    heat_limit_c: float,
+    pv_surplus_w: int,
+    pv_min_w: int,
+    pv_band_w: int,
+    spread_eur: float,
+    spread_threshold_eur: float,
+    in_cheapest_4h: bool,
+    expensive: bool,
+    price_level: str,
+    pv_forced: bool,
+    cooling_on: bool,
+    schwellen_info: str,
+) -> CoolDecision:
+    """Abluft zwischen Off- und Hitze-Schwelle: Energie und Preis abwägen.
+
+    Ausgelagert, damit `cool_decision` die harten Zweige und das Totband der
+    Verweildauer an einem Stück zeigt.
+
+    Das PV-Totband hängt an `pv_forced`, nicht an `cooling_on`: eine Freigabe,
+    die aus `cheapest_4h` oder aus der Hysterese heraus offen ist, darf den
+    gesenkten Einstieg nicht erben. Sonst hält ein Überschuss, der die Schwelle
+    nie erreicht hat, die Kühlung durch ein teures Fenster — dieselbe Erbschaft,
+    die am 19.09.2026 am Hitze-Zweig die Expensive-Sperre ausgehebelt hat.
+    """
+    pv_limit_w = pv_min_w - pv_band_w if pv_forced else pv_min_w
+    pv_frei = deadband_hold(
+        value=pv_surplus_w, threshold=pv_min_w, band=pv_band_w,
+        active=pv_forced, direction="above",
+    )
+    if pv_frei:
+        pv_txt = f"PV-Überschuss {pv_surplus_w}W ≥ {pv_limit_w}W"
+        if pv_limit_w < pv_min_w:
+            pv_txt += f" (Totband, Schwelle {pv_min_w}W)"
+        return CoolDecision(
+            cool=True,
+            reason=f"{pv_txt} (Abluft {abluft_c:.1f}°C, {schwellen_info})",
+            kind="pv", heat_forced=False, pv_forced=True,
+            heat_limit_c=heat_limit_c,
+        )
+
+    if in_cheapest_4h and spread_eur < spread_threshold_eur:
+        return CoolDecision(
+            cool=True,
+            reason=f"cheapest_4h, spread {spread_eur*100:.1f}ct < "
+                   f"{spread_threshold_eur*100:.1f}ct → UC12 Priorität "
+                   f"(Abluft {abluft_c:.1f}°C)",
+            kind="cheapest", heat_forced=False, pv_forced=False,
+            heat_limit_c=heat_limit_c,
+        )
+
+    if cooling_on and abluft_c > trigger_c:
+        # Hysterese: läuft + noch über Trigger → weiter, aber nur bei
+        # nicht-teurem Strom (sonst macht sie unbegrenzt durch)
+        if expensive:
+            return CoolDecision(
+                cool=False,
+                reason=f"Hysterese gebrochen: expensive ({price_level}) ohne PV "
+                       f"(Abluft {abluft_c:.1f}°C, Heat-Schwelle {heat_c:.1f}°C "
+                       f"nicht erreicht)",
+                kind="hysterese_gebrochen", heat_forced=False, pv_forced=False,
+                heat_limit_c=heat_limit_c,
+            )
+        return CoolDecision(
+            cool=True,
+            reason=f"Hysterese: läuft + Abluft {abluft_c:.1f}°C > "
+                   f"Trigger {trigger_c:.1f}°C, Preis {price_level} ok",
+            kind="hysterese", heat_forced=False, pv_forced=False,
+            heat_limit_c=heat_limit_c,
+        )
+
+    if in_cheapest_4h:
+        return CoolDecision(
+            cool=False,
+            reason=f"cheapest_4h, aber spread {spread_eur*100:.1f}ct ≥ "
+                   f"{spread_threshold_eur*100:.1f}ct → UC10 Priorität "
+                   f"(Abluft {abluft_c:.1f}°C)",
+            kind="cheapest_uc10", heat_forced=False, pv_forced=False,
+            heat_limit_c=heat_limit_c,
+        )
+
+    return CoolDecision(
+        cool=False,
+        reason=f"kein PV-Überschuss + nicht in cheapest_4h "
+               f"(Abluft {abluft_c:.1f}°C, Preis {price_level}, {schwellen_info})",
+        kind="aus", heat_forced=False, pv_forced=False,
+        heat_limit_c=heat_limit_c,
     )
 
 
@@ -668,8 +944,10 @@ def decide_charge_mode(
 
     `threshold_band_ct` ist das Totband der Bedarfsschwelle (v0.20.2): läuft
     bereits `minpv`, darf der Preis bis `Schwelle + Band` steigen, bevor auf
-    `pv` zurückgefallen wird. Der laufende Modus ist das Gedächtnis, genau wie
-    bei `heat_active` — keine zusätzliche Zustandsvariable. Nötig, weil hier
+    `pv` zurückgefallen wird. Der laufende Modus ist hier das Gedächtnis und
+    reicht als solches, weil er eindeutig zu genau einem Grund gehört — anders
+    als der Kühl-Schalter, den mehrere UC12-Zweige stellen und der seit v0.20.9
+    deshalb eigene Merker braucht (`heat_forced`, `pv_forced`). Nötig, weil hier
     nicht der Messwert um die Schwelle pendelt, sondern die Schwelle um den
     Messwert: sie wird jeden Tick neu gerechnet und springt in Slot-Schritten.
     """
