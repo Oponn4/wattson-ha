@@ -1023,6 +1023,65 @@ def plan_is_stale(
     return stored_uid not in event_uids
 
 
+def foreign_plan_note(
+    *,
+    plan_soc: int | None,
+    plan_time: datetime | None,
+    stored: dict | None,
+    tolerance_s: int = 60,
+) -> str | None:
+    """Hält evcc einen Fahrplan, den Wattson nicht gesetzt hat? Dann beschreibe ihn.
+
+    Zweites Netz neben der Override-Erkennung, und das belastbarere: es hängt an
+    der Existenz des fremden Plans, nicht an einem Cooldown, der abläuft. Am
+    19.09.2026 um 18:54 trug Christian „100 % bis 20.09 10:45" in evcc ein,
+    Wattson erkannte den Eingriff korrekt und sperrte sich — bis Mitternacht.
+    Um **00:01:08** war der Cooldown vorbei und der Grundplan überschrieb den
+    Plan, 68 Sekunden nach Ablauf. Ein Fahrplan mit Zielzeit 10:45 ist um
+    Mitternacht aber mitten in seinem Wirkungszeitraum.
+
+    Verglichen werden Ziel-SOC und Zielzeit gegen das, was Wattson zuletzt
+    selbst geschrieben und in `misc.uc2_plan` hinterlegt hat. `tolerance_s`
+    fängt Rundung auf volle Minuten ab.
+
+    Kein Plan in evcc (`plan_soc` 0/None) → None: dann gibt es nichts zu
+    schützen. Kein eigener Plan hinterlegt, aber einer in evcc → fremd; das
+    sperrt Wattson bewusst aus, bis der Plan weg ist oder ihm gehört.
+    """
+    if not plan_soc:
+        return None
+    if _plan_matches(stored, plan_soc, plan_time, tolerance_s):
+        return None
+    if plan_time is None:
+        return f"{plan_soc}% ohne Zielzeit"
+    return f"{plan_soc}% bis {plan_time.strftime('%d.%m %H:%M')}"
+
+
+def _plan_matches(
+    stored: dict | None, plan_soc: int, plan_time: datetime | None, tolerance_s: int,
+) -> bool:
+    """Ist der Plan in evcc der, den Wattson zuletzt geschrieben hat?"""
+    if not stored:
+        return False
+    try:
+        if int(stored.get("soc")) != int(plan_soc):
+            return False
+    except (TypeError, ValueError):
+        return False
+    stored_raw = stored.get("abfahrt")
+    if not stored_raw or plan_time is None:
+        # Ohne vergleichbare Zeit entscheidet der SOC allein nicht: zwei Pläne
+        # mit 50 % zu verschiedenen Zeiten sind verschiedene Pläne.
+        return False
+    try:
+        stored_dt = datetime.fromisoformat(str(stored_raw))
+    except (TypeError, ValueError):
+        return False
+    if stored_dt.tzinfo is None or plan_time.tzinfo is None:
+        return False
+    return abs((stored_dt - plan_time).total_seconds()) <= tolerance_s
+
+
 def needs_forced_charging(
     plan_set: bool,
     trip_start: datetime | None,

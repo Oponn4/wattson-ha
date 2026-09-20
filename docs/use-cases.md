@@ -85,6 +85,32 @@ das als „Termin abgesagt" und löschte den Plan im Tick nach dem Setzen. Am
 27.07.2026 ab 21:36 lief genau das im Wechsel weiter, die Zusage stand nie
 wirklich in evcc (Fix v0.20.2).
 
+**Fremde Pläne sind tabu (v0.20.10):** UC2 schreibt nur noch, wenn der Plan in
+evcc entweder fehlt oder der eigene ist — verglichen werden Ziel-SOC und
+Zielzeit gegen `misc.uc2_plan` (`forecast.foreign_plan_note`). Gelesen wird
+dafür der **hinterlegte** Plan (`sensor.evcc_auto_vehicle_plans_soc/_time`),
+nicht der effektive: der steht auf 0, sobald evcc gerade nicht nach Plan lädt,
+während der hinterlegte weiterbesteht.
+
+Dazu endet ein Plan-Override nicht mehr stur um Mitternacht:
+`cooldown_until_next_midnight(now, hold_until)` hält mindestens bis zur
+Zielzeit des überschriebenen Plans.
+
+> [!warning] Der Anlass: 19./20.09.2026
+> 18:54:27 trägt Christian „100 % bis 20.09 10:45" in evcc ein. Wattson erkennt
+> den Eingriff korrekt, `sensor.wattson_eauto_fahrplan` zählt den Cooldown
+> herunter — 23:56:07 steht dort „user-override (3min Rest)". Um **00:01:08**
+> ist die Frist um, und der Grundplan schreibt „50 % bis 12:00" darüber.
+> Geladen wurde die Nacht dann ohne Plan: evccs `smartCostLimit` (20 ct) zog ab
+> 00:15 volle 10,6 kW für 3 h 20 (≈ 35,5 kWh) zu 18,9–19,9 ct, bis zum 90 %-
+> Limit der Anstecken-Automation. Das Mittagsfenster desselben Tages lag bei
+> 17,8 ct.
+>
+> **Ein Cooldown ist eine Frist, ein fremder Plan ein Zustand.** Fristen laufen
+> ab, während der Zustand bleibt — deshalb reicht die Override-Erkennung hier
+> nicht, und deshalb steht die Besitzprüfung vor ihr. Dieselbe Familie wie der
+> UC12-Fall vom 02.07.2026 (Kühlung ging 46 s nach Cooldown-Ende wieder an).
+
 **Anstecken-Erinnerung (v0.19):** eine Sorte Meldung statt gestaffelter
 Preis-Eskalation. Auslöser: Heimkommen mit SOC unter `PLUGIN_COMFORT_SOC` (40)
 innerhalb `PLUGIN_ARRIVAL_WINDOW_MIN` (20 min) — da steht man neben dem Auto —

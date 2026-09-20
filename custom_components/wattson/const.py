@@ -95,6 +95,12 @@ ENTITY_EVCC_PHASES      = "sensor.evcc_auto_phases_active"
 ENTITY_EVCC_MAX_CURRENT = "select.evcc_auto_max_current"
 # Ist-Zustand des evcc-Fahrplans — Wahrheitsquelle statt eigenem Gedächtnis
 ENTITY_EVCC_PLAN_SOC    = "sensor.evcc_auto_effective_plan_soc"
+# Der in evcc *hinterlegte* Fahrplan (v0.20.10). Nicht dasselbe wie der
+# effektive: der steht auf 0, sobald evcc gerade nicht nach Plan lädt — ein
+# hinterlegter Plan existiert trotzdem weiter. Für die Frage „hält evcc einen
+# fremden Plan?" zählt der hinterlegte.
+ENTITY_EVCC_VEHICLE_PLAN_SOC  = "sensor.evcc_auto_vehicle_plans_soc"
+ENTITY_EVCC_VEHICLE_PLAN_TIME = "sensor.evcc_auto_vehicle_plans_time"
 ENTITY_EVCC_LIMIT_SOC   = "sensor.evcc_auto_effective_limit_soc"
 ENTITY_EVCC_PLAN_TIME   = "sensor.evcc_auto_effective_plan_time"
 ENTITY_EVCC_SOC       = "sensor.evcc_auto_vehicle_soc"
