@@ -33,8 +33,10 @@ from .const import (
     COOL_HEAT_MIN_C,
     COOL_HUMIDEX_RH_PCT,
     COOL_HUMIDEX_TRIGGER_DELTA,
+    COOL_MIN_DWELL_MIN,
     COOL_OUTSIDE_REF_C,
     COOL_OUTSIDE_SLOPE,
+    COOL_PV_HYSTERESE_W,
     COOL_TREND_HEAT_DELTA,
     COOL_TREND_RISE_C_PER_H,
     COOL_TRIGGER_MAX_C,
@@ -177,6 +179,7 @@ from .evcc_modes import (
     plan_writes,
 )
 from .forecast import (
+    CoolDecision,
     DeferrableSlot,
     PluginReminder,
     PriceSlot,
@@ -186,12 +189,12 @@ from .forecast import (
     charge_threshold_ct,
     cheapest_window,
     consecutive_cheap_minutes_from_now,
+    cool_decision,
     cost_from,
     decide_charge_mode,
     deferrable_slot_at,
     event_key,
     grid_charge_holds,
-    heat_active,
     humidex,
     is_in_window,
     most_expensive_window,
@@ -326,6 +329,12 @@ class WattsonData:
     ht_schlaf_rh: float | None = None
     cool_enable_on: bool = False    # tatsächlicher Switch-Status
     cool_snooze_until: datetime | None = None  # Reminder-Snooze (aus Helper)
+    # v0.20.9: läuft die Freigabe *wegen Hitze* bzw. *wegen PV-Überschuss*?
+    # Jedes Totband hängt an seinem eigenen Grund, keines am Schalter. Nach
+    # Neustart beide False — die sichere Richtung, weil die Bänder dann erst
+    # wieder an der nackten Schwelle einrasten.
+    cool_heat_forced: bool = False
+    cool_pv_forced: bool = False
 
     # EMHASS — externer LP-Optimizer (v0.9.0)
     emhass_status: str = "unknown"           # "Optimal" wenn EMHASS bereit
@@ -405,6 +414,13 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         self._uc12_last_reminder_utc: datetime | None = None
         # UC12-Heat-Notify: Notify-Cooldown (Auto-Pfad, Force-Hitze v0.17)
         self._uc12_last_heat_notify_utc: datetime | None = None
+        # v0.20.9 Mindest-Verweildauer: Zeitpunkt des letzten *eigenen* Writes
+        # auf die Kühl-Freigabe. Nicht `last_changed` des Switch: das setzt HA
+        # bei jedem `unavailable`-Blip zurück (Proxon-Modbus flappt), und dann
+        # liefe die Sperre gegen ihren Zweck — sie soll das eigene Takten
+        # bremsen, nicht auf Fremdzustände reagieren. None = noch nie
+        # geschaltet (auch nach Restart) → hält nichts auf.
+        self._uc12_last_switch_at: datetime | None = None
         # v0.17.2 Trend-Tracker: Abluft-Samples (ts, °C) der letzten Stunde.
         # v0.17.3: wird nach Restart einmalig aus der Recorder-Historie geseedet.
         self._abluft_samples: deque[tuple[datetime, float]] = deque(maxlen=24)
@@ -522,6 +538,20 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         if state is None or state.context is None or not state.context.user_id:
             return None
         return state.last_changed
+
+    def _uc12_dwell_minutes(self, now: datetime) -> float | None:
+        """Minuten seit Wattsons letztem Schalten der Kühl-Freigabe.
+
+        Grundlage der Mindest-Verweildauer (v0.20.9). Gemessen wird der eigene
+        Write, nicht `last_changed` des Switch: HA setzt `last_changed` auch bei
+        `unavailable` und beim Restore nach Neustart, und der Proxon-Modbus
+        flappt (Stale-Frame-Debt). Eine Sperre, die bei jedem Blip von vorn
+        zählt, hält irgendwann alles auf — sie soll aber nur das eigene Takten
+        bremsen. None (noch nie geschaltet, auch nach Restart) hält nichts auf.
+        """
+        if self._uc12_last_switch_at is None:
+            return None
+        return (now - self._uc12_last_switch_at).total_seconds() / 60
 
     def _attr(self, entity_id: str, attribute: str, default=None):
         state = self.hass.states.get(entity_id)
@@ -721,6 +751,8 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         s.evcc_mode            = self._evcc_mode_normalized()
         s.sleep_mode           = self._state(ENTITY_SLEEP) == "on"
         s.low_soc_notified     = self._prev.low_soc_notified
+        s.cool_heat_forced     = self._prev.cool_heat_forced
+        s.cool_pv_forced       = self._prev.cool_pv_forced
         s.abluft_temp          = self._fval(ENTITY_PROXON_ABLUFT, 22.0)
         s.abluft_trend_c_per_h = self._track_abluft_trend(s.abluft_temp)
         s.ht_office_temp = self._fval_or_none(ENTITY_HT_OFFICE_TEMP)
@@ -886,7 +918,10 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             return s
 
         if s.sleep_mode:
-            _LOGGER.info("Schlafmodus — nur stille Planung (%s)", ", ".join(SLEEP_EXEMPT_UCS))
+            _LOGGER.info(
+                "Schlafmodus — stille Planung (%s) + UC12 nur ausschalten",
+                ", ".join(SLEEP_EXEMPT_UCS),
+            )
             s.t300_target = s.t300_solltemperatur
             s.t300_reason = "Schlafmodus"
             for uc_id, _slug, _display, _default in UC_DEFINITIONS:
@@ -899,6 +934,14 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             # select-Wert. Keine Hausaktorik, kein Push. Der Plugin-Reminder
             # bleibt draußen, der würde wecken.
             sleep_actions: list[str] = []
+            # v0.20.9: UC12 darf nachts ausschalten. Einfrieren war keine
+            # Ruhe, sondern eine Entscheidung ohne Ablauf: eine um 22:49 offene
+            # Kühl-Freigabe stand am 19.09.2026 bis 09:16 durch. Zuschalten
+            # bleibt gesperrt (`sleep_only_off`) — das treibt die Lüfterstufe
+            # auf max und weckt. Schließen ist leise.
+            await self._handle_uc12_cooling(
+                s, now, sleep_actions, sleep_only_off=True,
+            )
             await self._run_trip_planning(s, now, sleep_actions)
             await self._run_charge_mode(s, now, sleep_actions)
             s.last_actions = ["Schlafmodus aktiv", *sleep_actions]
@@ -2011,17 +2054,34 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             notes.append(
                 f"Trend +{trend:.1f}°C/h → Heat {COOL_TREND_HEAT_DELTA:+.1f}"
             )
-        # Heat darf nie auf/unter Trigger fallen — sonst force-kühlt UC12 dauernd
+        # Heat darf nie auf/unter Trigger fallen — sonst force-kühlt UC12 dauernd.
+        # Das Totband des Hitze-Zweigs wird nicht hier eingerechnet, sondern in
+        # `cool_decision` beschnitten: `heat + 0.5 + Hysterese` hätte jede
+        # Trend-Korrektur (C) aufgefressen, solange der Trigger bei 24.0 steht
+        # (max(25.0, 25.5) = 25.5).
         heat = max(heat, trigger + 0.5)
         return trigger, heat, notes
 
     async def _handle_uc12_cooling(
-        self, s: WattsonData, now: datetime, actions: list[str]
+        self, s: WattsonData, now: datetime, actions: list[str],
+        *, sleep_only_off: bool = False,
     ) -> None:
         """UC12: Proxon-Kühlung-Freigabe netzdienlich steuern. Setzt s.cooling_active
-        damit UC10 die Discharge-Sperre entsprechend lockern kann."""
-        s.uc_status["uc12"] = self._uc_idle_status("uc12")
+        damit UC10 die Discharge-Sperre entsprechend lockern kann.
+
+        `sleep_only_off` ist der Aufruf aus dem Schlafmodus-Gate (v0.20.9): dort
+        darf UC12 ausschalten, aber nichts anwerfen. Ohne diesen Aufruf lief der
+        Handler nachts überhaupt nicht — eine schon offene Freigabe fror ein,
+        und der eigene „Schlafmodus → aus"-Zweig war für genau diesen Fall
+        toter Code. Am 18.09.2026 ging die Freigabe 13:42 auf, der Schlafmodus
+        begann 22:49, und sie stand bis 09:16 des Folgetags durch.
+        """
+        s.uc_status["uc12"] = (
+            "schlafmodus" if sleep_only_off else self._uc_idle_status("uc12")
+        )
         s.uc_reason["uc12"] = ""
+        s.cool_heat_forced = False
+        s.cool_pv_forced = False
 
         if not self._override.is_enabled("uc12"):
             s.uc_status["uc12"] = "disabled"
@@ -2034,149 +2094,88 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             s.uc_status["uc12"] = f"user-override ({remaining}min Rest)"
             s.uc_reason["uc12"] = f"user-override aktiv ({remaining}min Rest)"
             s.cooling_active = s.cool_enable_on
-            # Reminder: User hat Kühlung von Hand an → erinnern wenn kühl genug / teuer
-            await self._uc12_send_reminder(s, now, actions)
+            if not sleep_only_off:
+                # Reminder: User hat Kühlung von Hand an → erinnern wenn kühl
+                # genug / teuer. Nachts nicht: der Push wird ohnehin
+                # unterdrückt, hängt aber je Tick eine Zeile in `last_actions`.
+                await self._uc12_send_reminder(s, now, actions)
             return
 
         # Adaptive Schwellen: A Outdoor-Forecast (v0.17), B Schwüle + C Trend (v0.17.2)
         trigger_c, heat_c, korrekturen = self._compute_cool_thresholds(s)
-        off_c = trigger_c - COOL_ABLUFT_HYSTERESE_C
-        expensive = s.price_level in UC12_EXPENSIVE_LEVELS
-        # v0.20.1: Totband auch am Hitze-Zweig. Ohne das entscheidet ein blankes
-        # `>=` über eine Schwelle, um die die Abluft herumpendelt: Tick sieht
-        # 25,4 -> Kühlung an, nächster Tick sieht 25,1 -> die Grundregel schaltet
-        # wieder aus. Am 27.07.2026 lief das ab 18:50 als Sägezahn, 5 min an /
-        # 25 min aus, mit einem Push pro Zyklus. Der Off-Zweig hatte seine
-        # Hysterese längst (off_c), der Hitze-Zweig nicht.
-        #
-        # Der laufende Zustand ist das Gedächtnis: einmal wegen Hitze an, bleibt
-        # es an, bis die Abluft unter heat_c - Hysterese fällt.
-        hitze = heat_active(
-            abluft_c=s.abluft_temp,
-            heat_c=heat_c,
-            hysteresis_c=COOL_ABLUFT_HYSTERESE_C,
-            currently_cooling=s.cool_enable_on,
-        )
         scale_info = (
             f"Trigger {trigger_c:.1f}°C / Heat {heat_c:.1f}°C "
             f"(Außen-Forecast max {s.forecast_max_temp_c:.1f}°C"
             + (", " + ", ".join(korrekturen) if korrekturen else "")
             + ")"
         )
+        spread = (s.expensive_4h_avg - s.cheapest_4h_avg
+                  if s.expensive_4h_avg and s.cheapest_4h_avg else 0)
 
-        # Entscheidung berechnen
-        if s.urlaub_mode:
-            # v0.18.7: niemand zu Hause — leeres Haus kühlen ist Verschwendung,
-            # auch bei Hitze nicht (UC11 schaltet die Klimas im Urlaub genauso ab)
-            should_cool = False
-            reason = f"Urlaubsmodus → aus (Abluft {s.abluft_temp:.1f}°C)"
-        elif hitze and s.sleep_mode:
-            # v0.18.7: Force-Hitze bricht den Schlafmodus NICHT mehr — aktive
-            # Kühlung treibt die Lüfterstufe auf max (Sonja leichter Schläfer).
-            # Kühlung startet dann nach Sleep-Ende.
-            should_cool = False
-            reason = (
-                f"Hitze {s.abluft_temp:.1f}°C ≥ {heat_c:.1f}°C, aber Schlafmodus → "
-                f"aus (Lüfter-Max nachts unerwünscht; kühlt nach Sleep-Ende)"
-            )
-        elif hitze:
-            # Force-Hitze: kühlt trotz expensive (mit Notify)
-            should_cool = True
-            grund_bruch = f"expensive ({s.price_level})" if expensive else None
-            if grund_bruch:
-                reason = (
-                    f"Hitze {s.abluft_temp:.1f}°C ≥ {heat_c:.1f}°C — "
-                    f"Kühlung trotz {grund_bruch} ({scale_info})"
-                )
-                # Nur beim Einschalten melden, nicht während des Laufs: sonst
-                # kommt im Totband stündlich ein Push für einen Zustand, den
-                # der Nutzer längst kennt.
-                if not s.cool_enable_on:
-                    await self._uc12_send_heat_notify(
-                        s, now, actions, heat_c, grund_bruch,
-                    )
-            else:
-                reason = (
-                    f"Hitze {s.abluft_temp:.1f}°C ≥ {heat_c:.1f}°C ({scale_info})"
-                )
-        elif s.sleep_mode:
-            should_cool = False
-            reason = (
-                f"Schlafmodus → aus (Abluft {s.abluft_temp:.1f}°C, "
-                f"Heat-Schwelle {heat_c:.1f}°C nicht erreicht)"
-            )
-        elif s.abluft_temp <= off_c:
-            should_cool = False
-            reason = (
-                f"Abluft {s.abluft_temp:.1f}°C ≤ Off-Schwelle {off_c:.1f}°C "
-                f"({scale_info})"
-            )
-        else:
-            # Innen zwischen Off-Schwelle und Heat-Schwelle — evaluiere
-            spread = (s.expensive_4h_avg - s.cheapest_4h_avg
-                      if s.expensive_4h_avg and s.cheapest_4h_avg else 0)
-            in_cheapest = bool(
+        entscheidung = cool_decision(
+            abluft_c=s.abluft_temp,
+            trigger_c=trigger_c,
+            heat_c=heat_c,
+            off_c=trigger_c - COOL_ABLUFT_HYSTERESE_C,
+            hysteresis_c=COOL_ABLUFT_HYSTERESE_C,
+            pv_surplus_w=s.pv_surplus,
+            pv_min_w=PV_COOLING_MIN_W,
+            pv_band_w=COOL_PV_HYSTERESE_W,
+            spread_eur=spread,
+            spread_threshold_eur=SMART_SPREAD_THRESHOLD_EUR,
+            in_cheapest_4h=bool(
                 s.cheapest_4h_start
                 and is_in_window(now, s.cheapest_4h_start, s.cheapest_4h_end)
-            )
-
-            if s.pv_surplus >= PV_COOLING_MIN_W:
-                should_cool = True
-                reason = (
-                    f"PV-Überschuss {s.pv_surplus}W ≥ {PV_COOLING_MIN_W}W "
-                    f"(Abluft {s.abluft_temp:.1f}°C, {scale_info})"
-                )
-            elif in_cheapest and spread < SMART_SPREAD_THRESHOLD_EUR:
-                should_cool = True
-                reason = (
-                    f"cheapest_4h, spread {spread*100:.1f}ct < "
-                    f"{SMART_SPREAD_THRESHOLD_EUR*100:.1f}ct → UC12 Priorität "
-                    f"(Abluft {s.abluft_temp:.1f}°C)"
-                )
-            elif (
-                s.cool_enable_on
-                and s.abluft_temp > trigger_c
-                and not expensive
-            ):
-                # Hysterese: läuft + noch über Trigger → weiter — aber nur bei
-                # nicht-teurem Strom (sonst macht sie unbegrenzt durch)
-                should_cool = True
-                reason = (
-                    f"Hysterese: läuft + Abluft {s.abluft_temp:.1f}°C > "
-                    f"Trigger {trigger_c:.1f}°C, Preis {s.price_level} ok"
-                )
-            elif (
-                s.cool_enable_on
-                and s.abluft_temp > trigger_c
-                and expensive
-            ):
-                should_cool = False
-                reason = (
-                    f"Hysterese gebrochen: expensive ({s.price_level}) ohne PV "
-                    f"(Abluft {s.abluft_temp:.1f}°C, Heat-Schwelle "
-                    f"{heat_c:.1f}°C nicht erreicht)"
-                )
-            elif in_cheapest:
-                should_cool = False
-                reason = (
-                    f"cheapest_4h, aber spread {spread*100:.1f}ct ≥ "
-                    f"{SMART_SPREAD_THRESHOLD_EUR*100:.1f}ct → UC10 Priorität "
-                    f"(Abluft {s.abluft_temp:.1f}°C)"
-                )
-            else:
-                should_cool = False
-                reason = (
-                    f"kein PV-Überschuss + nicht in cheapest_4h "
-                    f"(Abluft {s.abluft_temp:.1f}°C, Preis {s.price_level}, "
-                    f"{scale_info})"
-                )
-
+            ),
+            expensive=s.price_level in UC12_EXPENSIVE_LEVELS,
+            price_level=s.price_level,
+            urlaub=s.urlaub_mode,
+            sleep=s.sleep_mode,
+            cooling_on=s.cool_enable_on,
+            # Ein Merker gilt nur, wenn die Freigabe auch wirklich offen *ist*.
+            # `_try_act` ruft den Service mit `blocking=False` — „abgeschickt"
+            # ist kein „angekommen", und ein Hand-Aus fällt erst einen Tick
+            # später auf. Ohne dieses `and` spannte ein verlorener Write das
+            # Totband auf und UC12 meldete „Hitze 24.8°C ≥ 24.5°C" bei
+            # geschlossener Freigabe — genau die Falschaussage, die weg soll.
+            heat_forced=self._prev.cool_heat_forced and s.cool_enable_on,
+            pv_forced=self._prev.cool_pv_forced and s.cool_enable_on,
+            dwell_min=self._uc12_dwell_minutes(now),
+            min_dwell_min=COOL_MIN_DWELL_MIN,
+            schwellen_info=scale_info,
+        )
+        should_cool = entscheidung.cool
+        reason = entscheidung.reason
         s.cooling_active = should_cool
         s.uc_reason["uc12"] = reason
 
+        # Force-Hitze bei teurem Strom melden — nur beim Einschalten, nicht
+        # während des Laufs: sonst kommt im Totband stündlich ein Push für einen
+        # Zustand, den der Nutzer längst kennt.
+        if (
+            entscheidung.kind == "hitze"
+            and s.price_level in UC12_EXPENSIVE_LEVELS
+            and not s.cool_enable_on
+        ):
+            await self._uc12_send_heat_notify(
+                s, now, actions, entscheidung.heat_limit_c, heat_c,
+                f"expensive ({s.price_level})",
+            )
+
         # Switch anpassen wenn nötig
         if should_cool == s.cool_enable_on:
-            s.uc_status["uc12"] = self._uc_idle_status("uc12")
+            self._uc12_set_latches(s, entscheidung, laeuft=s.cool_enable_on)
+            if not sleep_only_off:
+                s.uc_status["uc12"] = self._uc_idle_status("uc12")
+            return
+
+        if sleep_only_off and should_cool:
+            # Kann nach der Entscheidungsordnung nicht auftreten (Schlafmodus
+            # schaltet immer aus) — steht als Riegel, damit ein künftiger Zweig
+            # nachts nicht doch die Lüfterstufe hochtreibt.
+            s.uc_reason["uc12"] = f"{reason} — im Schlafmodus nicht eingeschaltet"
+            s.cooling_active = s.cool_enable_on
+            self._uc12_set_latches(s, entscheidung, laeuft=s.cool_enable_on)
             return
 
         target_value = "on" if should_cool else "off"
@@ -2190,10 +2189,41 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         )
         if acted:
             actions.append(act_desc)
-            s.uc_status["uc12"] = "aktiv"
+            # Verweildauer ab dem eigenen Write zählen — auch im Dry-Run, sonst
+            # probt der Probelauf die Sperre nie.
+            self._uc12_last_switch_at = now
+            s.uc_status["uc12"] = (
+                "schlafmodus → aus" if sleep_only_off else "aktiv"
+            )
         else:
             s.uc_status["uc12"] = act_desc
             s.uc_reason["uc12"] = f"{reason} (geblockt: {act_desc})"
+        # Merker erst setzen, wenn die Freigabe danach offen sein *soll*; ob sie
+        # es wirklich ist, entscheidet der nächste Tick am gelesenen Switch
+        # (`heat_forced=… and s.cool_enable_on` oben).
+        self._uc12_set_latches(
+            s, entscheidung, laeuft=should_cool if acted else s.cool_enable_on,
+        )
+
+    @staticmethod
+    def _uc12_set_latches(
+        s: WattsonData, entscheidung: CoolDecision, *, laeuft: bool
+    ) -> None:
+        """Totband-Merker für den nächsten Tick festschreiben.
+
+        `laeuft` ist der gewollte Zustand der Freigabe nach diesem Tick. Ein
+        geblockter Write (Override) setzt gar keinen Merker. Gegen den *nicht
+        angekommenen* Write hilft das allein nicht — `_try_act` ruft den Service
+        mit `blocking=False` und merkt den Verlust erst einen Tick später —,
+        deshalb wird der Merker beim Lesen zusätzlich mit dem tatsächlichen
+        Switch-Zustand verrechnet.
+
+        Im Dry-Run folgt er dem simulierten Zustand. Vollständig geprobt wird
+        die neue Logik dort trotzdem nicht: `cool_enable_on` kommt weiter vom
+        echten Switch, der im Dry-Run nie umschaltet.
+        """
+        s.cool_heat_forced = entscheidung.heat_forced and laeuft
+        s.cool_pv_forced = entscheidung.pv_forced and laeuft
 
     async def _uc12_send_reminder(
         self, s: WattsonData, now: datetime, actions: list[str]
@@ -2264,7 +2294,7 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
 
     async def _uc12_send_heat_notify(
         self, s: WattsonData, now: datetime, actions: list[str],
-        heat_c: float, grund_bruch: str,
+        heat_limit_c: float, heat_c: float, grund_bruch: str,
     ) -> None:
         """v0.17: Push wenn Force-Hitze die Expensive-Sperre bricht.
 
@@ -2273,7 +2303,17 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         Wattson kühlt weiter (richtig!), informiert aber, warum: damit der User
         nicht rätselt, wieso die Box im teuren Fenster noch dreht.
         Quiet-Hours (22-7) und Schlafmodus unterdrücken, 60min-Cooldown.
+
+        v0.20.9: `heat_limit_c` ist die *verglichene* Schwelle, `heat_c` die
+        konfigurierte. Beides steht in der Meldung, wenn sie auseinanderfallen —
+        eine Push-Nachricht, die 24,5 °C als „Heat-Schwelle" ausgibt, während
+        25,5 °C eingestellt sind, ist dieselbe Falschaussage wie die alte
+        Begründung „Hitze 24.8°C ≥ 25.5°C", nur in die andere Richtung.
         """
+        schwelle_txt = f"{heat_limit_c:.1f}°C"
+        if heat_limit_c < heat_c:
+            schwelle_txt += f" (Totband unter Schwelle {heat_c:.1f}°C)"
+
         # Quiet-Hours / Schlafmodus: Sonja ist leichter Schläfer — kein Push
         if (
             s.sleep_mode
@@ -2282,7 +2322,7 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         ):
             actions.append(
                 f"UC12 Heat-Notify unterdrückt (Quiet-Hours, "
-                f"Abluft {s.abluft_temp:.1f}°C ≥ {heat_c:.1f}°C)"
+                f"Abluft {s.abluft_temp:.1f}°C ≥ {schwelle_txt})"
             )
             return
 
@@ -2299,7 +2339,7 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             "message": (
                 f"Trotz {grund_bruch}: Außen-Forecast max "
                 f"{s.forecast_max_temp_c:.1f}°C → Heat-Schwelle "
-                f"{heat_c:.1f}°C überschritten."
+                f"{schwelle_txt} überschritten."
             ),
             "data": {
                 "tag": "wattson_uc12_heat",

@@ -19,7 +19,7 @@ HEAT = 25.5
 
 def active(abluft: float, cooling: bool) -> bool:
     return heat_active(
-        abluft_c=abluft, heat_c=HEAT, hysteresis_c=HYST, currently_cooling=cooling
+        abluft_c=abluft, heat_c=HEAT, hysteresis_c=HYST, heat_forced=cooling
     )
 
 
@@ -84,7 +84,7 @@ class TestKeinSaegezahn:
         cooling, wechsel = False, 0
         for t in verlauf:
             neu = heat_active(abluft_c=t, heat_c=schwelle,
-                              hysteresis_c=HYST, currently_cooling=cooling)
+                              hysteresis_c=HYST, heat_forced=cooling)
             if neu != cooling:
                 wechsel += 1
             cooling = neu
