@@ -84,11 +84,18 @@ ENTITY_PRICE_RANKING  = "sensor.electricity_price_haus"   # attr: intraday_price
 ENTITY_PRICE_LEVEL    = "sensor.haus_current_hour_price_level"
 ENTITY_PV_SURPLUS     = "sensor.pv_uberschuss_der_letzen_15_minuten"
 ENTITY_T300_TANK      = "sensor.proxon_t300_temperatur_t21_behalter_mitte"
-ENTITY_T300_SOLL      = "number.proxon_t300_solltemperatur"
+# ⚠️ Entity-IDs mit `hwr_`-Präfix (Bereichsname). Bis v0.20.10 standen hier die
+# Namen ohne Präfix — beide existierten nicht, `_fval` lieferte still den
+# Default und `_try_act` schrieb ins Leere. Der T300-Sollwert stand deshalb
+# 14 Tage konstant auf 52,0, während UC4a „günstigste 2h → 55" meldete.
+ENTITY_T300_SOLL      = "number.hwr_proxon_t300_target_temperature"
+# Der Sollwert, mit dem der T300 gerade *arbeitet* (Rücklesewert, v0.20.11).
+# Entscheidet, ob die Heizstab-Freigabe überhaupt etwas bewirken kann.
+ENTITY_T300_SETPOINT  = "sensor.proxon_t300_aktueller_sollwert"
 ENTITY_T300_HEIZSTAB  = "switch.proxon_t300_e_heizstab"
 # Boost-Zieltemperatur (Reg 2003) — wird für Legionellen-Läufe temporär auf
 # LEGIONELLA_BOOST_TEMP_C gehoben und danach restauriert
-ENTITY_T300_BOOST_TEMP = "number.proxon_t300_temperatur_e_heiz"
+ENTITY_T300_BOOST_TEMP = "number.hwr_proxon_t300_electric_heater_temperature"
 ENTITY_EVCC_MODE      = "select.evcc_auto_mode"
 ENTITY_EVCC_CONNECTED = "binary_sensor.evcc_auto_connected"
 ENTITY_EVCC_PHASES      = "sensor.evcc_auto_phases_active"
@@ -188,6 +195,46 @@ UC6_DOWNSHIFT_CONFIRMATION_CYCLES = 2  # 2 Cycles in Folge "kein Bedarf mehr"
 # statt Live-Werte reaktiv zu folgen. Anti-Replan-Jitter durch Confirmation-Cycles.
 UC4B_CONFIRMATION_CYCLES   = 2     # so viele Cycles in Folge "Plan=off" bis ausschalten
 UC4B_REMINDER_COOLDOWN_MIN = 60    # Safety-Reminder: max 1/h
+
+# UC4b v0.20.11 — gemessen am 19.09.2026, zwei unabhängige Befunde.
+#
+# 1. Der veröffentlichte EMHASS-Plan enthält den **laufenden** Slot nicht: um
+#    14:58 war der erste Eintrag 15:00. `deferrable_slot_at()` liefert dann
+#    None, und das galt als „Plan sagt aus" — Off-Zähler hoch, nach zwei Ticks
+#    aus, an der nächsten Halbstunden-Grenze wieder an. Ergebnis: acht
+#    Schaltvorgänge zwischen 13:32 und 17:22, Periode 30 min (aus bei :22/:52,
+#    an bei :02/:32), während `sensor.p_deferrable0` durchgehend 1500 W meldete.
+#    Fehlende Auskunft ist keine negative Auskunft.
+# 2. Die Freigabe wirkt nur, solange der Tank **unter dem T300-Sollwert** liegt.
+#    Am 19.09. ab 13:32 stand der Tank auf 54,8 °C bei Sollwert 52,0 —
+#    `binary_sensor.proxon_t300_e_heiz_aktiv` blieb die ganze Zeit aus, und der
+#    Zähler stieg in 2 h 08 nur um 0,166 kWh (Wärmepumpe, 19 min Kompressor).
+#    1500 W hätten in der Einschaltzeit ~2 kWh gebraucht. Um 11:31 lief der Stab
+#    dagegen sofort mit — da war der Tank unter dem Sollwert.
+# Oberer Deckel für jeden von Wattson geschriebenen Warmwasser-Sollwert.
+# Im Haus sitzt **kein thermostatischer Mischer**: was im Tank steht, kommt an
+# der Armatur an. Christians Entscheidung (keine Kinder im Haus, acht Jahre
+# Betrieb mit zeitweise 70 °C im Kessel) — der Deckel ist deshalb kein
+# Komfort-Limit, sondern ein Runaway-Schutz: er greift im Normalbetrieb nie,
+# fängt aber einen künftigen Zweig ab, der versehentlich 65+ schreibt.
+# Der Legionellen-Lauf liegt bewusst darüber (64,5 °C) und meldet sich per Push.
+T300_TARGET_MAX_C          = 60.0
+# Vorrats-Ziel für ein geplantes Speicherfenster. Über dem Billig-Ziel (55),
+# weil der Tank ohnehin um 54–56 °C pendelt — mit 55 bliebe kein nutzbarer Hub.
+# Unter dem E-Heiz-Ziel des Geräts (59), damit die Wärmepumpe die Arbeit macht
+# und nicht der Stab (COP ~3 statt 1).
+T300_TEMP_SPEICHER         = 57.0
+UC4B_MIN_DWELL_MIN         = 15    # min — Mindestzeit im Schaltzustand (nur Plan-/Heuristik-Zweig)
+# Ab wie weit unter dem E-Heiz-Ziel (Reg 2003) der Stab tatsächlich anspringt.
+# Drei Messpunkte, alle bei Ziel 59 °C:
+#   07.07.  T21 56,9 (2,1 K darunter) → Stab blieb aus
+#   19.09.  T21 54,8 (4,2 K darunter) → Stab blieb aus, acht Freigaben lang
+#   20.09.  T21 53,8 (5,2 K darunter) → Stab lief binnen 3 s, +2,5 K in 20 min
+# Also liegt die Einschalt-Hysterese zwischen 4,2 und 5,2 K. Maßgeblich ist das
+# E-Heiz-Ziel, NICHT der Warmwasser-Sollwert: am 19.09. lag der Tank über dem
+# Sollwert (52) und am 20.09. ebenfalls (53,8) — der Unterschied war allein der
+# Abstand zum E-Heiz-Ziel.
+UC4B_ELEMENT_HYSTERESE_C   = 5.0
 
 # UC14 Netzladen aus Netz (siehe project_wattson_uc14_netzladen.md)
 UC14_MIN_SPREAD_CT_KWH = 11.0      # Mindest-Spread günstigster vs teuerster Slot (User-Entscheidung)
