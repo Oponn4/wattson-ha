@@ -155,11 +155,11 @@ class TestSpeicherfenster:
             plan_signal="on", tank_c=tank, storage_target_c=VORRAT, expensive=False,
         ) is True
 
-    def test_vorrat_liegt_im_fenster_zwischen_billig_und_e_heiz_ziel(self):
-        """Über 55, damit überhaupt Hub entsteht (Tank pendelt um 54–56);
-        unter 59, damit die Wärmepumpe heizt und nicht der Stab."""
-        assert CHEAP < VORRAT < const.T300_TARGET_MAX_C
-        assert VORRAT < 59.0, "unter dem E-Heiz-Ziel — sonst macht es der Stab"
+    def test_vorrat_endet_an_der_registergrenze(self):
+        """Reg 4x2000 kann nicht über 55 °C. Mehr Vorrat ginge nur über
+        Reg 4x2003 (E-Heiz, bis 70 °C) — dann heizt aber der Stab (COP 1)
+        statt der Wärmepumpe. Deshalb liegt das Vorrats-Ziel auf 55."""
+        assert VORRAT == CHEAP == const.T300_TARGET_MAX_C == 55.0
 
 
 class TestVerweildauer:
@@ -274,8 +274,11 @@ class TestSollwertDeckel:
         / "custom_components" / "wattson" / "coordinator.py"
     ).read_text(encoding="utf-8")
 
-    def test_deckel_existiert(self):
-        assert const.T300_TARGET_MAX_C == 60.0
+    def test_deckel_entspricht_der_registergrenze(self):
+        """MODBUS-Liste (Paperless Dok 2300), Reg 4x2000 „Normal
+        Wassertemperatur": IST-Min 20 °C, IST-Max **55** °C. v0.20.11 hatte
+        57 stehen — das Gerät nimmt den Wert nicht an."""
+        assert const.T300_TARGET_MAX_C == 55.0
 
     def test_kein_uc4a_ziel_liegt_darueber(self):
         """Alle Sollwert-Kandidaten, die UC4a schreiben kann."""

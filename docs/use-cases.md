@@ -126,7 +126,7 @@ sonst 52°C. **Noch nicht EMHASS-integriert** (siehe roadmap.md).
 
 **Speicherfenster (v0.20.11):** Will der EMHASS-Plan gerade heizen
 (`heizstab_plan_signal == "on"`), hebt UC4a den Sollwert auf
-`T300_TEMP_SPEICHER` (57 °C) — noch vor der Preis-Logik, nur wenn der Strom
+`T300_TEMP_SPEICHER` (55 °C) — noch vor der Preis-Logik, nur wenn der Strom
 nicht gerade `expensive` ist und der Tank darunter liegt
 (`forecast.t300_speicherfenster`).
 
@@ -136,19 +136,19 @@ die Heizstab-Freigabe von UC4b ist eine *Erlaubnis*, kein Auftrag. Am
 `binary_sensor.proxon_t300_e_heiz_aktiv` durchgehend aus, 0,166 kWh in 2 h 08
 (das war die Wärmepumpe, 19 min Kompressor). 1500 W hätten ~2 kWh gezogen.
 
-57 °C liegt bewusst zwischen zwei Grenzen: über dem Billig-Ziel (55), weil der
-Tank ohnehin um 54–56 °C pendelt und darunter kein nutzbarer Hub entsteht —
-und unter dem E-Heiz-Ziel des Geräts (59), damit die **Wärmepumpe** die Arbeit
-macht (COP ≈ 3) und nicht der Stab (COP 1). Der Hebel ist deshalb der Sollwert
-und nicht die Freigabe.
+Das Ziel liegt auf **55 °C** — das ist die Obergrenze des Registers. MODBUS-Liste
+(Paperless Dok 2300): `4x2000 Normal Wassertemperatur, IST-Min 20, IST-Max 55`.
+v0.20.11 hatte hier 57 stehen; das Gerät hätte den Wert abgewiesen (korrigiert
+in v0.20.12). Mehr Vorrat ginge nur über `4x2003 Temperatur E-Heiz` (bis 70 °C)
+plus Freigabe — dann heizt aber der **Stab** (COP 1) statt der Wärmepumpe
+(COP ≈ 3). Für Preisverschiebung lohnt das nicht; für echten PV-Überschuss wäre
+die geräteeigene PV-Funktion (`4x2010`, Lesewerte `3x0899 PV Eheiz AN`,
+`3x0900 PV WP AN`) der vorgesehene Weg — noch nicht ausgewertet.
 
-`T300_TARGET_MAX_C` (60 °C) deckelt jeden von Wattson geschriebenen Sollwert.
-Im Haus sitzt **kein thermostatischer Mischer** — Tanktemperatur =
-Armaturentemperatur. Der Deckel ist Christians Entscheidung als Runaway-Schutz
-(keine Kinder im Haus, acht Jahre Betrieb mit zeitweise 70 °C im Kessel): er
-greift im Normalbetrieb nie, fängt aber einen künftigen Zweig ab, der 65+
-schreiben will. Der Legionellen-Lauf (64,5 °C) liegt bewusst darüber und warnt
-seit v0.20.11 im Abschluss-Push vor der Armaturentemperatur.
+`T300_TARGET_MAX_C` (55 °C) deckelt jeden geschriebenen Sollwert auf die
+Registergrenze. Im Haus sitzt kein thermostatischer Mischer — Tanktemperatur =
+Armaturentemperatur; der Legionellen-Lauf (64,5 °C über `4x2003`) liegt bewusst
+darüber und warnt seit v0.20.11 im Abschluss-Push davor.
 
 > [!warning] UC4a schrieb bis v0.20.10 ins Leere
 > `ENTITY_T300_SOLL` zeigte auf `number.proxon_t300_solltemperatur` — diese
@@ -194,8 +194,10 @@ bei :02/:32), während `sensor.p_deferrable0` durchgehend 1500 W meldete.
   Vorhersage, `sensor.p_deferrable0` die Gegenwart.
 - **Bedarfs-Gate** (`forecast.heizstab_kann_wirken`): freigegeben wird nur, wenn
   der Tank mindestens `UC4B_ELEMENT_HYSTERESE_C` (5 K) unter dem **E-Heiz-Ziel**
-  liegt (Reg 2003, `ENTITY_T300_BOOST_TEMP`). Nicht unter dem
-  Warmwasser-Sollwert — drei Messungen bei Ziel 59 °C: 56,9 → aus, 54,8 → aus,
+  liegt (Reg 4x2003, `ENTITY_T300_BOOST_TEMP`). Laut Bedienungsanleitung
+  (Paperless Dok 2363, S. 17/35) ist D01 die Temperatur, *bis zu der* der Stab
+  „parallel zur Wärmepumpe" mitheizt — eine Hysterese nennt das Handbuch nicht,
+  die 5 K sind aus drei Messungen abgeleitet. Nicht der Warmwasser-Sollwert — drei Messungen bei Ziel 59 °C: 56,9 → aus, 54,8 → aus,
   53,8 → an (binnen 3 s, +2,5 K in 20 min). An beiden September-Tagen lag der
   Tank *über* dem Sollwert; der Unterschied war allein der Abstand zum
   E-Heiz-Ziel. Die erste Fassung verglich gegen den Sollwert und hätte den
