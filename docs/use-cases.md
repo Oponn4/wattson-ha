@@ -124,6 +124,45 @@ immer, ein Quittungsknopf ist damit unnötig. Cooldown
 Günstigste 2h-Phase der nächsten 12h: jetzt günstig → 55°C, teuer → 45°C,
 sonst 52°C. **Noch nicht EMHASS-integriert** (siehe roadmap.md).
 
+**Speicherfenster (v0.20.11):** Will der EMHASS-Plan gerade heizen
+(`heizstab_plan_signal == "on"`), hebt UC4a den Sollwert auf
+`T300_TEMP_SPEICHER` (57 °C) — noch vor der Preis-Logik, nur wenn der Strom
+nicht gerade `expensive` ist und der Tank darunter liegt
+(`forecast.t300_speicherfenster`).
+
+Ohne das war der Plan zahnlos: der T300 heizt nur unter seinem Sollwert, und
+die Heizstab-Freigabe von UC4b ist eine *Erlaubnis*, kein Auftrag. Am
+19.09.2026 stand der Sollwert auf 52 °C bei 54,8 °C Tank — acht Freigaben,
+`binary_sensor.proxon_t300_e_heiz_aktiv` durchgehend aus, 0,166 kWh in 2 h 08
+(das war die Wärmepumpe, 19 min Kompressor). 1500 W hätten ~2 kWh gezogen.
+
+57 °C liegt bewusst zwischen zwei Grenzen: über dem Billig-Ziel (55), weil der
+Tank ohnehin um 54–56 °C pendelt und darunter kein nutzbarer Hub entsteht —
+und unter dem E-Heiz-Ziel des Geräts (59), damit die **Wärmepumpe** die Arbeit
+macht (COP ≈ 3) und nicht der Stab (COP 1). Der Hebel ist deshalb der Sollwert
+und nicht die Freigabe.
+
+`T300_TARGET_MAX_C` (60 °C) deckelt jeden von Wattson geschriebenen Sollwert.
+Im Haus sitzt **kein thermostatischer Mischer** — Tanktemperatur =
+Armaturentemperatur. Der Deckel ist Christians Entscheidung als Runaway-Schutz
+(keine Kinder im Haus, acht Jahre Betrieb mit zeitweise 70 °C im Kessel): er
+greift im Normalbetrieb nie, fängt aber einen künftigen Zweig ab, der 65+
+schreiben will. Der Legionellen-Lauf (64,5 °C) liegt bewusst darüber und warnt
+seit v0.20.11 im Abschluss-Push vor der Armaturentemperatur.
+
+> [!warning] UC4a schrieb bis v0.20.10 ins Leere
+> `ENTITY_T300_SOLL` zeigte auf `number.proxon_t300_solltemperatur` — diese
+> Entity existiert nicht, sie heißt `number.hwr_proxon_t300_target_temperature`.
+> Dazu lief der Write über `input_number.set_value` statt `number.set_value`.
+> Beides zusammen: `_fval` lieferte still den Default 52,0, `_try_act` meldete
+> Erfolg, und der T300-Sollwert stand 14 Tage konstant auf 52,0, während
+> `sensor.wattson_warmwasser_soll` „aktiv — günstigste 2h" zeigte. Dasselbe
+> galt für `ENTITY_T300_BOOST_TEMP`, also für den Legionellen-Boost-Swap.
+>
+> Seit v0.20.11 prüft `_warn_missing_entities()` beim Start alle Schreib-Ziele
+> (`CRITICAL_WRITE_ENTITIES`) und protokolliert fehlende. Merksatz der Familie:
+> *ein laufender UC ist kein Beleg für einen wirksamen UC.*
+
 ## UC4b — E-Heizstab plan-aware
 
 Liest EMHASS-Forward-Plan (`deferrables_schedule`, deferrable0, Slots ≥ 500W).
@@ -140,6 +179,31 @@ schlägt Override-Respekt) + Push ohne Quiet-Hours, max 1/h. Hintergrund:
 Phantom-Override.
 
 **Urlaub-Gate (v0.18.8):** Urlaubsmodus → kein EMHASS-/PV-Heizen, Stab aus.
+
+**v0.20.11 — zwei Befunde vom 19.09.2026.** Der Stab wurde acht Mal zwischen
+13:32 und 17:22 freigegeben und gesperrt, Periode 30 min (aus bei :22/:52, an
+bei :02/:32), während `sensor.p_deferrable0` durchgehend 1500 W meldete.
+
+- **„Kein Slot" galt als „Plan sagt aus".** EMHASS veröffentlicht den
+  Forward-Plan ab der *nächsten* Halbstunden-Grenze; der laufende Slot fehlt.
+  Live gemessen am 20.09. um 14:58:28: erster Eintrag 15:00:00.
+  `deferrable_slot_at()` lieferte None, der Off-Zähler lief, nach zwei Ticks
+  ging der Stab aus. Jetzt entscheidet `forecast.heizstab_plan_signal`
+  dreiwertig: Slot → publizierter Ist-Wert → `"unbekannt"`, und bei
+  `"unbekannt"` wird der Zustand **gehalten**. Der Forward-Plan ist eine
+  Vorhersage, `sensor.p_deferrable0` die Gegenwart.
+- **Bedarfs-Gate** (`forecast.heizstab_kann_wirken`): freigegeben wird nur, wenn
+  der Tank mindestens `UC4B_ELEMENT_HYSTERESE_C` (5 K) unter dem **E-Heiz-Ziel**
+  liegt (Reg 2003, `ENTITY_T300_BOOST_TEMP`). Nicht unter dem
+  Warmwasser-Sollwert — drei Messungen bei Ziel 59 °C: 56,9 → aus, 54,8 → aus,
+  53,8 → an (binnen 3 s, +2,5 K in 20 min). An beiden September-Tagen lag der
+  Tank *über* dem Sollwert; der Unterschied war allein der Abstand zum
+  E-Heiz-Ziel. Die erste Fassung verglich gegen den Sollwert und hätte den
+  wirksamen Lauf vom 20.09. unterdrückt. Gilt auch im Heuristik-Zweig.
+
+Dazu `UC4B_MIN_DWELL_MIN` (15 min) für die abwägenden Zweige — gemessen am
+eigenen letzten Write, nicht an `last_changed` (das setzt jeder Modbus-Aussetzer
+zurück). Failsafe, Tank-Limit, Urlaub und Legionellen gehen weiter sofort durch.
 
 **Legionellen-Aufheizung (v0.18.8, 65°C seit v0.18.11 — nur Urlaub):** Die
 neue Proxon-App hat die Geräte-Legionellenfunktion entfernt (dafür Boost-Ziel

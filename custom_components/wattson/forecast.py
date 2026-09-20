@@ -1232,6 +1232,91 @@ def deferrable_slot_at(
     return None
 
 
+def heizstab_plan_signal(
+    *,
+    slot_power_w: float | None,
+    published_now_w: float | None,
+    min_on_w: float,
+) -> str:
+    """Was sagt der EMHASS-Plan für *jetzt*: "on", "off" oder "unbekannt"?
+
+    `slot_power_w` ist der Slot des Forward-Plans, der `now` enthält — oder None,
+    wenn keiner ihn enthält. Genau das ist der Normalfall kurz vor jeder
+    Halbstunden-Grenze: EMHASS veröffentlicht den Plan ab der **nächsten**
+    Grenze, der laufende Slot fehlt (am 20.09.2026 um 14:58 war der erste
+    Eintrag 15:00). Bis v0.20.10 galt „kein Slot" als „Plan sagt aus", und der
+    Heizstab taktete im 30-Minuten-Rhythmus gegen einen Plan, der durchgehend
+    1500 W wollte.
+
+    `published_now_w` ist der von EMHASS für den aktuellen Slot publizierte Wert
+    (`sensor.p_deferrable0`) — die Gegenwart, während der Forward-Plan eine
+    Vorhersage ist. Fehlt der Slot, entscheidet er.
+
+    Fehlt beides, lautet die Antwort "unbekannt": der Aufrufer hält dann den
+    Zustand. Nichts zu wissen ist kein Grund abzuschalten.
+    """
+    if slot_power_w is not None:
+        return "on" if slot_power_w >= min_on_w else "off"
+    if published_now_w is not None:
+        return "on" if published_now_w >= min_on_w else "off"
+    return "unbekannt"
+
+
+def t300_speicherfenster(
+    *,
+    plan_signal: str,
+    tank_c: float,
+    storage_target_c: float,
+    expensive: bool,
+) -> bool:
+    """Soll der T300-Sollwert für ein geplantes Speicherfenster hoch?
+
+    Der Hebel für „günstige Energie in den Tank" ist der **Sollwert**, nicht die
+    Heizstab-Freigabe: der T300 heizt nur unter seinem Sollwert, und dann nimmt
+    er zuerst die Wärmepumpe (COP ≈ 3) und den Stab bloß als Nachhilfe. Am
+    19.09.2026 stand der Sollwert auf 52 °C bei 54,8 °C Tank — EMHASS plante
+    1500 W, Wattson gab den Stab acht Mal frei, und es floss nichts. Die
+    Freigabe allein ist kein Auftrag zu heizen.
+
+    Bedingungen, alle nötig:
+
+    * der EMHASS-Plan will jetzt heizen (`plan_signal == "on"`),
+    * der Strom ist nicht gerade teuer — Rückfalltür, falls der Plan aus einer
+      kaputten Optimierung kommt; netzdienlich vor eigenoptimiert,
+    * der Tank liegt unter dem Vorrats-Ziel, sonst schafft auch ein höherer
+      Sollwert keinen Bedarf. Genau daran scheiterte die erste Fassung dieses
+      Fixes: mit dem Billig-Ziel (55 °C) blieben bei 54,8 °C Tank 0,2 K Luft,
+      die die Bedarfs-Marge sofort wieder auffrisst. Vorrat braucht ein eigenes,
+      höheres Ziel (`T300_TEMP_SPEICHER`).
+    """
+    if plan_signal != "on" or expensive:
+        return False
+    return tank_c < storage_target_c
+
+
+def heizstab_kann_wirken(
+    *, tank_c: float, e_heiz_ziel_c: float | None, hysterese_c: float,
+) -> bool:
+    """Springt der Stab bei einer Freigabe überhaupt an?
+
+    Maßgeblich ist der Abstand zum **E-Heiz-Ziel** (Reg 2003), nicht der
+    Warmwasser-Sollwert. Gemessen bei Ziel 59 °C: 56,9 → aus, 54,8 → aus,
+    53,8 → an (binnen drei Sekunden, +2,5 K in 20 min). Am 19.09.2026 gab
+    Wattson acht Mal frei, während der Tank 4,2 K unter dem Ziel stand — der
+    Stab blieb aus, geheizt hat die Wärmepumpe (0,166 kWh in 2 h 08).
+
+    Die erste Fassung dieses Gates verglich gegen den Sollwert (52 °C) und
+    hätte damit den wirksamen Lauf vom 20.09. unterdrückt: der Tank lag mit
+    53,8 °C darüber.
+
+    Ohne bekanntes Ziel wird True geliefert — lieber eine wirkungslose Freigabe
+    als eine unterdrückte wirksame.
+    """
+    if e_heiz_ziel_c is None:
+        return True
+    return tank_c <= e_heiz_ziel_c - hysterese_c
+
+
 def next_deferrable_on_block(
     slots: list[DeferrableSlot], now: datetime, threshold_w: float,
 ) -> tuple[datetime, datetime] | None:

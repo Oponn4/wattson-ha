@@ -95,6 +95,7 @@ from .const import (
     ENTITY_SLEEP,
     ENTITY_T300_BOOST_TEMP,
     ENTITY_T300_HEIZSTAB,
+    ENTITY_T300_SETPOINT,
     ENTITY_T300_SOLL,
     ENTITY_T300_TANK,
     ENTITY_URLAUB_MODE,
@@ -134,9 +135,11 @@ from .const import (
     SOC_TARGET,
     SOC_WARNUNG,
     T300_TANK_MAX,
+    T300_TARGET_MAX_C,
     T300_TEMP_CHEAP,
     T300_TEMP_MIN,
     T300_TEMP_NORMAL,
+    T300_TEMP_SPEICHER,
     T300_TEMP_TEUER,
     TREND_MIN_SPAN_MINUTES,
     TREND_WINDOW_MINUTES,
@@ -145,6 +148,8 @@ from .const import (
     TRIP_MAX_EVENTS_EVALUATED,
     TRIP_REMINDER_TOLERANCE_EUR_PER_KWH,
     UC4B_CONFIRMATION_CYCLES,
+    UC4B_ELEMENT_HYSTERESE_C,
+    UC4B_MIN_DWELL_MIN,
     UC4B_REMINDER_COOLDOWN_MIN,
     UC6_DOWNSHIFT_CONFIRMATION_CYCLES,
     UC6_MODE_HOLD_MINUTES,
@@ -198,6 +203,8 @@ from .forecast import (
     event_key,
     foreign_plan_note,
     grid_charge_holds,
+    heizstab_kann_wirken,
+    heizstab_plan_signal,
     humidex,
     is_in_window,
     most_expensive_window,
@@ -210,6 +217,7 @@ from .forecast import (
     plugin_reminder_due,
     relevant_events,
     select_binding_trip,
+    t300_speicherfenster,
     upcoming_slots,
 )
 from .gmaps import GoogleMapsClient
@@ -250,6 +258,11 @@ class WattsonData:
     t300_tank_temp: float = 50.0
     t300_solltemperatur: float = 52.0
     t300_heizstab_on: bool = False
+    # v0.20.11: Sollwert, mit dem der T300 arbeitet, und ob daraus überhaupt
+    # Heizbedarf folgt. Ohne Bedarf ist die Heizstab-Freigabe zahnlos.
+    t300_setpoint: float = 52.0
+    t300_e_heiz_ziel: float | None = None
+    t300_demand: bool = True
 
     # evcc / Auto
     car_connected: bool = False
@@ -344,6 +357,7 @@ class WattsonData:
     emhass_p_batt_plan: float = 0.0          # W, EMHASS-Plan für jetzt
     emhass_p_deferrable0_plan: float = 0.0   # W, T300-Heizstab Plan (current slot)
     heizstab_schedule: list[DeferrableSlot] = field(default_factory=list)  # 24h Forward-Plan
+    heizstab_plan_signal: str = "unbekannt"  # "on" | "off" | "unbekannt" (v0.20.11)
     emhass_p_deferrable1_plan: float = 0.0   # W, Wallbox Plan
     wallbox_schedule: list[DeferrableSlot] = field(default_factory=list)  # 24h Forward-Plan
     emhass_available: bool = False           # ob EMHASS-Daten nutzbar
@@ -433,6 +447,8 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         # UC6 plan-aware: Downshift-Confirmation-Counter (v0.17.1)
         self._uc6_downshift_count: int = 0
         self._uc4b_last_reminder_utc: datetime | None = None
+        # v0.20.11: Zeitpunkt des letzten eigenen Heizstab-Writes (Verweildauer)
+        self._uc4b_last_switch_at: datetime | None = None
         # v0.18.8: Heizstab-Failsafe-Push-Cooldown + laufende Legionellen-Aufheizung
         self._heizstab_failsafe_notify_utc: datetime | None = None
         self._legionella_active: bool = False
@@ -466,9 +482,48 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             self._uc6_last_set_target = None
         _LOGGER.info("Coordinator state reset für UC %s nach Resume", uc_id)
 
+    #: Entities, auf die Wattson *schreibt*. Fehlt eine, ist der zugehörige UC
+    #: stumm wirkungslos — `_fval` liefert den Default, `_try_act` ruft einen
+    #: Service auf eine Entity, die es nicht gibt, und meldet trotzdem Erfolg.
+    #: Genau so stand der T300-Sollwert 14 Tage auf 52,0, während UC4a
+    #: „günstigste 2h → 55 °C" protokollierte (gefunden 20.09.2026).
+    CRITICAL_WRITE_ENTITIES: tuple[str, ...] = (
+        ENTITY_T300_SOLL,
+        ENTITY_T300_BOOST_TEMP,
+        ENTITY_T300_HEIZSTAB,
+        ENTITY_PROXON_COOL_ENABLE,
+        ENTITY_EVCC_MODE,
+        ENTITY_KLIMA_OFFICE,
+        ENTITY_KLIMA_SCHLAFZIMMER,
+    )
+
     async def async_setup(self) -> None:
         """Wird vom __init__ vor first_refresh aufgerufen."""
         await self._override.async_load()
+        self._warn_missing_entities()
+
+    def _warn_missing_entities(self) -> None:
+        """Schreib-Ziele prüfen, die es gar nicht gibt.
+
+        Kostet einen Log-Eintrag beim Start und hätte den UC4a-Ausfall am ersten
+        Tag sichtbar gemacht statt nach Monaten. Kein harter Abbruch: eine
+        Entity kann beim Start noch fehlen (Integration lädt später), und ein
+        stummer UC ist besser als ein Wattson, der gar nicht hochkommt.
+        """
+        fehlend = [
+            entity_id for entity_id in self.CRITICAL_WRITE_ENTITIES
+            if self.hass.states.get(entity_id) is None
+        ]
+        if fehlend:
+            _LOGGER.warning(
+                "Wattson: %d Schreib-Ziel(e) existieren nicht — die zugehörigen "
+                "UCs laufen wirkungslos: %s", len(fehlend), ", ".join(fehlend),
+            )
+        else:
+            _LOGGER.info(
+                "Wattson: alle %d Schreib-Ziele vorhanden",
+                len(self.CRITICAL_WRITE_ENTITIES),
+            )
 
     @property
     def dry_run(self) -> bool:
@@ -555,6 +610,12 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         if self._uc12_last_switch_at is None:
             return None
         return (now - self._uc12_last_switch_at).total_seconds() / 60
+
+    def _uc4b_dwell_minutes(self, now: datetime) -> float | None:
+        """Minuten seit Wattsons letztem Schalten des Heizstabs. None = unbekannt."""
+        if self._uc4b_last_switch_at is None:
+            return None
+        return (now - self._uc4b_last_switch_at).total_seconds() / 60
 
     def _attr(self, entity_id: str, attribute: str, default=None):
         state = self.hass.states.get(entity_id)
@@ -748,6 +809,12 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         s.t300_tank_temp       = self._fval(ENTITY_T300_TANK, 50.0)
         s.t300_solltemperatur  = self._fval(ENTITY_T300_SOLL, 52.0)
         s.t300_heizstab_on     = self._state(ENTITY_T300_HEIZSTAB) == "on"
+        s.t300_setpoint        = self._fval(ENTITY_T300_SETPOINT, s.t300_solltemperatur)
+        s.t300_e_heiz_ziel     = self._fval_or_none(ENTITY_T300_BOOST_TEMP)
+        s.t300_demand          = heizstab_kann_wirken(
+            tank_c=s.t300_tank_temp, e_heiz_ziel_c=s.t300_e_heiz_ziel,
+            hysterese_c=UC4B_ELEMENT_HYSTERESE_C,
+        )
         s.car_connected        = self._state(ENTITY_EVCC_CONNECTED) == "on"
         s.car_soc              = self._fval(ENTITY_EVCC_SOC)
         s.car_range            = self._ival(ENTITY_EVCC_RANGE)
@@ -781,6 +848,17 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         s.heizstab_schedule = parse_deferrable_schedule(
             self._attr(ENTITY_EMHASS_P_DEFERRABLE0, "deferrables_schedule", []),
             key="p_deferrable0",
+        )
+        # v0.20.11: Plan-Signal für *jetzt* an einer Stelle bestimmen — UC4a
+        # (Sollwert-Vorrat) und UC4b (Freigabe) müssen dieselbe Auskunft sehen.
+        s.heizstab_plan_signal = heizstab_plan_signal(
+            slot_power_w=(
+                slot.power
+                if (slot := deferrable_slot_at(s.heizstab_schedule, dt_util.now()))
+                else None
+            ),
+            published_now_w=s.emhass_p_deferrable0_plan,
+            min_on_w=EMHASS_DEFERRABLE_ON_MIN_W,
         )
         s.emhass_p_deferrable1_plan = self._fval(ENTITY_EMHASS_P_DEFERRABLE1, 0.0)
         # Wird weiter eingelesen (Diagnose, Dashboard), aber seit v0.19 NICHT
@@ -956,6 +1034,19 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         if s.t300_tank_temp < T300_TEMP_MIN:
             new_temp = T300_TEMP_NORMAL
             reason = f"Notfall (Tank {s.t300_tank_temp:.1f}°C<{T300_TEMP_MIN}°C)"
+        elif t300_speicherfenster(
+            plan_signal=s.heizstab_plan_signal,
+            tank_c=s.t300_tank_temp,
+            storage_target_c=T300_TEMP_SPEICHER,
+            expensive=s.price_level in UC12_EXPENSIVE_LEVELS,
+        ):
+            # v0.20.11: EMHASS will jetzt speichern — dann muss der Sollwert mit
+            # hoch, sonst hat der T300 keinen Bedarf und die Heizstab-Freigabe
+            # von UC4b läuft ins Leere (gemessen 19.09.2026: Sollwert 52 °C bei
+            # 54,8 °C Tank, acht Freigaben, 0 kWh Heizarbeit).
+            new_temp = T300_TEMP_SPEICHER
+            reason = (f"EMHASS-Speicherfenster → Vorrat {T300_TEMP_SPEICHER:.0f}°C "
+                      f"(Tank {s.t300_tank_temp:.1f}°C, Preis {s.price_level})")
         elif s.cheapest_2h_start and is_in_window(now, s.cheapest_2h_start, s.cheapest_2h_end):
             new_temp = T300_TEMP_CHEAP
             reason = (f"günstigste 2h "
@@ -981,13 +1072,24 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             new_temp = T300_TEMP_NORMAL
             reason = f"normal (Rank {s.price_ranking:.2f})"
 
+        # Verbrühungsschutz (v0.20.11): ohne Mischer ist die Tanktemperatur die
+        # Armaturentemperatur. Der Deckel steht am Ende der Kette, damit ihn
+        # kein neuer Zweig versehentlich umgeht.
+        if new_temp > T300_TARGET_MAX_C:
+            reason = (f"{reason} — gedeckelt auf {T300_TARGET_MAX_C:.0f}°C "
+                      f"(Runaway-Schutz, kein Mischer im Haus)")
+            new_temp = T300_TARGET_MAX_C
+
         s.t300_target = new_temp
         s.t300_reason = reason
         if abs(new_temp - s.t300_solltemperatur) >= 1.0:
             _LOGGER.info("T300: %.1f°C → %.1f°C (%s)", s.t300_solltemperatur, new_temp, reason)
             acted, act_desc = await self._try_act(
                 "uc4a", ENTITY_T300_SOLL, new_temp,
-                "input_number", "set_value",
+                # v0.20.11: `number`, nicht `input_number` — die T300-Entity ist
+                # eine Modbus-`number`. Mit der falschen Domain lief der Call ins
+                # Leere und UC4a meldete trotzdem Erfolg.
+                "number", "set_value",
                 {"entity_id": ENTITY_T300_SOLL, "value": new_temp},
             )
             if acted:
@@ -1295,6 +1397,9 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         # im Urlaub steht das Wasser. Fällig alle LEGIONELLA_INTERVAL_DAYS,
         # Start im günstigen Fenster (PV-Überschuss oder cheapest_4h), Ende
         # bei Zieltemperatur — spätestens kappt der Failsafe.
+        # v0.20.11: markiert die abwägenden Zweige (Plan/Heuristik). Nur sie
+        # unterliegen der Mindest-Verweildauer.
+        uc4b_soft = False
         legionella_run = False
         if s.urlaub_mode:
             last_raw = self._override.get_misc("legionella_last_done")
@@ -1324,7 +1429,10 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
                     await self._send_simple_notify(
                         "Legionellen-Aufheizung fertig",
                         f"Tank {s.t300_tank_temp:.1f}°C erreicht — Heizstab geht "
-                        f"aus. Nächster Lauf in {LEGIONELLA_INTERVAL_DAYS} Tagen "
+                        f"aus. ⚠️ Ohne Mischer kommt das so aus der Armatur: "
+                        f"bei {s.t300_tank_temp:.0f}°C verbrüht man sich in "
+                        f"Sekunden. Erst abkühlen lassen oder kalt vormischen. "
+                        f"Nächster Lauf in {LEGIONELLA_INTERVAL_DAYS} Tagen "
                         f"(solange Urlaubsmodus an).",
                         tag="wattson_legionella",
                     )
@@ -1365,11 +1473,32 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             uc4b_source = "Urlaubsmodus — Heizstab aus"
         elif s.emhass_available and s.heizstab_schedule:
             current_slot = deferrable_slot_at(s.heizstab_schedule, now)
-            plan_says_on = (
-                current_slot is not None
-                and current_slot.power >= EMHASS_DEFERRABLE_ON_MIN_W
-            )
-            if plan_says_on and tank_safe:
+            # v0.20.11: „kein Slot" ≠ „Plan sagt aus" — s. `heizstab_plan_signal`.
+            # Bestimmt wird das Signal im Lesepfad, damit UC4a dieselbe Auskunft
+            # bekommt.
+            signal = s.heizstab_plan_signal
+            plan_says_on = signal == "on"
+            uc4b_soft = True
+            if signal == "unbekannt":
+                # Zustand halten, kein Off-Signal zählen
+                self._uc4b_off_signal_count = 0
+                should_on = s.t300_heizstab_on
+                uc4b_source = "EMHASS-Plan deckt jetzt nicht ab — Zustand gehalten"
+            elif plan_says_on and tank_safe and not s.t300_demand:
+                # Freigabe wäre zahnlos: der T300 heizt nicht über seinen
+                # Sollwert hinaus, egal was die Freigabe sagt.
+                self._uc4b_off_signal_count = 0
+                should_on = False
+                ziel_txt = (
+                    f"{s.t300_e_heiz_ziel:.1f}°C"
+                    if s.t300_e_heiz_ziel is not None else "?"
+                )
+                uc4b_source = (
+                    f"Plan will heizen, aber der Stab spränge nicht an "
+                    f"(Tank {s.t300_tank_temp:.1f}°C, E-Heiz-Ziel {ziel_txt} "
+                    f"− {UC4B_ELEMENT_HYSTERESE_C:.0f}K)"
+                )
+            elif plan_says_on and tank_safe:
                 # Im On-Block — Counter reset, Block-Ende für Logging
                 self._uc4b_off_signal_count = 0
                 should_on = True
@@ -1383,6 +1512,7 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
                 )
             elif not tank_safe:
                 self._uc4b_off_signal_count = 0
+                uc4b_soft = False
                 should_on = False
                 uc4b_source = (
                     f"Tank-Limit ({s.t300_tank_temp:.1f}°C ≥ {T300_TANK_MAX}°C)"
@@ -1412,18 +1542,43 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         else:
             # Heuristik-Fallback (EMHASS nicht verfügbar / kein Schedule)
             self._uc4b_off_signal_count = 0
+            uc4b_soft = True
             should_on = (
                 s.pv_surplus >= PV_SURPLUS_ON
                 and s.battery_soc >= BATTERY_FULL
                 and tank_safe
+                and s.t300_demand
             )
             should_off = (
                 s.pv_surplus < PV_SURPLUS_OFF
                 or s.battery_soc < BATTERY_NOT_FULL
                 or not tank_safe
+                or not s.t300_demand
             )
+            bedarf_txt = "" if s.t300_demand else ", kein Bedarf"
             uc4b_source = (f"Heuristik (PV-Über {s.pv_surplus}W, "
-                           f"Bat {s.battery_soc}%, Tank {s.t300_tank_temp:.1f}°C)")
+                           f"Bat {s.battery_soc}%, Tank {s.t300_tank_temp:.1f}°C"
+                           f"{bedarf_txt})")
+
+        # Mindest-Verweildauer (v0.20.11): nur für die abwägenden Zweige. Der
+        # Failsafe, das Tank-Limit, Urlaub und der Legionellen-Lauf gehen sofort
+        # durch — sie schützen, sie optimieren nicht. Gemessen wird der eigene
+        # letzte Write, nicht `last_changed`: das setzt jeder Modbus-Aussetzer
+        # zurück (siehe UC12 v0.20.9).
+        dwell = self._uc4b_dwell_minutes(now)
+        if (
+            uc4b_soft
+            and should_on != s.t300_heizstab_on
+            and dwell is not None
+            and dwell < UC4B_MIN_DWELL_MIN
+        ):
+            uc4b_source = (
+                f"{uc4b_source} — gehalten: erst {dwell:.0f} von "
+                f"{UC4B_MIN_DWELL_MIN} min im Zustand"
+            )
+            should_on = s.t300_heizstab_on
+            should_off = not should_on
+
         heizstab_reason = ""
         if should_on and not s.t300_heizstab_on:
             heizstab_reason = f"Heizstab EIN — {uc4b_source}"
@@ -1435,6 +1590,7 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             )
             if acted:
                 actions.append(act_desc)
+                self._uc4b_last_switch_at = now
                 s.uc_status["uc4b"] = "aktiv"
                 if legionella_starting:
                     # Einschalten ging durch → Lauf gilt jetzt als aktiv
@@ -1454,6 +1610,7 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             )
             if acted:
                 actions.append(act_desc)
+                self._uc4b_last_switch_at = now
                 s.uc_status["uc4b"] = "aktiv"
             else:
                 _LOGGER.info("UC4b übersprungen: %s", act_desc)
