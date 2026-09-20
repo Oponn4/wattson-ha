@@ -70,11 +70,24 @@ class UCDefinition:
     default_enabled: bool = True
 
 
-def cooldown_until_next_midnight(now: datetime) -> datetime:
-    """Nächste Mitternacht, aber mindestens now+MIN_COOLDOWN."""
+def cooldown_until_next_midnight(
+    now: datetime, hold_until: datetime | None = None,
+) -> datetime:
+    """Nächste Mitternacht, aber mindestens now+MIN_COOLDOWN.
+
+    `hold_until` verlängert (v0.20.10): Mitternacht ist eine gute Grenze für
+    einen Schalterwert — am nächsten Tag ist der Anlass meist vorbei. Für einen
+    *Fahrplan* ist sie willkürlich: sein Wirkungszeitraum endet mit seiner
+    Zielzeit. Am 20.09.2026 lief der Cooldown eines von Hand gesetzten Plans
+    („100 % bis 10:45") um 00:00 ab, und um 00:01:08 überschrieb ihn der
+    Grundplan. Wer einen Eingriff mit Zielzeit macht, meint sie auch.
+    """
     midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
     minimum = now + timedelta(hours=MIN_COOLDOWN_HOURS)
-    return max(midnight, minimum)
+    latest = max(midnight, minimum)
+    if hold_until is not None and hold_until > latest:
+        return hold_until
+    return latest
 
 
 def values_equal(a: Any, b: Any, tolerance: float = FLOAT_TOLERANCE) -> bool:
@@ -345,13 +358,19 @@ class OverrideManager:
 
     async def async_record_override(
         self, uc_id: str, entity_id: str, observed_value: Any,
+        hold_until: datetime | None = None,
     ) -> OverrideRecord:
-        """User-Override erkannt → Cooldown setzen + persist."""
+        """User-Override erkannt → Cooldown setzen + persist.
+
+        `hold_until` (v0.20.10): trägt der überschriebene Wert eine eigene
+        Gültigkeit — bei UC2 die Zielzeit des Fahrplans —, endet der Cooldown
+        frühestens mit ihr.
+        """
         now = dt_util.now()
         rec = OverrideRecord(
             entity_id=entity_id,
             detected_at=now,
-            cooldown_until=cooldown_until_next_midnight(now),
+            cooldown_until=cooldown_until_next_midnight(now, hold_until),
             observed_value=observed_value,
         )
         self._overrides[uc_id] = rec

@@ -64,6 +64,8 @@ from .const import (
     ENTITY_EVCC_PLAN_SOC,
     ENTITY_EVCC_RANGE,
     ENTITY_EVCC_SOC,
+    ENTITY_EVCC_VEHICLE_PLAN_SOC,
+    ENTITY_EVCC_VEHICLE_PLAN_TIME,
     ENTITY_FRISCHLUFT,
     ENTITY_HT_OFFICE_HUMIDITY,
     ENTITY_HT_OFFICE_TEMP,
@@ -194,6 +196,7 @@ from .forecast import (
     decide_charge_mode,
     deferrable_slot_at,
     event_key,
+    foreign_plan_note,
     grid_charge_holds,
     humidex,
     is_in_window,
@@ -2876,6 +2879,21 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         s.uc_reason["uc2"] = s.trip_reason
         await self._store_plan(plan_key, trip, required_soc, departure)
 
+    def _evcc_plan(self) -> tuple[int, datetime | None]:
+        """Der in evcc hinterlegte Fahrplan: (Ziel-SOC, Zielzeit lokal)."""
+        plan_time = self._dtval(ENTITY_EVCC_VEHICLE_PLAN_TIME)
+        return (
+            self._ival(ENTITY_EVCC_VEHICLE_PLAN_SOC),
+            dt_util.as_local(plan_time) if plan_time else None,
+        )
+
+    def _foreign_plan(self) -> str | None:
+        """Beschreibung eines Plans in evcc, den Wattson nicht gesetzt hat."""
+        plan_soc, plan_time = self._evcc_plan()
+        return foreign_plan_note(
+            plan_soc=plan_soc, plan_time=plan_time, stored=self._stored_plan(),
+        )
+
     async def _trip_plan_blocked(self) -> str | None:
         """Grund, warum UC2 den Fahrplan gerade NICHT schreiben darf.
 
@@ -2883,7 +2901,14 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         weil geschrieben wird über die evcc-API statt über einen HA-Service.
         Erkennt insbesondere einen von Hand gelöschten Plan als User-Override
         (und einen nie angekommenen Write als Retry-Fall, kein Override).
+
+        Seit v0.20.10 steht davor die Frage, wem der Plan in evcc überhaupt
+        gehört. Der Override-Cooldown ist eine Frist, der fremde Plan ein
+        Zustand — und nur der Zustand endet, wenn der Plan endet.
         """
+        if (fremd := self._foreign_plan()) is not None:
+            return f"fremder Plan in evcc ({fremd})"
+
         if self._override.in_cooldown("uc2"):
             remaining = self._override.cooldown_remaining_minutes("uc2")
             return f"user-override ({remaining}min Rest)"
@@ -2894,7 +2919,12 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             user_touch_at=self._user_touch_at(ENTITY_EVCC_PLAN_SOC), uc_id="uc2",
         )
         if verdict == "override":
-            await self._override.async_record_override("uc2", ENTITY_EVCC_PLAN_SOC, current)
+            # Zielzeit des fremden Plans hält den Cooldown, falls sie über
+            # Mitternacht hinausreicht.
+            _, plan_time = self._evcc_plan()
+            await self._override.async_record_override(
+                "uc2", ENTITY_EVCC_PLAN_SOC, current, hold_until=plan_time,
+            )
             remaining = self._override.cooldown_remaining_minutes("uc2")
             return f"user-override neu erkannt ({remaining}min Rest)"
         if verdict == "failed_write":
