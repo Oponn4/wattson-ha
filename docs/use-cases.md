@@ -159,9 +159,15 @@ darüber und warnt seit v0.20.11 im Abschluss-Push davor.
 > `sensor.wattson_warmwasser_soll` „aktiv — günstigste 2h" zeigte. Dasselbe
 > galt für `ENTITY_T300_BOOST_TEMP`, also für den Legionellen-Boost-Swap.
 >
-> Seit v0.20.11 prüft `_warn_missing_entities()` beim Start alle Schreib-Ziele
+> Seit v0.20.11 prüft `_warn_missing_entities()` alle Schreib-Ziele
 > (`CRITICAL_WRITE_ENTITIES`) und protokolliert fehlende. Merksatz der Familie:
 > *ein laufender UC ist kein Beleg für einen wirksamen UC.*
+>
+> Die Prüfung läuft seit v0.20.13 im **ersten Tick nach dem Hochlauf**, nicht in
+> `async_setup`. Dort stand sie in v0.20.12 — und meldete beim ersten echten
+> Start am 22.09.2026 alle sieben Ziele als fehlend, obwohl jedes existierte:
+> proxon, evcc und die Klima-Integration legen ihre Entities später an. Ein
+> Wächter, der immer anschlägt, sagt nichts.
 
 ## UC4b — E-Heizstab plan-aware
 
