@@ -438,6 +438,8 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         # bremsen, nicht auf Fremdzustände reagieren. None = noch nie
         # geschaltet (auch nach Restart) → hält nichts auf.
         self._uc12_last_switch_at: datetime | None = None
+        # v0.20.13: Schreib-Ziel-Prüfung einmalig im ersten Tick nach dem Hochlauf
+        self._entities_checked: bool = False
         # v0.17.2 Trend-Tracker: Abluft-Samples (ts, °C) der letzten Stunde.
         # v0.17.3: wird nach Restart einmalig aus der Recorder-Historie geseedet.
         self._abluft_samples: deque[tuple[datetime, float]] = deque(maxlen=24)
@@ -500,20 +502,25 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
     async def async_setup(self) -> None:
         """Wird vom __init__ vor first_refresh aufgerufen."""
         await self._override.async_load()
-        self._warn_missing_entities()
 
     def _warn_missing_entities(self) -> None:
         """Schreib-Ziele prüfen, die es gar nicht gibt.
 
-        Kostet einen Log-Eintrag beim Start und hätte den UC4a-Ausfall am ersten
-        Tag sichtbar gemacht statt nach Monaten. Kein harter Abbruch: eine
-        Entity kann beim Start noch fehlen (Integration lädt später), und ein
-        stummer UC ist besser als ein Wattson, der gar nicht hochkommt.
+        Kostet einen Log-Eintrag und hätte den UC4a-Ausfall am ersten Tag
+        sichtbar gemacht statt nach Monaten. Kein harter Abbruch: ein stummer
+        UC ist besser als ein Wattson, der gar nicht hochkommt.
+
+        ⚠️ Läuft im **ersten Tick nach dem Hochlauf**, nicht in `async_setup`.
+        v0.20.12 prüfte dort — und meldete beim ersten echten Start am
+        22.09.2026 prompt alle sieben Ziele als fehlend, obwohl jedes existierte:
+        proxon, evcc und die Klima-Integration legen ihre Entities später an.
+        Ein Wächter, der immer anschlägt, sagt nichts.
         """
         fehlend = [
             entity_id for entity_id in self.CRITICAL_WRITE_ENTITIES
             if self.hass.states.get(entity_id) is None
         ]
+        self._entities_checked = True
         if fehlend:
             _LOGGER.warning(
                 "Wattson: %d Schreib-Ziel(e) existieren nicht — die zugehörigen "
@@ -976,6 +983,9 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             s.t300_tank_temp, s.t300_solltemperatur,
             s.car_soc, "an" if s.car_connected else "weg", s.evcc_mode,
         )
+
+        if self.hass.state is CoreState.running and not self._entities_checked:
+            self._warn_missing_entities()
 
         if self.hass.state is not CoreState.running:
             # Warmup: der erste Tick kommt aus async_config_entry_first_refresh

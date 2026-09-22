@@ -247,6 +247,21 @@ class TestSchreibZiele:
         assert "CRITICAL_WRITE_ENTITIES" in self.QUELLE
         assert "self._warn_missing_entities()" in self.QUELLE
 
+    def test_pruefung_laeuft_nicht_in_async_setup(self):
+        """v0.20.12 prüfte in `async_setup` — also bevor proxon, evcc und die
+        Klima-Integration ihre Entities anlegen. Beim ersten echten Start am
+        22.09.2026 meldete sie prompt alle sieben Ziele als fehlend, obwohl
+        jedes existierte. Ein Wächter, der immer anschlägt, sagt nichts."""
+        setup = self.QUELLE.split("async def async_setup")[1].split("def ")[0]
+        assert "_warn_missing_entities" not in setup
+
+    def test_pruefung_haengt_am_hochlauf_und_laeuft_einmal(self):
+        assert (
+            "if self.hass.state is CoreState.running and not self._entities_checked:"
+            in self.QUELLE
+        )
+        assert "self._entities_checked = True" in self.QUELLE
+
     def test_alle_schreib_ziele_sind_bekannte_konstanten(self):
         """Tippfehler in der Liste würde die Prüfung stumm entwerten."""
         block = self.QUELLE.split("CRITICAL_WRITE_ENTITIES")[1].split(")")[0]
