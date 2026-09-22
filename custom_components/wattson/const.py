@@ -436,6 +436,19 @@ SMART_SPREAD_THRESHOLD_EUR = 0.15   # spread >= 15ct → UC10 gewinnt vs UC12, s
 # nur den Ausstieg; der Einstieg bleibt bei PV_COOLING_MIN_W. Die Verweildauer
 # fängt ab, was das Band nicht fängt — ein Wolkenloch größer als 250 W.
 COOL_PV_HYSTERESE_W        = 250    # W — Totband am PV-Zweig
+# Ab welcher Abluft der PV-Zweig überhaupt *einschalten* darf, gemessen unter
+# dem Kühl-Trigger. 0,0 = erst ab dem Trigger, kein Vorkühlen (Christians
+# Entscheidung 22.09.2026).
+#
+# Vorher gab es diese Grenze nicht: der PV-Zweig feuerte überall zwischen
+# Off-Schwelle und Hitze-Schwelle. Am 22.09. um 10:28 schaltete Wattson deshalb
+# bei **23,1 °C** Abluft ein — die Off-Schwelle lag bei 23,0, der Trigger bei
+# 24,0. Christian schaltete um 11:38 von Hand aus: „war sinnlos an".
+#
+# Der Denkfehler: die Off-Schwelle ist die Grenze, unter der eine *laufende*
+# Kühlung endet, nicht die, ab der eine neue beginnen darf. Hysterese heißt
+# tiefer aussteigen als einsteigen — nicht tiefer einsteigen.
+COOL_PV_ENTRY_DELTA_C      = 0.0
 COOL_MIN_DWELL_MIN         = 20     # min — Mindestzeit im Schaltzustand (nur weiche Zweige)
 
 # UC12 v0.17.2 — B: Humidex-Korrektur (Schwüle), C: Trend-Korrektur.
