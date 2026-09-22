@@ -43,6 +43,7 @@ def entscheide(**over):
         "pv_surplus_w": 0,
         "pv_min_w": PV_MIN,
         "pv_band_w": PV_BAND,
+        "pv_entry_delta_c": const.COOL_PV_ENTRY_DELTA_C,
         "spread_eur": 0.20,
         "spread_threshold_eur": const.SMART_SPREAD_THRESHOLD_EUR,
         "in_cheapest_4h": False,
@@ -372,7 +373,10 @@ ABLUFT_VERLAUF = [
 TICK_MIN = 5.0
 
 
-def _replay(*, pv_band_w: int, min_dwell_min: float) -> tuple[int, list[float]]:
+def _replay(
+    *, pv_band_w: int, min_dwell_min: float,
+    pv_entry_delta_c: float = const.COOL_PV_ENTRY_DELTA_C,
+) -> tuple[int, list[float]]:
     """Verlauf durchspielen. Returns (Schaltvorgänge, Haltezeiten in min).
 
     Die erste Haltezeit zählt nicht mit — vor dem ersten Tick gibt es keine.
@@ -384,6 +388,7 @@ def _replay(*, pv_band_w: int, min_dwell_min: float) -> tuple[int, list[float]]:
     for pv, abluft in zip(PV_VERLAUF, ABLUFT_VERLAUF):
         d = entscheide(
             abluft_c=abluft, pv_surplus_w=pv, pv_band_w=pv_band_w,
+            pv_entry_delta_c=pv_entry_delta_c,
             cooling_on=cooling, heat_forced=heat_forced, pv_forced=pv_forced,
             dwell_min=dwell, min_dwell_min=min_dwell_min,
             price_level="very_cheap",
@@ -403,37 +408,93 @@ def _replay(*, pv_band_w: int, min_dwell_min: float) -> tuple[int, list[float]]:
 
 
 class TestVerlauf1909:
-    """Was der Fix am gemessenen Tag ausrichtet — und was nicht.
+    """Was die Fixes am gemessenen Tag ausrichten.
 
-    Er beseitigt die Schaltvorgänge nicht, er begrenzt ihre Rate. Der
-    PV-Überschuss war an dem Tag über 20 Minuten lang weg (721/840 W um 11:35,
-    unter 500 W ab 13:15) — dann ist Ausschalten die richtige Entscheidung und
-    kein Sägezahn. Was weg muss, ist der 5-Minuten-Takt.
+    Die Abluft lag im Sägezahn-Fenster zwischen 23,6 und 24,5 °C, der Trigger
+    bei 24,0. Seit v0.20.14 steigt der PV-Zweig erst am Trigger ein
+    (`COOL_PV_ENTRY_DELTA_C = 0`) — der halbe Tag fällt damit weg.
     """
 
+    #: Einstieg wie vor v0.20.14: überall oberhalb der Off-Schwelle.
+    ALT_EINSTIEG: ClassVar[float] = const.COOL_ABLUFT_HYSTERESE_C
+
     def test_alte_logik_saegt(self):
-        """Gegenprobe ohne Band und ohne Kappe — der gemessene Tag.
+        """Gegenprobe ohne Band, ohne Kappe, mit altem Einstieg — der Tag.
 
         Real waren es zehn Schaltvorgänge zwischen 10:46 und 14:02; der Nachbau
         rechnet mit 5-min-Mitteln statt Momentanwerten und kommt auf neun.
         """
-        wechsel, haltezeiten = _replay(pv_band_w=0, min_dwell_min=0.0)
+        wechsel, haltezeiten = _replay(
+            pv_band_w=0, min_dwell_min=0.0, pv_entry_delta_c=self.ALT_EINSTIEG,
+        )
         assert wechsel >= 8
         assert min(haltezeiten) == TICK_MIN, "ohne Kappe fehlt der Sägezahn"
 
     def test_kein_wechsel_schneller_als_die_kappe(self):
-        _, haltezeiten = _replay(pv_band_w=PV_BAND, min_dwell_min=DWELL)
+        _, haltezeiten = _replay(
+            pv_band_w=PV_BAND, min_dwell_min=DWELL,
+            pv_entry_delta_c=self.ALT_EINSTIEG,
+        )
         assert min(haltezeiten) >= DWELL
-
-    def test_weniger_wechsel_als_vorher(self):
-        neu, _ = _replay(pv_band_w=PV_BAND, min_dwell_min=DWELL)
-        alt, _ = _replay(pv_band_w=0, min_dwell_min=0.0)
-        assert neu < alt
 
     def test_band_allein_laesst_10_minuten_takte_zu(self):
         """Die Wolkenlöcher am 19.09. waren tiefer als 250 W — daher die Kappe."""
-        _, haltezeiten = _replay(pv_band_w=PV_BAND, min_dwell_min=0.0)
+        _, haltezeiten = _replay(
+            pv_band_w=PV_BAND, min_dwell_min=0.0,
+            pv_entry_delta_c=self.ALT_EINSTIEG,
+        )
         assert min(haltezeiten) < DWELL
+
+    def test_einstieg_am_trigger_halbiert_den_tag(self):
+        """Der eigentliche Fix. Christian zum selben Muster am 22.09.:
+        „war sinnlos an".
+
+        Statt neun Schaltvorgängen bleiben drei, und der erste kommt erst, als
+        die Abluft den Trigger wirklich erreicht — im Nachbau bei 24,0 °C
+        (12:55), vorher lag sie den ganzen Vormittag bei 23,6–23,9.
+        """
+        neu, _ = _replay(pv_band_w=PV_BAND, min_dwell_min=DWELL)
+        alt, _ = _replay(
+            pv_band_w=PV_BAND, min_dwell_min=DWELL,
+            pv_entry_delta_c=self.ALT_EINSTIEG,
+        )
+        assert neu < alt
+        assert neu <= 3
+
+    def test_kein_einschalten_unter_dem_trigger(self):
+        """Schärfer als die Zählung: *wann* zum ersten Mal eingeschaltet wird."""
+        cooling, pv_forced, dwell = False, False, 999.0
+        for pv, abluft in zip(PV_VERLAUF, ABLUFT_VERLAUF):
+            d = entscheide(
+                abluft_c=abluft, pv_surplus_w=pv, cooling_on=cooling,
+                pv_forced=pv_forced, dwell_min=dwell, price_level="very_cheap",
+            )
+            if d.cool and not cooling:
+                assert abluft >= TRIGGER, (
+                    f"eingeschaltet bei {abluft} °C, Trigger {TRIGGER} °C"
+                )
+            dwell = TICK_MIN if d.cool != cooling else dwell + TICK_MIN
+            cooling = d.cool
+            pv_forced = d.pv_forced and cooling
+
+    def test_der_22_09_faellt_ebenfalls_weg(self):
+        """10:28 Uhr: Abluft 23,1 °C, PV ~2000 W, Trigger 24,0."""
+        d = entscheide(abluft_c=23.1, pv_surplus_w=2000)
+        assert d.cool is False
+        assert d.kind == "aus"
+
+    def test_am_trigger_kuehlt_pv_weiterhin(self):
+        """Die Funktion bleibt erhalten — sie beginnt nur später."""
+        d = entscheide(abluft_c=TRIGGER, pv_surplus_w=2000)
+        assert d.cool is True
+        assert d.kind == "pv"
+
+    def test_laufende_pv_kuehlung_haelt_bis_zur_off_schwelle(self):
+        """Hysterese heißt tiefer aussteigen als einsteigen — nicht umgekehrt."""
+        d = entscheide(abluft_c=23.2, pv_surplus_w=2000,
+                       cooling_on=True, pv_forced=True)
+        assert d.cool is True
+        assert d.kind == "pv"
 
 
 # ── Abendverlauf 19.09.2026, 19:00–20:55 ──────────────────────────────────────

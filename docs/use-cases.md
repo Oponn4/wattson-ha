@@ -498,6 +498,22 @@ Mindest-Verweildauer. Die Kappe gilt nur für die weichen Zweige (PV, Preis,
 Hysterese); Urlaub, Schlaf, Unter-Off und Hitze gehen sofort durch — sie
 bedeuten Komfort oder Verschwendung, nicht Optimierung.
 
+**Einstieg erst am Trigger (v0.20.14).** Der PV-Zweig schaltet nur noch ein,
+wenn die Abluft `trigger_c − COOL_PV_ENTRY_DELTA_C` erreicht — und das Delta
+steht auf **0**, also am Trigger. Läuft die Kühlung bereits wegen PV
+(`pv_forced`), hält sie wie bisher bis zur Off-Schwelle.
+
+> [!warning] Der Anlass: 22.09.2026, 10:28 Uhr
+> Wattson schaltete die Kühlung bei **23,1 °C** Abluft ein — Off-Schwelle 23,0,
+> Trigger 24,0, PV-Überschuss ~2000 W. Christian schaltete um 11:38 von Hand
+> aus: „war sinnlos an."
+>
+> Der Denkfehler: die Off-Schwelle ist die Grenze, unter der eine *laufende*
+> Kühlung endet, nicht die, ab der eine neue beginnen darf. Hysterese heißt
+> tiefer aussteigen als einsteigen — nicht tiefer einsteigen. Im nachgestellten
+> Verlauf des 19.09. fallen damit sechs der neun Schaltvorgänge weg, und der
+> erste kommt erst, als die Abluft den Trigger wirklich erreicht.
+
 Das PV-Band hängt an `cool_pv_forced`, nicht am Schalter — dieselbe Trennung
 wie bei der Hitze. Sonst erbt eine aus `cheapest_4h` oder der Hysterese offene
 Freigabe den gesenkten Einstieg (1250 W), und ein Überschuss, der die 1500 W

@@ -36,6 +36,7 @@ from .const import (
     COOL_MIN_DWELL_MIN,
     COOL_OUTSIDE_REF_C,
     COOL_OUTSIDE_SLOPE,
+    COOL_PV_ENTRY_DELTA_C,
     COOL_PV_HYSTERESE_W,
     COOL_TREND_HEAT_DELTA,
     COOL_TREND_RISE_C_PER_H,
@@ -2291,6 +2292,7 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             pv_surplus_w=s.pv_surplus,
             pv_min_w=PV_COOLING_MIN_W,
             pv_band_w=COOL_PV_HYSTERESE_W,
+            pv_entry_delta_c=COOL_PV_ENTRY_DELTA_C,
             spread_eur=spread,
             spread_threshold_eur=SMART_SPREAD_THRESHOLD_EUR,
             in_cheapest_4h=bool(

@@ -632,6 +632,7 @@ def cool_decision(
     pv_surplus_w: int,
     pv_min_w: int,
     pv_band_w: int,
+    pv_entry_delta_c: float,
     spread_eur: float,
     spread_threshold_eur: float,
     in_cheapest_4h: bool,
@@ -743,7 +744,8 @@ def cool_decision(
         entscheidung = _cool_soft_decision(
             abluft_c=abluft_c, trigger_c=trigger_c, heat_c=heat_c,
             heat_limit_c=heat_limit_c, pv_surplus_w=pv_surplus_w,
-            pv_min_w=pv_min_w, pv_band_w=pv_band_w, spread_eur=spread_eur,
+            pv_min_w=pv_min_w, pv_band_w=pv_band_w,
+            pv_entry_delta_c=pv_entry_delta_c, spread_eur=spread_eur,
             spread_threshold_eur=spread_threshold_eur,
             in_cheapest_4h=in_cheapest_4h, expensive=expensive,
             price_level=price_level, pv_forced=pv_forced,
@@ -780,6 +782,7 @@ def _cool_soft_decision(
     pv_surplus_w: int,
     pv_min_w: int,
     pv_band_w: int,
+    pv_entry_delta_c: float,
     spread_eur: float,
     spread_threshold_eur: float,
     in_cheapest_4h: bool,
@@ -805,7 +808,12 @@ def _cool_soft_decision(
         value=pv_surplus_w, threshold=pv_min_w, band=pv_band_w,
         active=pv_forced, direction="above",
     )
-    if pv_frei:
+    # Einschalten erst ab `trigger_c - pv_entry_delta_c`; wer schon wegen PV
+    # läuft, läuft weiter bis zur Off-Schwelle. Ohne diese Grenze reichte ein
+    # Zehntel über der Off-Schwelle: am 22.09.2026 um 10:28 ging die Kühlung bei
+    # 23,1 °C an, während der Trigger bei 24,0 stand.
+    pv_temp_ok = pv_forced or abluft_c >= trigger_c - pv_entry_delta_c
+    if pv_frei and pv_temp_ok:
         pv_txt = f"PV-Überschuss {pv_surplus_w}W ≥ {pv_limit_w}W"
         if pv_limit_w < pv_min_w:
             pv_txt += f" (Totband, Schwelle {pv_min_w}W)"
