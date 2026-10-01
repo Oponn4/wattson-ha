@@ -8,9 +8,6 @@ from homeassistant.helpers import selector
 
 from .const import (
     CONF_AUTO_CALENDARS,
-    CONF_E3DC_PASSWORD,
-    CONF_E3DC_URL,
-    CONF_E3DC_USER,
     CONF_EVCC_URL,
     CONF_EVCC_VEHICLE_NAME,
     CONF_EVENT_LOOKAHEAD,
@@ -21,9 +18,6 @@ from .const import (
     CONF_VEHICLE_CAPACITY,
     CONF_VEHICLE_CONSUMPTION,
     DEFAULT_AUTO_CALENDARS,
-    DEFAULT_E3DC_PASSWORD,
-    DEFAULT_E3DC_URL,
-    DEFAULT_E3DC_USER,
     DEFAULT_EVCC_URL,
     DEFAULT_EVCC_VEHICLE_NAME,
     DEFAULT_EVENT_LOOKAHEAD,
@@ -84,18 +78,6 @@ def _schema(defaults: dict) -> probatio.Schema:
             CONF_EVENT_LOOKAHEAD,
             default=defaults.get(CONF_EVENT_LOOKAHEAD, DEFAULT_EVENT_LOOKAHEAD),
         ): probatio.All(int, probatio.Range(min=1, max=168)),
-        probatio.Optional(
-            CONF_E3DC_URL,
-            default=defaults.get(CONF_E3DC_URL, DEFAULT_E3DC_URL),
-        ): str,
-        probatio.Optional(
-            CONF_E3DC_USER,
-            default=defaults.get(CONF_E3DC_USER, DEFAULT_E3DC_USER),
-        ): str,
-        probatio.Optional(
-            probatio.Secret(CONF_E3DC_PASSWORD),
-            default=defaults.get(CONF_E3DC_PASSWORD, DEFAULT_E3DC_PASSWORD),
-        ): str,
     })
 
 
