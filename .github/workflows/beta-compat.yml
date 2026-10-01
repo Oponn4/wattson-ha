@@ -24,9 +24,33 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Python-Version NICHT festnageln. Ein Pin altert: HA 2026.9 verlangt
+      # 3.14, mit dem alten 3.13-Pin fiel der Resolver stillschweigend auf
+      # 2026.2.3 zurück und der Job prüfte eine Version ohne `probatio`.
+      # Stattdessen fragen wir HA selbst, welches Python es braucht.
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
+          python-version: "3.x"
+
+      - name: Von HA gefordertes Python ermitteln
+        id: pyver
+        run: |
+          python - <<'EOF' >> "$GITHUB_OUTPUT"
+          import json, re, urllib.request
+          daten = json.load(urllib.request.urlopen(
+              "https://pypi.org/pypi/homeassistant/json", timeout=30))
+          # requires_python sieht aus wie ">=3.14.0" — die Untergrenze reicht uns.
+          spec = daten["info"].get("requires_python") or ""
+          treffer = re.search(r"(\d+)\.(\d+)", spec)
+          version = f"{treffer.group(1)}.{treffer.group(2)}" if treffer else "3.x"
+          print(f"python={version}")
+          print(f"ha_latest={daten['info']['version']}")
+          EOF
+          cat "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "${{ steps.pyver.outputs.python }}"
 
       - name: Install HA (${{ matrix.channel }})
         run: |
@@ -35,7 +59,46 @@ jobs:
           if [ "${{ matrix.channel }}" = "beta" ]; then
             PRE="--prerelease=allow"
           fi
-          uv pip install --system $PRE homeassistant
+          # `packaging` explizit: der Versionsvergleich unten soll nicht davon
+          # abhängen, dass HA es zufällig mitzieht.
+          uv pip install --system $PRE homeassistant packaging
+
+      # Nicht hoffen, dass die richtige Version kam, sondern es behaupten.
+      # Fällt der Resolver je wieder zurück (zu altes Python, ein Pin), bricht
+      # der Job hier mit Klartext, statt grün gegen eine Uraltversion zu laufen.
+      - name: Aufgelöste HA-Version absichern
+        env:
+          CHANNEL: ${{ matrix.channel }}
+          HA_LATEST: ${{ steps.pyver.outputs.ha_latest }}
+        run: |
+          python - <<'EOF'
+          import json, os, sys
+          from packaging.version import Version
+          from homeassistant.const import __version__ as aufgeloest
+
+          minimum = json.load(open("hacs.json"))["homeassistant"]
+          neueste = os.environ["HA_LATEST"]
+          kanal = os.environ["CHANNEL"]
+          print(f"aufgelöst={aufgeloest}  hacs.json-Minimum={minimum}  neueste stabile={neueste}")
+
+          fehler = []
+          if Version(aufgeloest) < Version(minimum):
+              fehler.append(
+                  f"getestet wird HA {aufgeloest}, hacs.json verlangt aber mindestens "
+                  f"{minimum} — der Job prüft eine Version, die Nutzer nie bekommen"
+              )
+          if kanal == "stable" and Version(aufgeloest) < Version(neueste):
+              fehler.append(
+                  f"stable hätte {neueste} sein müssen, aufgelöst wurde {aufgeloest} — "
+                  f"der Resolver ist zurückgefallen (meist eine zu alte Python-Version)"
+              )
+          if fehler:
+              print("FEHLER:")
+              for f in fehler:
+                  print("  -", f)
+              sys.exit(1)
+          print("Zielversion bestätigt")
+          EOF
 
       - name: Import smoke test
         env:

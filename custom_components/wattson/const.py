@@ -390,15 +390,6 @@ UNIQUE_ID_MIGRATION_V2 = {
     "next_trip":     "naechste_fahrt",
 }
 
-# ── UC10 — E3DC Batterie-Discharge-Sperre in günstigen Stunden ──
-CONF_E3DC_URL      = "e3dc_url"
-CONF_E3DC_USER     = "e3dc_user"
-CONF_E3DC_PASSWORD = "e3dc_password"
-
-DEFAULT_E3DC_URL      = "http://10.42.2.5:8080"
-DEFAULT_E3DC_USER     = "admin"
-DEFAULT_E3DC_PASSWORD = "admin"
-
 # Wirtschaftlichkeit
 EEG_VERGUETUNG_EUR_KWH = 0.111  # Einspeisevergütung am Haus BGW29
 MIN_SPREAD_EUR         = 0.07   # cheapest_4h vs expensive_4h muss >= 7ct sein damit UC10 lohnt

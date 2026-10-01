@@ -110,7 +110,20 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     return True
 
 
+# Bis v0.20.14 im Config-Flow, aber ungenutzt (E3DC läuft seit v0.18.3 über e3dc_rscp).
+_LEGACY_E3DC_KEYS = ("e3dc_url", "e3dc_user", "e3dc_password")
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    # Altlast entfernen, damit das gespeicherte E3DC-Passwort nicht liegen bleibt.
+    # Vor dem Update-Listener, löst also keinen Reload aus.
+    if any(k in entry.data or k in entry.options for k in _LEGACY_E3DC_KEYS):
+        hass.config_entries.async_update_entry(
+            entry,
+            data={k: v for k, v in entry.data.items() if k not in _LEGACY_E3DC_KEYS},
+            options={k: v for k, v in entry.options.items() if k not in _LEGACY_E3DC_KEYS},
+        )
+
     dry_run = _opt(entry, "dry_run", True)
 
     gmaps_key = _opt(entry, CONF_GMAPS_KEY, "")

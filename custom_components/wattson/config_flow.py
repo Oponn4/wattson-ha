@@ -1,16 +1,13 @@
 """Config Flow für Wattson."""
 from __future__ import annotations
 
-import voluptuous as vol
+import probatio
 from homeassistant import config_entries
 from homeassistant.core import callback
 from homeassistant.helpers import selector
 
 from .const import (
     CONF_AUTO_CALENDARS,
-    CONF_E3DC_PASSWORD,
-    CONF_E3DC_URL,
-    CONF_E3DC_USER,
     CONF_EVCC_URL,
     CONF_EVCC_VEHICLE_NAME,
     CONF_EVENT_LOOKAHEAD,
@@ -21,9 +18,6 @@ from .const import (
     CONF_VEHICLE_CAPACITY,
     CONF_VEHICLE_CONSUMPTION,
     DEFAULT_AUTO_CALENDARS,
-    DEFAULT_E3DC_PASSWORD,
-    DEFAULT_E3DC_URL,
-    DEFAULT_E3DC_USER,
     DEFAULT_EVCC_URL,
     DEFAULT_EVCC_VEHICLE_NAME,
     DEFAULT_EVENT_LOOKAHEAD,
@@ -36,66 +30,54 @@ from .const import (
 )
 
 
-def _schema(defaults: dict) -> vol.Schema:
-    return vol.Schema({
-        vol.Required("dry_run", default=defaults.get("dry_run", True)): bool,
-        vol.Optional(
-            CONF_GMAPS_KEY,
+def _schema(defaults: dict) -> probatio.Schema:
+    return probatio.Schema({
+        probatio.Required("dry_run", default=defaults.get("dry_run", True)): bool,
+        probatio.Optional(
+            probatio.Secret(CONF_GMAPS_KEY),
             default=defaults.get(CONF_GMAPS_KEY, ""),
         ): str,
-        vol.Optional(
+        probatio.Optional(
             CONF_HOME_ADDRESS,
             default=defaults.get(CONF_HOME_ADDRESS, DEFAULT_HOME_ADDRESS),
         ): str,
-        vol.Optional(
+        probatio.Optional(
             CONF_AUTO_CALENDARS,
             default=defaults.get(CONF_AUTO_CALENDARS, DEFAULT_AUTO_CALENDARS),
         ): selector.EntitySelector(
             selector.EntitySelectorConfig(domain="calendar", multiple=True),
         ),
         # Mehrfachauswahl: weitere Empfänger (z.B. Sonja) ohne Code-Änderung
-        vol.Optional(
+        probatio.Optional(
             CONF_NOTIFY_SERVICES,
             default=defaults.get(CONF_NOTIFY_SERVICES, DEFAULT_NOTIFY_SERVICES),
         ): selector.EntitySelector(
             selector.EntitySelectorConfig(domain="notify", multiple=True),
         ),
-        vol.Optional(
+        probatio.Optional(
             CONF_EVCC_URL,
             default=defaults.get(CONF_EVCC_URL, DEFAULT_EVCC_URL),
         ): str,
-        vol.Optional(
+        probatio.Optional(
             CONF_EVCC_VEHICLE_NAME,
             default=defaults.get(CONF_EVCC_VEHICLE_NAME, DEFAULT_EVCC_VEHICLE_NAME),
         ): str,
-        vol.Optional(
+        probatio.Optional(
             CONF_VEHICLE_CONSUMPTION,
             default=defaults.get(CONF_VEHICLE_CONSUMPTION, DEFAULT_VEHICLE_CONSUMPTION),
-        ): vol.Coerce(float),
-        vol.Optional(
+        ): probatio.Coerce(float),
+        probatio.Optional(
             CONF_VEHICLE_CAPACITY,
             default=defaults.get(CONF_VEHICLE_CAPACITY, DEFAULT_VEHICLE_CAPACITY),
-        ): vol.Coerce(float),
-        vol.Optional(
+        ): probatio.Coerce(float),
+        probatio.Optional(
             CONF_SAFETY_MARGIN,
             default=defaults.get(CONF_SAFETY_MARGIN, DEFAULT_SAFETY_MARGIN),
-        ): vol.All(int, vol.Range(min=0, max=100)),
-        vol.Optional(
+        ): probatio.All(int, probatio.Range(min=0, max=100)),
+        probatio.Optional(
             CONF_EVENT_LOOKAHEAD,
             default=defaults.get(CONF_EVENT_LOOKAHEAD, DEFAULT_EVENT_LOOKAHEAD),
-        ): vol.All(int, vol.Range(min=1, max=168)),
-        vol.Optional(
-            CONF_E3DC_URL,
-            default=defaults.get(CONF_E3DC_URL, DEFAULT_E3DC_URL),
-        ): str,
-        vol.Optional(
-            CONF_E3DC_USER,
-            default=defaults.get(CONF_E3DC_USER, DEFAULT_E3DC_USER),
-        ): str,
-        vol.Optional(
-            CONF_E3DC_PASSWORD,
-            default=defaults.get(CONF_E3DC_PASSWORD, DEFAULT_E3DC_PASSWORD),
-        ): str,
+        ): probatio.All(int, probatio.Range(min=1, max=168)),
     })
 
 
