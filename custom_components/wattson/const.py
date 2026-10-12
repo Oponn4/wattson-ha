@@ -68,6 +68,7 @@ CHEAP_LEVELS = ("very_cheap", "cheap")
 
 # HA Entity IDs
 ENTITY_PROXON_ABLUFT      = "sensor.proxon_fwt_temperatur_t07_abluft"
+ENTITY_PROXON_ZULUFT      = "sensor.proxon_fwt_temperatur_t01_zuluft"
 ENTITY_PROXON_COOL_ENABLE = "switch.proxon_fwt_kuhlung"
 ENTITY_COOL_SNOOZE        = "input_datetime.wattson_kuhlung_snooze_bis" # UC12 Reminder-Snooze (von Action-Automation gesetzt)
 
@@ -443,6 +444,14 @@ COOL_PV_HYSTERESE_W        = 250    # W — Totband am PV-Zweig
 # tiefer aussteigen als einsteigen — nicht tiefer einsteigen.
 COOL_PV_ENTRY_DELTA_C      = 0.0
 COOL_MIN_DWELL_MIN         = 20     # min — Mindestzeit im Schaltzustand (nur weiche Zweige)
+
+# UC12 v0.20.17 — Heizbetrieb und Messausreißer. Am 11.10. (21:01) und 12.10.
+# (09:12) wollte UC12 bei 4 °C draußen kühlen: die FWT heizte mit 50 °C Zuluft,
+# ein ~10-min-Zyklus der Wärmepumpe (Kompressor 4000 → 5400 U/min, Zuluft
+# 50 → 34 °C) trieb den Abluftfühler von 24,0 auf 26,2 °C, die Räume blieben
+# bei 21–23,6 °C. Der Hitze-Zweig bricht die Expensive-Sperre und schaltete ein.
+COOL_HEIZBETRIEB_DELTA_K   = 5.0    # K — Zuluft so viel wärmer als Abluft = Anlage heizt
+COOL_HEAT_MIN_DAUER_MIN    = 20     # min — so lange muss die Hitze anliegen, bevor sie zählt
 
 # UC12 v0.17.2 — B: Humidex-Korrektur (Schwüle), C: Trend-Korrektur.
 # Beide korrigieren die v0.17-Schwellen nach unten: bei Schwüle fühlt sich
