@@ -239,11 +239,17 @@ class OverrideManager:
 
     async def async_record_action(
         self, uc_id: str, entity_id: str, value: Any, prev_value: Any = None,
+        confirmed: bool = False,
     ) -> None:
-        """Wattson hat (real, kein dry-run) entity_id auf value gesetzt."""
+        """Wattson hat (real, kein dry-run) entity_id auf value gesetzt.
+
+        `confirmed=True`, wenn der Zielwert schon beim Schreiben zurückgelesen
+        wurde (`_try_act` seit v0.20.16). Eine spätere Abweichung ist dann
+        immer ein fremder Eingriff, nie ein verlorener Write.
+        """
         self._actions[entity_id] = ActionRecord(
             value=value, set_at=dt_util.now(), uc_id=uc_id,
-            prev_value=prev_value, confirmed=False,
+            prev_value=prev_value, confirmed=confirmed,
         )
         await self._async_persist()
 
