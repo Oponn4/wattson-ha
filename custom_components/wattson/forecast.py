@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, tzinfo
 
 from .const import ALL_DAY_DEPARTURE_HOUR, TRIP_ARRIVAL_RESERVE_SOC
@@ -593,6 +593,53 @@ def heat_active(
     )
 
 
+def anlage_heizt(
+    *,
+    zuluft_c: float | None,
+    abluft_c: float,
+    frischluft_c: float | None,
+    delta_k: float,
+) -> bool:
+    """Heizt die FWT gerade? Dann ist jede Kühlung falsch (v0.20.17).
+
+    Zwei Bedingungen, beide nötig:
+
+    * Zuluft mindestens `delta_k` wärmer als Abluft — die Anlage bläst Wärme
+      ins Haus. Am 12.10.2026 waren es 50 °C Zuluft gegen 24 °C Abluft, und
+      selbst im Wärmepumpen-Zyklus (Zuluft kurz auf 34 °C) noch 8 K.
+    * Draußen kälter als drinnen. Damit kann ein heißer Sommertag nie als
+      Heizbetrieb gelten, auch wenn die Zuluft dann wärmer ist als die Abluft:
+      dort entscheidet weiter die Hitze.
+
+    Fehlt ein Fühler, gilt die Anlage als nicht heizend — die Sperre greift
+    nur auf Grund von Messwerten, nie auf Verdacht.
+    """
+    if zuluft_c is None or frischluft_c is None:
+        return False
+    return zuluft_c - abluft_c >= delta_k and frischluft_c < abluft_c
+
+
+def hitze_uhr(
+    *,
+    seit: datetime | None,
+    abluft_c: float,
+    heat_c: float,
+    now: datetime,
+) -> tuple[datetime | None, float]:
+    """Wie lange liegt die Abluft schon ununterbrochen auf/über `heat_c`?
+
+    Gemessen von Tick zu Tick: der erste Tick über der Schwelle startet die
+    Uhr, der erste darunter setzt sie zurück. Ein Ausreißer zwischen zwei Ticks
+    zählt gar nicht, einer über einen Tick hinweg 0 Minuten.
+    Returns (neues `seit`, Dauer in Minuten).
+    """
+    if abluft_c < heat_c:
+        return None, 0.0
+    if seit is None:
+        seit = now
+    return seit, (now - seit).total_seconds() / 60
+
+
 #: Zweige, die nur Energie/Preis *optimieren*. Sie dürfen den Schalter nicht im
 #: Tick-Takt umlegen, deshalb greift bei ihnen die Mindest-Verweildauer.
 #:
@@ -646,6 +693,11 @@ def cool_decision(
     dwell_min: float | None,
     min_dwell_min: float,
     schwellen_info: str = "",
+    zuluft_c: float | None = None,
+    frischluft_c: float | None = None,
+    heizbetrieb_delta_k: float = 5.0,
+    hitze_dauer_min: float | None = None,
+    hitze_min_dauer_min: float = 0.0,
 ) -> CoolDecision:
     """UC12: soll die Kühl-Freigabe offen sein?
 
@@ -673,6 +725,17 @@ def cool_decision(
     `dwell_min = None` heißt "Alter unbekannt" (Neustart, Entity fehlt) und
     hält nichts auf: eine falsche Entscheidung sofort ist besser als eine
     falsche Entscheidung 20 Minuten lang.
+
+    Seit v0.20.17, aus dem 11. und 12.10.2026 (siehe `anlage_heizt`):
+
+    * Heizt die Anlage, wird nicht gekühlt — vor jedem anderen Zweig außer
+      Urlaub, denn auch der Hitze-Zweig darf das nicht brechen.
+    * Hitze zählt erst, wenn die Abluft seit `hitze_min_dauer_min` über der
+      Schwelle liegt (`hitze_dauer_min`, vom Aufrufer gemessen). Ein
+      10-Minuten-Ausreißer reicht nicht mehr. Läuft die Kühlung schon wegen
+      Hitze (`heat_forced`), gilt das Totband wie bisher ohne erneute Wartezeit.
+      Die Trend-Korrektur bleibt: sie senkt die Schwelle, aber die Dauer muss
+      trotzdem erreicht werden.
     """
     # Hitze-Totband: Einstieg an der nackten Schwelle, Ausstieg erst
     # `hysteresis_c` darunter — aber nur, wenn die Hitze auch der Grund war.
@@ -686,13 +749,21 @@ def cool_decision(
     # bei Trigger 24.0 vollständig aufgehoben.
     hysteresis_eff = min(hysteresis_c, max(0.0, heat_c - (trigger_c + 0.5)))
     heat_limit_c = heat_c - hysteresis_eff if heat_forced else heat_c
-    hitze = heat_active(
+    ueber_schwelle = heat_active(
         abluft_c=abluft_c, heat_c=heat_c, hysteresis_c=hysteresis_eff,
         heat_forced=heat_forced,
     )
+    lange_genug = heat_forced or (
+        (hitze_dauer_min or 0.0) >= hitze_min_dauer_min
+    )
+    hitze = ueber_schwelle and lange_genug
     hitze_txt = f"Hitze {abluft_c:.1f}°C ≥ {heat_limit_c:.1f}°C"
     if heat_limit_c < heat_c:
         hitze_txt += f" (Totband, Schwelle {heat_c:.1f}°C)"
+    heizt = anlage_heizt(
+        zuluft_c=zuluft_c, abluft_c=abluft_c, frischluft_c=frischluft_c,
+        delta_k=heizbetrieb_delta_k,
+    )
 
     if urlaub:
         # niemand zu Hause — leeres Haus kühlen ist Verschwendung, auch bei Hitze
@@ -701,6 +772,38 @@ def cool_decision(
             reason=f"Urlaubsmodus → aus (Abluft {abluft_c:.1f}°C)",
             kind="urlaub", heat_forced=False, pv_forced=False,
             heat_limit_c=heat_limit_c,
+        )
+    elif heizt:
+        entscheidung = CoolDecision(
+            cool=False,
+            reason=(
+                f"Anlage heizt (Zuluft {zuluft_c:.1f}°C, Abluft {abluft_c:.1f}°C, "
+                f"draußen {frischluft_c:.1f}°C) → keine Kühlung"
+            ),
+            kind="heizbetrieb", heat_forced=False, pv_forced=False,
+            heat_limit_c=heat_limit_c,
+        )
+    elif ueber_schwelle and not lange_genug and not sleep:
+        # Über der Schwelle, aber noch zu kurz: wie „unter Hitze" weiter
+        # entscheiden, nur mit Hinweis — sonst sähe der Status aus, als hätte
+        # UC12 die Abluft übersehen.
+        entscheidung = _cool_soft_decision(
+            abluft_c=abluft_c, trigger_c=trigger_c, heat_c=heat_c,
+            heat_limit_c=heat_limit_c, pv_surplus_w=pv_surplus_w,
+            pv_min_w=pv_min_w, pv_band_w=pv_band_w,
+            pv_entry_delta_c=pv_entry_delta_c, spread_eur=spread_eur,
+            spread_threshold_eur=spread_threshold_eur,
+            in_cheapest_4h=in_cheapest_4h, expensive=expensive,
+            price_level=price_level, pv_forced=pv_forced,
+            cooling_on=cooling_on, schwellen_info=schwellen_info,
+        )
+        entscheidung = replace(
+            entscheidung,
+            reason=(
+                f"{entscheidung.reason} — {hitze_txt} erst seit "
+                f"{hitze_dauer_min or 0.0:.0f} von {hitze_min_dauer_min:.0f} min, "
+                f"zählt noch nicht"
+            ),
         )
     elif hitze and sleep:
         # Force-Hitze bricht den Schlafmodus nicht: aktive Kühlung treibt die

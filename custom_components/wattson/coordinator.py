@@ -32,6 +32,8 @@ from .const import (
     COOL_ABLUFT_TRIGGER_C,
     COOL_HEAT_MAX_C,
     COOL_HEAT_MIN_C,
+    COOL_HEAT_MIN_DAUER_MIN,
+    COOL_HEIZBETRIEB_DELTA_K,
     COOL_HUMIDEX_RH_PCT,
     COOL_HUMIDEX_TRIGGER_DELTA,
     COOL_MIN_DWELL_MIN,
@@ -85,6 +87,7 @@ from .const import (
     ENTITY_PROXON_CLIMATE_OFFICE,
     ENTITY_PROXON_CLIMATE_SCHLAFZIMMER,
     ENTITY_PROXON_COOL_ENABLE,
+    ENTITY_PROXON_ZULUFT,
     ENTITY_PV_FC_HOUR,
     ENTITY_PV_FC_NEXT_HOUR,
     ENTITY_PV_FC_NOW,
@@ -208,6 +211,7 @@ from .forecast import (
     grid_charge_holds,
     heizstab_kann_wirken,
     heizstab_plan_signal,
+    hitze_uhr,
     humidex,
     is_in_window,
     most_expensive_window,
@@ -341,6 +345,7 @@ class WattsonData:
     # UC12 — Kühlung
     cooling_active: bool = False    # ob UC12 die Freigabe gerade gegeben hat
     abluft_temp: float = 0.0
+    zuluft_temp: float | None = None  # v0.20.17 Heizbetrieb-Erkennung (UC12)
     abluft_trend_c_per_h: float | None = None  # v0.17.2 Trend-Tracker (None = zu wenig Samples)
     humidity_proxy_pct: float = 50.0           # OG max(HT-Office, HT-Schlaf) oder TP357-Fallback (UC12 B)
     ht_office_temp: float | None = None        # v0.18: Shelly BLU H&T Office
@@ -442,6 +447,8 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         # bremsen, nicht auf Fremdzustände reagieren. None = noch nie
         # geschaltet (auch nach Restart) → hält nichts auf.
         self._uc12_last_switch_at: datetime | None = None
+        # v0.20.17: seit wann die Abluft ununterbrochen über der Hitze-Schwelle liegt
+        self._uc12_hitze_seit: datetime | None = None
         # v0.20.13: Schreib-Ziel-Prüfung einmalig im ersten Tick nach dem Hochlauf
         self._entities_checked: bool = False
         # v0.17.2 Trend-Tracker: Abluft-Samples (ts, °C) der letzten Stunde.
@@ -621,6 +628,18 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         if self._uc12_last_switch_at is None:
             return None
         return (now - self._uc12_last_switch_at).total_seconds() / 60
+
+    def _uc12_hitze_dauer_minutes(
+        self, abluft_c: float, heat_c: float, now: datetime,
+    ) -> float:
+        """Minuten über der Hitze-Schwelle (siehe `forecast.hitze_uhr`).
+
+        Nach einem Neustart beginnt die Messung neu.
+        """
+        self._uc12_hitze_seit, dauer = hitze_uhr(
+            seit=self._uc12_hitze_seit, abluft_c=abluft_c, heat_c=heat_c, now=now,
+        )
+        return dauer
 
     def _uc4b_dwell_minutes(self, now: datetime) -> float | None:
         """Minuten seit Wattsons letztem Schalten des Heizstabs. None = unbekannt."""
@@ -862,6 +881,7 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         s.cool_heat_forced     = self._prev.cool_heat_forced
         s.cool_pv_forced       = self._prev.cool_pv_forced
         s.abluft_temp          = self._fval(ENTITY_PROXON_ABLUFT, 22.0)
+        s.zuluft_temp          = self._fval_or_none(ENTITY_PROXON_ZULUFT)
         s.abluft_trend_c_per_h = self._track_abluft_trend(s.abluft_temp)
         s.ht_office_temp = self._fval_or_none(ENTITY_HT_OFFICE_TEMP)
         s.ht_office_rh   = self._fval_or_none(ENTITY_HT_OFFICE_HUMIDITY)
@@ -2284,6 +2304,11 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         s.cool_heat_forced = False
         s.cool_pv_forced = False
 
+        # Die Hitze-Uhr läuft nur, solange UC12 entscheidet. Kehrt der Handler
+        # vorher zurück, darf sie keine alte Startzeit über die Pause tragen.
+        if not self._override.is_enabled("uc12") or self._override.in_cooldown("uc12"):
+            self._uc12_hitze_seit = None
+
         if not self._override.is_enabled("uc12"):
             s.uc_status["uc12"] = "disabled"
             s.uc_reason["uc12"] = "disabled (per Switch)"
@@ -2346,6 +2371,11 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             dwell_min=self._uc12_dwell_minutes(now),
             min_dwell_min=COOL_MIN_DWELL_MIN,
             schwellen_info=scale_info,
+            zuluft_c=s.zuluft_temp,
+            frischluft_c=self._fval_or_none(ENTITY_FRISCHLUFT),
+            heizbetrieb_delta_k=COOL_HEIZBETRIEB_DELTA_K,
+            hitze_dauer_min=self._uc12_hitze_dauer_minutes(s.abluft_temp, heat_c, now),
+            hitze_min_dauer_min=COOL_HEAT_MIN_DAUER_MIN,
         )
         should_cool = entscheidung.cool
         reason = entscheidung.reason
