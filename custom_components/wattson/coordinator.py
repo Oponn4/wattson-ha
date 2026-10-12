@@ -1,6 +1,7 @@
 """Wattson DataUpdateCoordinator — Entscheidungslogik."""
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections import deque
 from dataclasses import dataclass, field
@@ -175,6 +176,7 @@ from .const import (
     UC14_TOPUP_OVERHEAD_FACTOR,
     UC_DEFINITIONS,
     WALLBOX_POWER_KW,
+    WRITE_CALL_TIMEOUT_S,
 )
 from .e3dc_client import E3DCClient
 from .evcc_client import EvccClient
@@ -222,7 +224,8 @@ from .forecast import (
     upcoming_slots,
 )
 from .gmaps import GoogleMapsClient
-from .override import OverrideManager, UCDefinition
+from .override import OverrideManager, UCDefinition, values_equal
+from .schreiben import schreiben_bestaetigt
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -763,6 +766,9 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
                 remaining = self._override.cooldown_remaining_minutes(uc_id)
                 return False, f"user-override neu erkannt ({remaining}min Rest)"
             if verdict == "failed_write":
+                # Seit v0.20.16 bucht `_try_act` nur noch bestätigte Writes —
+                # hierher führen nur noch unbestätigte Records aus älteren
+                # Versionen (persistiert) und die eigenen Schreibwege von UC2.
                 last = self._override.get_last_action(w_entity)
                 _LOGGER.warning(
                     "UC %s: Write auf %s kam nicht an (Ist=%s, gewollt=%s) — Retry",
@@ -781,14 +787,38 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         for (w_entity, w_value, w_domain, w_service, w_data), current in zip(
             writes, currents
         ):
-            await self.hass.services.async_call(
-                w_domain, w_service, w_data, blocking=False
+            # Auf die Antwort warten und den Zielwert zurücklesen, bei Bedarf
+            # bis zu dreimal (siehe schreiben.py). Gebucht wird nur, was
+            # angekommen ist — ein verlorener Write kann so nie zum
+            # Phantom-Override werden.
+            fehler = await schreiben_bestaetigt(
+                lambda d=w_domain, sv=w_service, data=w_data: self._call_blocking(
+                    d, sv, data,
+                ),
+                lambda e=w_entity: self._state(e),
+                lambda ist, ziel=w_value: values_equal(ziel, ist),
             )
+            if fehler is not None:
+                _LOGGER.error(
+                    "UC %s: Write %s.%s auf %s nicht angekommen (%s) — "
+                    "nächster Tick versucht es erneut",
+                    uc_id, w_domain, w_service, w_entity, fehler,
+                )
+                # HA-MELDUNG: Hier wäre die Stelle für eine Benachrichtigung
+                # (persistent_notification oder Push), falls sich zeigt, dass
+                # das Log allein nicht reicht. Sinnvoll erst, wenn derselbe
+                # Write über mehrere Ticks scheitert.
+                return False, f"Write nicht angekommen: {w_entity} ({fehler})"
             await self._override.async_record_action(
-                uc_id, w_entity, w_value, prev_value=current,
+                uc_id, w_entity, w_value, prev_value=current, confirmed=True,
             )
         _LOGGER.info("Aktion: %s", desc)
         return True, desc
+
+    async def _call_blocking(self, domain: str, service: str, data: dict) -> None:
+        """Service-Call, der auf die Ausführung wartet — mit Obergrenze."""
+        async with asyncio.timeout(WRITE_CALL_TIMEOUT_S):
+            await self.hass.services.async_call(domain, service, data, blocking=True)
 
     async def _observe_tracked_entities(self) -> None:
         """Jeden Tick prüfen, ob Wattsons letzte Writes tatsächlich anliegen."""
@@ -2305,9 +2335,10 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             sleep=s.sleep_mode,
             cooling_on=s.cool_enable_on,
             # Ein Merker gilt nur, wenn die Freigabe auch wirklich offen *ist*.
-            # `_try_act` ruft den Service mit `blocking=False` — „abgeschickt"
-            # ist kein „angekommen", und ein Hand-Aus fällt erst einen Tick
-            # später auf. Ohne dieses `and` spannte ein verlorener Write das
+            # Ein Hand-Aus zwischen zwei Ticks bemerkt Wattson erst hier. Bis
+            # v0.20.15 kam ein nie angekommener Write dazu (`_try_act` schickte
+            # mit `blocking=False` ab); seit v0.20.16 wird nur noch gemerkt,
+            # was bestätigt ist. Ohne dieses `and` spannte die Abweichung das
             # Totband auf und UC12 meldete „Hitze 24.8°C ≥ 24.5°C" bei
             # geschlossener Freigabe — genau die Falschaussage, die weg soll.
             heat_forced=self._prev.cool_heat_forced and s.cool_enable_on,
@@ -2384,11 +2415,11 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         """Totband-Merker für den nächsten Tick festschreiben.
 
         `laeuft` ist der gewollte Zustand der Freigabe nach diesem Tick. Ein
-        geblockter Write (Override) setzt gar keinen Merker. Gegen den *nicht
-        angekommenen* Write hilft das allein nicht — `_try_act` ruft den Service
-        mit `blocking=False` und merkt den Verlust erst einen Tick später —,
-        deshalb wird der Merker beim Lesen zusätzlich mit dem tatsächlichen
-        Switch-Zustand verrechnet.
+        geblockter oder nicht angekommener Write (seit v0.20.16 liefert
+        `_try_act` dann `acted=False`) setzt gar keinen Merker. Gegen ein
+        Hand-Aus zwischen zwei Ticks hilft das allein nicht, deshalb wird der
+        Merker beim Lesen zusätzlich mit dem tatsächlichen Switch-Zustand
+        verrechnet.
 
         Im Dry-Run folgt er dem simulierten Zustand. Vollständig geprobt wird
         die neue Logik dort trotzdem nicht: `cool_enable_on` kommt weiter vom

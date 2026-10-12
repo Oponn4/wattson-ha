@@ -1,5 +1,7 @@
 DOMAIN = "wattson"
 SCAN_INTERVAL_SECONDS = 300
+# Obergrenze für einen einzelnen blockierenden Service-Call aus `_try_act`.
+WRITE_CALL_TIMEOUT_S = 30
 
 # T300 Solltemperaturen
 T300_TEMP_CHEAP   = 55.0
