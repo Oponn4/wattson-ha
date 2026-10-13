@@ -55,6 +55,7 @@ from .const import (
     EMHASS_OPTIM_OK,
     ENTITY_BATTERY_SOC,
     ENTITY_CAR_LOCATION,
+    ENTITY_CAR_SOC,
     ENTITY_COOL_SNOOZE,
     ENTITY_EMHASS_OPTIM_STATUS,
     ENTITY_EMHASS_P_BATT_FORECAST,
@@ -206,6 +207,7 @@ from .forecast import (
     cost_from,
     decide_charge_mode,
     deferrable_slot_at,
+    effective_car_soc,
     event_key,
     foreign_plan_note,
     grid_charge_holds,
@@ -420,6 +422,9 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         # damit ein HA-Restart keinen manuell gelöschten Plan neu setzt.
         # Anstecken-Erinnerung: seit wann steht das Auto zuhause, wann zuletzt erinnert
         self._car_home_since: datetime | None = None
+        # Ankunft zählt nur nach gesehenem "weg". Nach einem Neustart steht
+        # das Auto oft längst da — das ist kein Heimkommen.
+        self._car_was_away = False
         self._plugin_reminder_sent_at: datetime | None = None
         self._last_max_discharge: int | None = None  # für UC10 override-detection
         self._all_away_since: datetime | None = None  # Tracking für UC11 v2
@@ -875,7 +880,11 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             hysterese_c=UC4B_ELEMENT_HYSTERESE_C,
         )
         s.car_connected        = self._state(ENTITY_EVCC_CONNECTED) == "on"
-        s.car_soc              = self._fval(ENTITY_EVCC_SOC)
+        s.car_soc              = effective_car_soc(
+            connected=s.car_connected,
+            evcc_soc=self._fval_or_none(ENTITY_EVCC_SOC),
+            car_soc=self._fval_or_none(ENTITY_CAR_SOC),
+        )
         s.car_range            = self._ival(ENTITY_EVCC_RANGE)
         s.evcc_mode            = self._evcc_mode_normalized()
         s.sleep_mode           = self._state(ENTITY_SLEEP) == "on"
@@ -3459,13 +3468,22 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         die meldet unabhängig von der Ankunft.
         """
         cfg = self._trip_cfg
-        car_home = self._state(ENTITY_CAR_LOCATION) == "home"
+        location = self._state(ENTITY_CAR_LOCATION)
+        car_home = location == "home"
 
-        # Ankunft verfolgen: Übergang draußen -> zuhause
-        if car_home and self._car_home_since is None:
-            self._car_home_since = now
-            _LOGGER.debug("Auto zuhause seit %s", now.strftime("%H:%M"))
-        elif not car_home:
+        # Ankunft verfolgen: nur ein gesehener Übergang draußen -> zuhause
+        # zählt. Erster Blick nach Start oder Lage unbekannt (`_state` gibt
+        # dann None) ist keine Ankunft — sonst meldet jeder HA-Neustart ein
+        # Heimkommen, obwohl das Auto seit Tagen dasteht.
+        if location is None:
+            pass
+        elif car_home:
+            if self._car_was_away:
+                self._car_home_since = now
+                self._car_was_away = False
+                _LOGGER.debug("Auto zuhause seit %s", now.strftime("%H:%M"))
+        else:
+            self._car_was_away = True
             self._car_home_since = None
             self._plugin_reminder_sent_at = None
 

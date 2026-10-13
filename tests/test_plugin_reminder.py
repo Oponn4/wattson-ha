@@ -131,3 +131,41 @@ class TestSituationHeuteNacht:
         got = r(trip_required_soc=90, trip_title="Wolfgangs Geburtstag",
                 car_soc=88.0, trip_at_risk=True, minutes_since_arrival=None)
         assert got is not None and got.urgent is True
+
+
+class TestSocUnbekannt:
+    """2026-10-13: "ORA bei 0 % — bitte anstecken." bei echten 82 %.
+
+    evcc meldet abgesteckt nach einer Weile 0. Die Erinnerung darf daraus
+    keinen leeren Akku machen.
+    """
+
+    def test_soc_null_meldet_nicht(self):
+        assert r(car_soc=0.0) is None
+
+    def test_soc_null_meldet_auch_bei_fahrt_nicht(self):
+        assert r(car_soc=0.0, trip_required_soc=60, trip_at_risk=True) is None
+
+
+soc = forecast.effective_car_soc
+
+
+class TestEffectiveCarSoc:
+    def test_abgesteckt_nimmt_auto_statt_evcc_null(self):
+        assert soc(connected=False, evcc_soc=0.0, car_soc=82.0) == 82.0
+
+    def test_abgesteckt_nimmt_auto_statt_altem_evcc_wert(self):
+        assert soc(connected=False, evcc_soc=74.1, car_soc=82.0) == 82.0
+
+    def test_angesteckt_nimmt_evcc(self):
+        assert soc(connected=True, evcc_soc=55.0, car_soc=50.0) == 55.0
+
+    def test_angesteckt_evcc_null_faellt_aufs_auto_zurueck(self):
+        assert soc(connected=True, evcc_soc=0.0, car_soc=50.0) == 50.0
+
+    def test_auto_unbekannt_nimmt_evcc(self):
+        assert soc(connected=False, evcc_soc=60.0, car_soc=None) == 60.0
+
+    def test_beide_unbekannt_ist_null(self):
+        assert soc(connected=False, evcc_soc=None, car_soc=None) == 0.0
+        assert soc(connected=False, evcc_soc=0.0, car_soc=0.0) == 0.0
