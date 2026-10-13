@@ -1227,6 +1227,28 @@ class PluginReminder:
     urgent: bool
 
 
+def effective_car_soc(
+    *, connected: bool, evcc_soc: float | None, car_soc: float | None,
+) -> float:
+    """SOC des Autos aus der Quelle, die gerade stimmt.
+
+    evcc kennt den SOC nur, solange das Auto am Ladepunkt hängt. Abgesteckt
+    hält es den letzten Wert noch eine Weile und fällt dann auf 0 — ein
+    leerer Akku, den es nicht gibt. Deshalb: angesteckt evcc (frisch, weil
+    evcc beim Laden selbst nachfragt), sonst der Wert direkt vom Auto.
+
+    0 heißt "unbekannt", nie "leer". Ein ORA mit wirklich 0 % fährt nicht
+    mehr heim, und genau so behandelt die Akku-Warnung den Wert schon immer.
+    """
+    if connected and evcc_soc is not None and evcc_soc > 0:
+        return evcc_soc
+    if car_soc is not None and car_soc > 0:
+        return car_soc
+    if evcc_soc is not None and evcc_soc > 0:
+        return evcc_soc
+    return 0.0
+
+
 def plugin_reminder_due(
     *,
     car_home: bool,
@@ -1255,6 +1277,10 @@ def plugin_reminder_due(
     bewusst niedrig.
     """
     if not car_home or car_plugged:
+        return None
+    # SOC unbekannt: lieber schweigen als "0 %" melden. Eine falsche Bitte
+    # kostet mehr als eine fehlende — sie bringt bei, die echte wegzuwischen.
+    if car_soc <= 0:
         return None
 
     braucht_fahrt = (
