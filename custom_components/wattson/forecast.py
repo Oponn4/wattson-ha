@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, tzinfo
 
@@ -1341,6 +1342,55 @@ def deferrable_slot_at(
         if s.start <= now < s.end:
             return s
     return None
+
+
+def notify_ziel(
+    target: str,
+    dienst_da: Callable[[str], bool],
+) -> tuple[str | None, bool]:
+    """Welcher Notify-Aufruf erreicht `target`? (v0.20.18)
+
+    Die Option „Benachrichtigungs-Empfänger" wählt seit dem 25.07.2026
+    Notify-*Entities* (`notify.ios_hw23x69q47`). Aufgerufen wurden sie aber als
+    alter Notify-*Dienst*, und der heißt bei der Mobile App anders
+    (`notify.mobile_app_ios_hw23x69q47`). Folge: keine einzige
+    Anstecken-Erinnerung kam an, am 12.10. sechzehn Fehlschläge im Log.
+
+    Reihenfolge: genau so benannter Dienst, dann `mobile_app_<name>` — beide
+    können `data` (tag, url, time-sensitive) —, zuletzt `send_message` an die
+    Entity, das nur Titel und Text kennt.
+    Returns (Dienstname, an_entity) oder (None, False), wenn nichts passt.
+    """
+    name = target.split(".", 1)[1] if "." in target else target
+    if dienst_da(name):
+        return name, False
+    if dienst_da(f"mobile_app_{name}"):
+        return f"mobile_app_{name}", False
+    if target.startswith("notify.") and dienst_da("send_message"):
+        return "send_message", True
+    return None, False
+
+
+def heizstab_block_text(
+    *,
+    block_end: str,
+    slot_power_w: float | None,
+    published_now_w: float | None,
+) -> str:
+    """Begründung für „Heizstab ein, Plan will heizen" (v0.20.18).
+
+    Seit v0.20.11 kann der Plan auch dann „ein" sagen, wenn kein Slot `now`
+    enthält — dann trägt der publizierte Wert (`p_deferrable0`) die Auskunft.
+    Bis v0.20.17 griff die Begründung trotzdem auf `current_slot.power` zu:
+    `AttributeError` am 12.10.2026 zwischen 12:18 und 13:49, sieben Mal, und
+    jedes Mal fiel der ganze Wattson-Tick aus, nicht nur UC4b.
+    """
+    if slot_power_w is not None:
+        return f"EMHASS-Block bis {block_end} (Slot {slot_power_w:.0f}W)"
+    if published_now_w is not None:
+        return (f"EMHASS-Block bis {block_end} "
+                f"(kein Slot, Plan-Wert jetzt {published_now_w:.0f}W)")
+    return f"EMHASS-Block bis {block_end}"
 
 
 def heizstab_plan_signal(

@@ -209,6 +209,7 @@ from .forecast import (
     event_key,
     foreign_plan_note,
     grid_charge_holds,
+    heizstab_block_text,
     heizstab_kann_wirken,
     heizstab_plan_signal,
     hitze_uhr,
@@ -217,6 +218,7 @@ from .forecast import (
     most_expensive_window,
     needs_forced_charging,
     next_deferrable_on_block,
+    notify_ziel,
     parse_deferrable_schedule,
     parse_tibber_response,
     plan_charge_window,
@@ -1567,9 +1569,10 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
                     s.heizstab_schedule, now, EMHASS_DEFERRABLE_ON_MIN_W,
                 )
                 block_end_str = block[1].strftime("%H:%M") if block else "?"
-                uc4b_source = (
-                    f"EMHASS-Block bis {block_end_str} "
-                    f"(Slot {current_slot.power:.0f}W)"
+                uc4b_source = heizstab_block_text(
+                    block_end=block_end_str,
+                    slot_power_w=current_slot.power if current_slot else None,
+                    published_now_w=s.emhass_p_deferrable0_plan,
                 )
             elif not tank_safe:
                 self._uc4b_off_signal_count = 0
@@ -3521,10 +3524,20 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             return True
         ok = False
         for target in targets:
-            service = target.split(".", 1)[1] if "." in target else target
+            service, an_entity = notify_ziel(
+                target, lambda n: self.hass.services.has_service("notify", n),
+            )
+            if service is None:
+                _LOGGER.warning("Erinnerung: kein Notify-Weg für %s gefunden", target)
+                continue
+            data = (
+                {"entity_id": target, "title": payload["title"],
+                 "message": payload["message"]}
+                if an_entity else payload
+            )
             try:
                 await self.hass.services.async_call(
-                    "notify", service, payload, blocking=False,
+                    "notify", service, data, blocking=False,
                 )
                 ok = True
             except Exception as ex:  # noqa: BLE001
