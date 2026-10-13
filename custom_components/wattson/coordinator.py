@@ -460,7 +460,7 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         self._uc12_hitze_seit: datetime | None = None
         # v0.20.13: Schreib-Ziel-Prüfung einmalig im ersten Tick nach dem Hochlauf
         self._entities_checked: bool = False
-        # v0.20.19: Start-Freigabe — erst handeln, wenn Kern-Sensoren/Dienste da
+        # v0.20.20: Start-Freigabe — erst handeln, wenn Kern-Sensoren/Dienste da
         self._running_seit: datetime | None = None
         self._start_freigegeben: bool = False
         self._start_retry_unsub = None
@@ -1150,7 +1150,7 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             _LOGGER.info("HA startet noch (%s) — Tick nur lesend", self.hass.state)
             return self._nur_lesend(s, "HA startet noch")
 
-        # v0.20.19: `running` heißt nur „Start-Ablauf durch", nicht „jede
+        # v0.20.20: `running` heißt nur „Start-Ablauf durch", nicht „jede
         # Integration liefert". Erst handeln, wenn die Kern-Sensoren Werte und
         # die Dienste da sind — längstens START-Wartezeit (siehe start.py).
         frei, start_grund = self._start_pruefen(now)

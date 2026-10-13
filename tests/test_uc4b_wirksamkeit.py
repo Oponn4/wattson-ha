@@ -256,7 +256,7 @@ class TestSchreibZiele:
         assert "_warn_missing_entities" not in setup
 
     def test_pruefung_haengt_am_hochlauf_und_laeuft_einmal(self):
-        """Seit v0.20.19 nach der Start-Freigabe statt direkt an `running`:
+        """Seit v0.20.20 nach der Start-Freigabe statt direkt an `running`:
         erst dann haben die Integrationen ihre Entities sicher angelegt."""
         freigabe = self.QUELLE.index("frei, start_grund = self._start_pruefen(now)")
         pruefung = self.QUELLE.index(

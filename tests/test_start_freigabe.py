@@ -1,4 +1,4 @@
-"""Start-Freigabe (v0.20.19, siehe start.py).
+"""Start-Freigabe (v0.20.20, siehe start.py).
 
 HA meldet `running`, sobald der Start-Ablauf durch ist — nicht, sobald jede
 Integration Werte liefert. Am 11.10.2026 fehlten die Proxon-Entities noch, als

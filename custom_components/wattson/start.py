@@ -1,6 +1,6 @@
 """Start-Freigabe: erst handeln, wenn die Kern-Sensoren und Dienste da sind.
 
-Warum es das gibt (v0.20.19): seit v0.20.6 handelt Wattson erst, wenn HA
+Warum es das gibt (v0.20.20): seit v0.20.6 handelt Wattson erst, wenn HA
 `running` meldet. Das heißt aber nur, dass der Start-Ablauf durch ist — nicht,
 dass jede Integration schon Werte liefert. Am 11.10.2026 waren die
 Proxon-Entities nach dem Neustart noch nicht da, als der erste Tick lief; am
