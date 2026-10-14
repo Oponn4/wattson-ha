@@ -7,8 +7,9 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
-from homeassistant.core import CoreState, HomeAssistant
+from homeassistant.core import CoreState, HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
@@ -234,6 +235,7 @@ from .forecast import (
 from .gmaps import GoogleMapsClient
 from .override import OverrideManager, UCDefinition, values_equal
 from .schreiben import schreiben_bestaetigt
+from .start import NEUER_VERSUCH_S, fehlende_abhaengigkeiten, start_freigabe
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -458,6 +460,10 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         self._uc12_hitze_seit: datetime | None = None
         # v0.20.13: Schreib-Ziel-Prüfung einmalig im ersten Tick nach dem Hochlauf
         self._entities_checked: bool = False
+        # v0.20.20: Start-Freigabe — erst handeln, wenn Kern-Sensoren/Dienste da
+        self._running_seit: datetime | None = None
+        self._start_freigegeben: bool = False
+        self._start_retry_unsub = None
         # v0.17.2 Trend-Tracker: Abluft-Samples (ts, °C) der letzten Stunde.
         # v0.17.3: wird nach Restart einmalig aus der Recorder-Historie geseedet.
         self._abluft_samples: deque[tuple[datetime, float]] = deque(maxlen=24)
@@ -516,6 +522,90 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         ENTITY_KLIMA_OFFICE,
         ENTITY_KLIMA_SCHLAFZIMMER,
     )
+
+    #: Ohne diese Werte entscheidet Wattson auf Ersatzwerten. Gewartet wird
+    #: auf einen *Wert*, nicht nur auf die Entity — Proxon legt seine Entities
+    #: an, bevor der erste Poll durch ist. Die Klimaanlagen fehlen bewusst:
+    #: stromlos (Winter) sind sie dauerhaft `unavailable`.
+    START_ENTITIES: tuple[str, ...] = (
+        ENTITY_PROXON_ABLUFT,
+        ENTITY_PROXON_ZULUFT,
+        ENTITY_PROXON_COOL_ENABLE,
+        ENTITY_T300_TANK,
+        ENTITY_T300_SOLL,
+        ENTITY_T300_HEIZSTAB,
+        ENTITY_BATTERY_SOC,
+        ENTITY_PV_POWER,
+        ENTITY_PRICE,
+        ENTITY_PRICE_LEVEL,
+        ENTITY_EVCC_MODE,
+    )
+    #: Dienste, die ein Tick aufruft und die erst mit ihrer Integration kommen.
+    START_DIENSTE: tuple[str, ...] = (
+        "tibber.get_prices",
+        "calendar.get_events",
+        NOTIFY_SERVICE,
+    )
+
+    def _start_pruefen(self, now: datetime) -> tuple[bool, str]:
+        """Start-Freigabe (siehe start.py). Einmal erteilt, gilt sie bis zum Neustart."""
+        if self._start_freigegeben:
+            return True, ""
+        if self._running_seit is None:
+            self._running_seit = now
+        fehlend = fehlende_abhaengigkeiten(
+            entities=self.START_ENTITIES,
+            dienste=self.START_DIENSTE,
+            zustand=lambda e: self._raw_state(e),
+            dienst_da=self.hass.services.has_service,
+        )
+        wartet_min = (now - self._running_seit).total_seconds() / 60
+        frei, grund = start_freigabe(fehlend=fehlend, wartet_min=wartet_min)
+        if frei:
+            self._start_freigegeben = True
+            if fehlend:
+                _LOGGER.warning("Wattson: %s", grund)
+            else:
+                _LOGGER.info("Wattson: Start-Freigabe nach %.1f min", wartet_min)
+        else:
+            _LOGGER.info("Wattson: %s", grund)
+            self._start_retry_planen()
+        return frei, grund
+
+    def _raw_state(self, entity_id: str) -> str | None:
+        st = self.hass.states.get(entity_id)
+        return st.state if st is not None else None
+
+    def _start_retry_planen(self) -> None:
+        """Während des Wartens nicht 5 min bis zum nächsten Tick stehen."""
+        if self._start_retry_unsub is not None:
+            return
+
+        @callback
+        def _erneut(_now) -> None:
+            self._start_retry_unsub = None
+            self.hass.async_create_task(self.async_request_refresh())
+
+        self._start_retry_unsub = async_call_later(
+            self.hass, NEUER_VERSUCH_S, _erneut,
+        )
+
+    async def async_shutdown(self) -> None:
+        if self._start_retry_unsub is not None:
+            self._start_retry_unsub()
+            self._start_retry_unsub = None
+        await super().async_shutdown()
+
+    def _nur_lesend(self, s: WattsonData, grund: str) -> WattsonData:
+        """Tick ohne Eingriff: Sensoren zeigen Werte, kein UC handelt."""
+        s.t300_target = s.t300_solltemperatur
+        s.t300_reason = grund
+        for uc_id, _slug, _display, _default in UC_DEFINITIONS:
+            s.uc_status[uc_id] = "startet"
+            s.uc_reason[uc_id] = f"{grund} — kein Eingriff"
+        s.last_actions = [f"{grund} — kein Eingriff"]
+        self._prev = s
+        return s
 
     async def async_setup(self) -> None:
         """Wird vom __init__ vor first_refresh aufgerufen."""
@@ -1046,9 +1136,6 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             s.car_soc, "an" if s.car_connected else "weg", s.evcc_mode,
         )
 
-        if self.hass.state is CoreState.running and not self._entities_checked:
-            self._warn_missing_entities()
-
         if self.hass.state is not CoreState.running:
             # Warmup: der erste Tick kommt aus async_config_entry_first_refresh
             # und lief am 15.08.2026 sieben Sekunden zu früh — weder
@@ -1061,14 +1148,18 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             # einen echten Tick an (async_at_started) — kein Warten auf die
             # nächsten 5 Minuten.
             _LOGGER.info("HA startet noch (%s) — Tick nur lesend", self.hass.state)
-            s.t300_target = s.t300_solltemperatur
-            s.t300_reason = "HA startet noch"
-            for uc_id, _slug, _display, _default in UC_DEFINITIONS:
-                s.uc_status[uc_id] = "startet"
-                s.uc_reason[uc_id] = "HA startet noch — kein Eingriff"
-            s.last_actions = ["HA startet noch — kein Eingriff"]
-            self._prev = s
-            return s
+            return self._nur_lesend(s, "HA startet noch")
+
+        # v0.20.20: `running` heißt nur „Start-Ablauf durch", nicht „jede
+        # Integration liefert". Erst handeln, wenn die Kern-Sensoren Werte und
+        # die Dienste da sind — längstens START-Wartezeit (siehe start.py).
+        frei, start_grund = self._start_pruefen(now)
+        if not frei:
+            return self._nur_lesend(s, f"Start: {start_grund}")
+
+        if not self._entities_checked:
+            # nach der Start-Freigabe, damit die Warnung etwas bedeutet
+            self._warn_missing_entities()
 
         if s.sleep_mode:
             _LOGGER.info(
