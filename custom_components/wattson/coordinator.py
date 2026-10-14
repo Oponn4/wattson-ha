@@ -882,9 +882,10 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
                 remaining = self._override.cooldown_remaining_minutes(uc_id)
                 return False, f"user-override neu erkannt ({remaining}min Rest)"
             if verdict == "failed_write":
-                # Seit v0.20.16 bucht `_try_act` nur noch bestätigte Writes —
-                # hierher führen nur noch unbestätigte Records aus älteren
-                # Versionen (persistiert) und die eigenen Schreibwege von UC2.
+                # Seit v0.20.16 bucht `_try_act` nur noch bestätigte Writes,
+                # seit v0.20.21 auch UC2 — hierher führen nur noch unbestätigte
+                # Records aus älteren Versionen (persistiert) und der
+                # Heizstab-Failsafe, der bewusst am Override-System vorbeigeht.
                 last = self._override.get_last_action(w_entity)
                 _LOGGER.warning(
                     "UC %s: Write auf %s kam nicht an (Ist=%s, gewollt=%s) — Retry",
@@ -930,6 +931,44 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             )
         _LOGGER.info("Aktion: %s", desc)
         return True, desc
+
+    async def _set_plan_bestaetigt(
+        self, cfg: WattsonTripConfig, soc: int, when: datetime,
+    ) -> str | None:
+        """evcc-Fahrplan setzen und erst gelten lassen, wenn HA ihn zeigt (v0.20.21).
+
+        evcc quittiert den Plan in der API-Antwort, der Override-Abgleich liest
+        aber den HA-Sensor — und der zieht erst beim nächsten Poll von
+        evcc_intg nach. Bis v0.20.20 wurde der Plan sofort unbestätigt gebucht;
+        kam der Sensor nicht nach, lief er in dieselbe Grace-Falle wie der
+        Heizstab am 08.10. Jetzt: API, Sensor gezielt aktualisieren,
+        zurücklesen, bei Bedarf bis zu dreimal (siehe schreiben.py).
+        Returns None bei Erfolg, sonst den Grund.
+        """
+        async def _setzen() -> None:
+            if not await self._evcc.set_vehicle_plan(cfg.evcc_vehicle_name, soc, when):
+                raise HomeAssistantError("evcc-API hat den Plan nicht bestätigt")
+            try:
+                await self._call_blocking(
+                    "homeassistant", "update_entity",
+                    {"entity_id": ENTITY_EVCC_PLAN_SOC},
+                )
+            except Exception as err:  # noqa: BLE001 — Zurücklesen entscheidet
+                _LOGGER.debug("UC2: update_entity fehlgeschlagen: %s", err)
+
+        fehler = await schreiben_bestaetigt(
+            _setzen,
+            lambda: self._state(ENTITY_EVCC_PLAN_SOC),
+            lambda ist: values_equal(soc, ist),
+        )
+        if fehler is not None:
+            _LOGGER.error(
+                "UC2: Fahrplan %d%% bis %s nicht angekommen (%s) — "
+                "nächster Tick versucht es erneut",
+                soc, when.strftime("%d.%m %H:%M"), fehler,
+            )
+            # HA-MELDUNG: Stelle für eine Benachrichtigung, siehe `_try_act`.
+        return fehler
 
     async def _call_blocking(self, domain: str, service: str, data: dict) -> None:
         """Service-Call, der auf die Ausführung wartet — mit Obergrenze."""
@@ -1092,7 +1131,13 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         s.pv_peak_tomorrow     = self._dtval(ENTITY_PV_PEAK_TOMORROW)
 
         # ── Tibber-Forecast holen + Fenster berechnen ─────────────────────────
-        s.forecast_slots = await self._fetch_tibber_forecast()
+        # Im Aufwärm-Tick (HA noch nicht `running`) gibt es `tibber.get_prices`
+        # meist noch nicht — der Aufruf lieferte nur eine Warnung ins Log. Der
+        # Tick handelt ohnehin nicht (v0.20.21).
+        s.forecast_slots = (
+            await self._fetch_tibber_forecast()
+            if self.hass.state is CoreState.running else []
+        )
         now = dt_util.now()
         if s.forecast_slots:
             if (w := cheapest_window(s.forecast_slots, 120, now, lookahead_hours=12)):
@@ -3191,16 +3236,15 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
                         f"{departure.isoformat()})")
             _LOGGER.info("[DRY-RUN] %s", act_desc)
         else:
-            ok = await self._evcc.set_vehicle_plan(
-                cfg.evcc_vehicle_name, required_soc, departure,
-            )
-            if not ok:
-                s.trip_reason = "Plan setzen fehlgeschlagen (evcc-API)"
+            fehler = await self._set_plan_bestaetigt(cfg, required_soc, departure)
+            if fehler is not None:
+                s.trip_reason = f"Plan nicht angekommen ({fehler})"
                 s.uc_status["uc2"] = "fehler"
                 s.uc_reason["uc2"] = s.trip_reason
                 return
             await self._override.async_record_action(
                 "uc2", ENTITY_EVCC_PLAN_SOC, required_soc, prev_value=prev_plan_soc,
+                confirmed=True,
             )
             act_desc = (f"evcc-Fahrplan {required_soc}% bis "
                         f"{departure.strftime('%d.%m %H:%M')}")
@@ -3334,17 +3378,15 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
                         f"{ready.isoformat()}")
             _LOGGER.info("[DRY-RUN] %s", act_desc)
         else:
-            ok = await self._evcc.set_vehicle_plan(
-                cfg.evcc_vehicle_name, BASELINE_SOC, ready,
-            )
-            if not ok:
-                s.trip_reason = "Grundplan setzen fehlgeschlagen (evcc-API)"
+            fehler = await self._set_plan_bestaetigt(cfg, BASELINE_SOC, ready)
+            if fehler is not None:
+                s.trip_reason = f"Grundplan nicht angekommen ({fehler})"
                 s.uc_status["uc2"] = "fehler"
                 s.uc_reason["uc2"] = s.trip_reason
                 return
             await self._override.async_record_action(
                 "uc2", ENTITY_EVCC_PLAN_SOC, BASELINE_SOC,
-                prev_value=prev_plan_soc,
+                prev_value=prev_plan_soc, confirmed=True,
             )
             await self._override.async_set_misc(MISC_UC2_PLAN, {
                 "key": plan_key,
