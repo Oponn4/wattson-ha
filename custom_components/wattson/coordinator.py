@@ -881,17 +881,6 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
                 await self._override.async_record_override(uc_id, w_entity, current)
                 remaining = self._override.cooldown_remaining_minutes(uc_id)
                 return False, f"user-override neu erkannt ({remaining}min Rest)"
-            if verdict == "failed_write":
-                # Seit v0.20.16 bucht `_try_act` nur noch bestätigte Writes,
-                # seit v0.20.21 auch UC2 — hierher führen nur noch unbestätigte
-                # Records aus älteren Versionen (persistiert) und der
-                # Heizstab-Failsafe, der bewusst am Override-System vorbeigeht.
-                last = self._override.get_last_action(w_entity)
-                _LOGGER.warning(
-                    "UC %s: Write auf %s kam nicht an (Ist=%s, gewollt=%s) — Retry",
-                    uc_id, w_entity, current, last.value if last else "?",
-                )
-                await self._override.async_drop_action(w_entity)
 
         desc = " + ".join(
             f"{w_domain}.{w_service}({w_data})"
@@ -975,22 +964,11 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         async with asyncio.timeout(WRITE_CALL_TIMEOUT_S):
             await self.hass.services.async_call(domain, service, data, blocking=True)
 
-    async def _observe_tracked_entities(self) -> None:
-        """Jeden Tick prüfen, ob Wattsons letzte Writes tatsächlich anliegen."""
-        for entity_id in self._override.tracked_entities():
-            await self._override.async_observe(entity_id, self._state(entity_id))
-
     async def _async_update_data(self) -> WattsonData:
         s = WattsonData(dry_run=self._dry_run)
 
         if not self._trend_seeded:
             await self._seed_abluft_trend_from_history()
-
-        # Angekommene Writes bestätigen. Muss VOR den UC-Handlern laufen und
-        # unabhängig davon, ob dieser Tick etwas ändern will: nur so wird ein
-        # Record je bestätigt und ein späteres Hand-Aus als Override erkannt
-        # statt als fehlgeschlagener Write (v0.20.4).
-        await self._observe_tracked_entities()
 
         # Zustand lesen
         s.price         = self._fval(ENTITY_PRICE)
@@ -1926,17 +1904,36 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         Einzige Stelle, die _try_act umgeht: Dauerlauf-Schutz schlägt hier den
         User-Override-Respekt (Christian, 2026-07-06: „selbst im Urlaub darf
         der nicht einfach anbleiben"). Schreibt einen Action-Record, damit der
-        Folge-Tick das Off weder als User-Eingriff noch als failed_write deutet.
+        Folge-Tick das Off nicht als User-Eingriff deutet — seit v0.20.22 erst,
+        wenn das Off zurückgelesen wurde, wie überall sonst auch. Scheitert das
+        Abschalten, bleibt der Stab an und der nächste Tick versucht es erneut.
         """
         _LOGGER.error(
             "Heizstab-Failsafe: %.1fh kontinuierlich an (max %.0fh) — Zwangsabschaltung",
             on_hours, max_hours,
         )
         if not self._dry_run:
-            await self.hass.services.async_call(
-                "switch", "turn_off", {"entity_id": ENTITY_T300_HEIZSTAB},
-                blocking=False,
+            fehler = await schreiben_bestaetigt(
+                lambda: self._call_blocking(
+                    "switch", "turn_off", {"entity_id": ENTITY_T300_HEIZSTAB},
+                ),
+                lambda: self._state(ENTITY_T300_HEIZSTAB),
+                lambda ist: ist == "off",
             )
+            if fehler is not None:
+                _LOGGER.error(
+                    "Heizstab-Failsafe: Abschalten nicht angekommen (%s) — "
+                    "nächster Tick versucht es erneut", fehler,
+                )
+                # HA-MELDUNG: hier ist eine Meldung am dringendsten — der Stab
+                # läuft weiter über die Dauerlauf-Grenze hinaus.
+                s.uc_status["uc4b"] = "failsafe-fehler"
+                s.uc_reason["uc4b"] = (
+                    f"FAILSAFE: Heizstab {on_hours:.1f}h an, Abschalten "
+                    f"nicht angekommen ({fehler})"
+                )
+                actions.append("Heizstab-Failsafe: Abschalten fehlgeschlagen")
+                return
             await self._override.async_record_action(
                 "uc4b", ENTITY_T300_HEIZSTAB, "off", prev_value="on",
             )
@@ -3276,8 +3273,7 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
 
         Entspricht der Vorprüfung aus `_try_act`; UC2 braucht sie getrennt,
         weil geschrieben wird über die evcc-API statt über einen HA-Service.
-        Erkennt insbesondere einen von Hand gelöschten Plan als User-Override
-        (und einen nie angekommenen Write als Retry-Fall, kein Override).
+        Erkennt insbesondere einen von Hand gelöschten Plan als User-Override.
 
         Seit v0.20.10 steht davor die Frage, wem der Plan in evcc überhaupt
         gehört. Der Override-Cooldown ist eine Frist, der fremde Plan ein
@@ -3304,13 +3300,6 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             )
             remaining = self._override.cooldown_remaining_minutes("uc2")
             return f"user-override neu erkannt ({remaining}min Rest)"
-        if verdict == "failed_write":
-            last = self._override.get_last_action(ENTITY_EVCC_PLAN_SOC)
-            _LOGGER.warning(
-                "UC2: Fahrplan-Write kam nicht an (Ist=%s, gewollt=%s) — Retry",
-                current, last.value if last else "?",
-            )
-            await self._override.async_drop_action(ENTITY_EVCC_PLAN_SOC)
         return None
 
     async def _run_baseline_plan(

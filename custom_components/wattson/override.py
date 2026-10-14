@@ -11,8 +11,6 @@ from typing import Any
 from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
 
-from .const import SCAN_INTERVAL_SECONDS
-
 _LOGGER = logging.getLogger(__name__)
 
 STATE_FILE_NAME = "wattson_state.json"
@@ -21,11 +19,6 @@ MIN_COOLDOWN_HOURS = 2        # nicht weniger als 2h Cooldown, selbst spätabend
 
 # Werte, bei denen keine Aussage möglich ist (Entity transient weg)
 UNKNOWN_VALUES = ("unavailable", "unknown", "none", "")
-
-# Wie lange ein unbestätigter Write als „vielleicht nur nicht angekommen" gilt.
-# Zwei Coordinator-Ticks plus Slack: bis dahin hätte `async_observe` den
-# Zielwert längst einmal gesehen und den Record bestätigt.
-FAILED_WRITE_GRACE = timedelta(seconds=2 * SCAN_INTERVAL_SECONDS + 60)
 
 # Ohne Action-Record (Neustart, Resume, UC frisch eingeschaltet) zählt ein
 # Hand-Eingriff nur, wenn er noch halbwegs frisch ist — sonst sperrt ein Klick
@@ -42,16 +35,18 @@ def is_unknown(value: Any) -> bool:
 class ActionRecord:
     """Eine vom Coordinator durchgeführte Aktion (für Override-Detection).
 
-    prev_value = Ist-Zustand unmittelbar vor der Aktion. confirmed wird True,
-    sobald der Zielwert einmal beobachtet wurde — erst ab dann gilt eine
-    spätere Abweichung als User-Override. Vorher gilt Ist==prev_value als
-    fehlgeschlagener Write (Modbus-Glitch), nicht als Eingriff.
+    prev_value = Ist-Zustand unmittelbar vor der Aktion (nur zur Auskunft).
+
+    Seit v0.20.22 wird jeder Record erst angelegt, wenn der Zielwert beim
+    Schreiben zurückgelesen wurde — `confirmed` ist damit immer True. Das Feld
+    bleibt für die Persistenz: unbestätigte Records älterer Versionen werden
+    beim Laden verworfen.
     """
     value: Any
     set_at: datetime
     uc_id: str
     prev_value: Any = None
-    confirmed: bool = False
+    confirmed: bool = True
 
 
 @dataclass
@@ -138,7 +133,16 @@ class OverrideManager:
             if uc_id in self._enabled:
                 self._enabled[uc_id] = bool(enabled)
 
+        verworfen: list[str] = []
         for ent_id, raw in (data.get("actions") or {}).items():
+            # v0.20.22: unbestätigte Records stammen von vor v0.20.16, als
+            # Writes ungeprüft gebucht wurden. Ihr Zielwert kam vielleicht nie
+            # an; ohne den `failed_write`-Zweig sähe eine Abweichung wie ein
+            # Hand-Eingriff aus. Verwerfen ist sicher: ohne Record zählt nur
+            # noch ein echter Eingriff mit user_id.
+            if raw.get("confirmed", True) is False:
+                verworfen.append(ent_id)
+                continue
             try:
                 self._actions[ent_id] = ActionRecord(
                     value=raw["value"],
@@ -151,6 +155,11 @@ class OverrideManager:
                 )
             except (KeyError, ValueError, TypeError) as e:
                 _LOGGER.warning("Action-Record für %s ignoriert: %s", ent_id, e)
+        if verworfen:
+            _LOGGER.info(
+                "Unbestätigte Action-Records älterer Versionen verworfen: %s",
+                ", ".join(verworfen),
+            )
 
         self._misc = dict(data.get("misc") or {})
 
@@ -239,13 +248,13 @@ class OverrideManager:
 
     async def async_record_action(
         self, uc_id: str, entity_id: str, value: Any, prev_value: Any = None,
-        confirmed: bool = False,
+        confirmed: bool = True,
     ) -> None:
         """Wattson hat (real, kein dry-run) entity_id auf value gesetzt.
 
-        `confirmed=True`, wenn der Zielwert schon beim Schreiben zurückgelesen
-        wurde (`_try_act` seit v0.20.16). Eine spätere Abweichung ist dann
-        immer ein fremder Eingriff, nie ein verlorener Write.
+        Aufrufen erst, wenn der Zielwert beim Schreiben zurückgelesen wurde
+        (`schreiben.py`) — seit v0.20.22 an allen Stellen. Eine spätere
+        Abweichung ist dann immer ein fremder Eingriff, nie ein verlorener Write.
         """
         self._actions[entity_id] = ActionRecord(
             value=value, set_at=dt_util.now(), uc_id=uc_id,
@@ -255,36 +264,6 @@ class OverrideManager:
 
     def get_last_action(self, entity_id: str) -> ActionRecord | None:
         return self._actions.get(entity_id)
-
-    def tracked_entities(self) -> list[str]:
-        """Entities mit offenem Action-Record — Kandidaten für `async_observe`."""
-        return list(self._actions)
-
-    async def async_observe(
-        self, entity_id: str, current_value: Any, tolerance: float = FLOAT_TOLERANCE,
-    ) -> bool:
-        """Ist-Zustand beobachten, ohne zu handeln. Returns True wenn bestätigt wurde.
-
-        Muss jeden Tick für alle getrackten Entities laufen. Grund: `confirmed`
-        wurde bis v0.20.3 ausschließlich in `async_check_action` gesetzt, und die
-        läuft nur aus `_try_act` — also nur, wenn Wattson etwas ändern will. Im
-        eingeschwungenen Zustand (Wattson will genau das, was anliegt) wurde ein
-        Record deshalb NIE bestätigt, und ein späteres manuelles Zurückschalten
-        sah für immer aus wie ein fehlgeschlagener Write. Genau so hat UC12 am
-        31.07.2026 um 23:06 die Kühlung 44 s nach dem Hand-Aus wieder eingeschaltet.
-        """
-        last = self._actions.get(entity_id)
-        if last is None or last.confirmed or is_unknown(current_value):
-            return False
-        if not values_equal(last.value, current_value, tolerance):
-            return False
-        last.confirmed = True
-        await self._async_persist()
-        _LOGGER.debug(
-            "Action auf %s bestätigt (Ist=%s == gesetzt=%s)",
-            entity_id, current_value, last.value,
-        )
-        return True
 
     def _user_touch_counts(
         self, user_touch_at: datetime, last: ActionRecord | None, uc_id: str | None,
@@ -317,8 +296,6 @@ class OverrideManager:
 
         Returns:
           "ok"           — kein Record, Entity transient weg, oder Ist == Zielwert
-          "failed_write" — Zielwert kam nie an, Ist == Zustand vor der Aktion
-                           (z.B. Modbus-Glitch); Caller darf erneut schreiben
           "override"     — jemand hat den Wert verstellt → User-Eingriff
 
         `user_touch_at` ist der Zeitpunkt der letzten Zustandsänderung, die HA
@@ -333,21 +310,17 @@ class OverrideManager:
         Entscheidung wird vertagt statt einen Phantom-Override auszulösen, der
         Wattson sonst bis Mitternacht aussperrt.
 
-        Ein unbestätigter Record, dessen Ist wieder dem prev_value entspricht,
-        gilt als fehlgeschlagener Write und NICHT als Override — das war die
-        Phantom-Override-Quelle (uc12/uc4b, 2026-07-06 00:06). Das gilt aber nur
-        innerhalb von FAILED_WRITE_GRACE: danach hätte `async_observe` den Wert
-        längst bestätigt, also war es doch ein Eingriff. Kehrt der Wert NACH
-        einmaliger Bestätigung zum alten Zustand zurück, ist es ohnehin ein User.
+        Bis v0.20.21 gab es dazwischen „failed_write": ein unbestätigter
+        Record, dessen Ist wieder dem Zustand vor der Aktion entsprach, galt
+        11 Minuten lang als verlorener Write. Weil heute nur gebucht wird, was
+        zurückgelesen wurde, kann es diesen Fall nicht mehr geben — die Heuristik
+        war die Quelle der Phantom-Overrides vom 06.07. und 08.10.2026.
         """
         if is_unknown(current_value):
             return "ok"
 
         last = self._actions.get(entity_id)
         if last is not None and values_equal(last.value, current_value, tolerance):
-            if not last.confirmed:
-                last.confirmed = True
-                await self._async_persist()
             return "ok"
 
         # Ab hier weicht der Ist-Wert von dem ab, was Wattson wollte/setzte.
@@ -356,10 +329,6 @@ class OverrideManager:
 
         if last is None:
             return "ok"
-        if not last.confirmed and values_equal(last.prev_value, current_value, tolerance):
-            if dt_util.now() - last.set_at <= FAILED_WRITE_GRACE:
-                return "failed_write"
-            return "override"
         return "override"
 
     async def async_record_override(
