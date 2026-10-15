@@ -4,7 +4,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta, tzinfo
+from datetime import date, datetime, timedelta, tzinfo
 
 from .const import ALL_DAY_DEPARTURE_HOUR, TRIP_ARRIVAL_RESERVE_SOC
 
@@ -620,6 +620,63 @@ def anlage_heizt(
     return zuluft_c - abluft_c >= delta_k and frischluft_c < abluft_c
 
 
+def tages_max_aus_forecast(
+    response: dict | None,
+    entity_id: str,
+    heute: date,
+    tz: tzinfo,
+) -> float | None:
+    """Heutige Höchsttemperatur aus der Antwort von `weather.get_forecasts`.
+
+    Genommen wird der Eintrag, dessen Datum (in `tz`) heute ist — nicht blind
+    der erste: manche Anbieter liefern nach Mitternacht noch den Vortag oder
+    fangen erst morgen an. Kein passender Eintrag, kein Wert: `None`. Ein
+    Ersatzwert wäre die Falle, aus der dieser Parser stammt — bis v0.20.22
+    rechnete Wattson monatelang mit einem Default von 20,0 °C, ohne dass es
+    jemand sah.
+    """
+    if not isinstance(response, dict):
+        return None
+    eintrag = response.get(entity_id)
+    if not isinstance(eintrag, dict):
+        return None
+    for tag in eintrag.get("forecast") or []:
+        if not isinstance(tag, dict):
+            continue
+        try:
+            zeit = datetime.fromisoformat(str(tag["datetime"]))
+            temp = float(tag["temperature"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if zeit.tzinfo is not None:
+            zeit = zeit.astimezone(tz)
+        if zeit.date() == heute and math.isfinite(temp):
+            return temp
+    return None
+
+
+def tages_max_merken(
+    *,
+    tag: date | None,
+    max_c: float | None,
+    heute: date,
+    wert: float | None,
+) -> tuple[date | None, float | None]:
+    """Tages-Höchstwert über mehrere Abrufe halten → (Tag, Höchstwert).
+
+    met.no gibt für heute nur das Maximum der *restlichen* Stunden zurück: am
+    15.10.2026 um 17 Uhr 12,1 °C, obwohl der Tag 20 °C hatte. Gehalten wird
+    darum der höchste Wert des Tages; ein späterer Abruf senkt ihn nicht.
+    Ein neuer Tag fängt neu an, ein fehlender Wert löscht nur einen Merker
+    vom Vortag — sonst gälte gestern als heute.
+    """
+    if wert is None:
+        return (tag, max_c) if tag == heute else (None, None)
+    if tag == heute and max_c is not None:
+        return heute, max(max_c, wert)
+    return heute, wert
+
+
 def hitze_uhr(
     *,
     seit: datetime | None,
@@ -650,7 +707,7 @@ def hitze_uhr(
 #: ist. Unter der Kappe hätte sie bis zu vier Ticks Verzug — 20 Minuten Import
 #: zum Tageshöchstpreis, um einen Schaltvorgang zu sparen.
 SOFT_COOL_KINDS = (
-    "pv", "cheapest", "hysterese", "cheapest_uc10", "aus",
+    "pv", "cheapest", "hysterese", "cheapest_uc10", "aus", "saison",
 )
 
 
@@ -699,6 +756,8 @@ def cool_decision(
     heizbetrieb_delta_k: float = 5.0,
     hitze_dauer_min: float | None = None,
     hitze_min_dauer_min: float = 0.0,
+    aussen_max_c: float | None = None,
+    saison_max_c: float | None = None,
 ) -> CoolDecision:
     """UC12: soll die Kühl-Freigabe offen sein?
 
@@ -737,6 +796,12 @@ def cool_decision(
       Hitze (`heat_forced`), gilt das Totband wie bisher ohne erneute Wartezeit.
       Die Trend-Korrektur bleibt: sie senkt die Schwelle, aber die Dauer muss
       trotzdem erreicht werden.
+
+    Seit v0.20.23, aus dem 15.10.2026: liegt die Tagesvorhersage `aussen_max_c`
+    unter `saison_max_c`, sind alle weichen Zweige zu (PV, cheapest_4h,
+    Hysterese). Sonnenwärme an einem kühlen Tag bleibt im Haus; kühlen darf nur
+    noch der Hitze-Zweig. Fehlt die Vorhersage (`None`), sperrt nichts — wie
+    bei `anlage_heizt` nur auf Grund von Messwerten.
     """
     # Hitze-Totband: Einstieg an der nackten Schwelle, Ausstieg erst
     # `hysteresis_c` darunter — aber nur, wenn die Hitze auch der Grund war.
@@ -765,6 +830,20 @@ def cool_decision(
         zuluft_c=zuluft_c, abluft_c=abluft_c, frischluft_c=frischluft_c,
         delta_k=heizbetrieb_delta_k,
     )
+    kuehler_tag = (
+        aussen_max_c is not None and saison_max_c is not None
+        and aussen_max_c < saison_max_c
+    )
+    saison = CoolDecision(
+        cool=False,
+        reason=(
+            f"kühler Tag (Außen-Forecast max {aussen_max_c:.1f}°C < "
+            f"{saison_max_c:.1f}°C) → nur Hitze kühlt "
+            f"(Abluft {abluft_c:.1f}°C, Heat-Schwelle {heat_c:.1f}°C)"
+        ) if kuehler_tag else "",
+        kind="saison", heat_forced=False, pv_forced=False,
+        heat_limit_c=heat_limit_c,
+    )
 
     if urlaub:
         # niemand zu Hause — leeres Haus kühlen ist Verschwendung, auch bei Hitze
@@ -788,7 +867,7 @@ def cool_decision(
         # Über der Schwelle, aber noch zu kurz: wie „unter Hitze" weiter
         # entscheiden, nur mit Hinweis — sonst sähe der Status aus, als hätte
         # UC12 die Abluft übersehen.
-        entscheidung = _cool_soft_decision(
+        entscheidung = saison if kuehler_tag else _cool_soft_decision(
             abluft_c=abluft_c, trigger_c=trigger_c, heat_c=heat_c,
             heat_limit_c=heat_limit_c, pv_surplus_w=pv_surplus_w,
             pv_min_w=pv_min_w, pv_band_w=pv_band_w,
@@ -844,6 +923,8 @@ def cool_decision(
             kind="unter_off", heat_forced=False, pv_forced=False,
             heat_limit_c=heat_limit_c,
         )
+    elif kuehler_tag:
+        entscheidung = saison
     else:
         entscheidung = _cool_soft_decision(
             abluft_c=abluft_c, trigger_c=trigger_c, heat_c=heat_c,

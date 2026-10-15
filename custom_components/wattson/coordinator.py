@@ -5,7 +5,7 @@ import asyncio
 import logging
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 from homeassistant.core import CoreState, HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
@@ -34,6 +34,7 @@ from .const import (
     COOL_HEAT_MAX_C,
     COOL_HEAT_MIN_C,
     COOL_HEAT_MIN_DAUER_MIN,
+    COOL_SAISON_MAX_C,
     COOL_HEIZBETRIEB_DELTA_K,
     COOL_HUMIDEX_RH_PCT,
     COOL_HUMIDEX_TRIGGER_DELTA,
@@ -111,6 +112,7 @@ from .const import (
     EVCC_PLAN_BUFFER_MINUTES,
     HEIZSTAB_FAILSAFE_NOTIFY_COOLDOWN_MIN,
     HEIZSTAB_MAX_CONTINUOUS_H,
+    FORECAST_REFRESH_MIN,
     HOT_FORECAST_THRESHOLD_C,
     HUMIDEX_INSIDE_OUTSIDE_MIN_DELTA,
     HUMIDEX_UNCOMFORTABLE,
@@ -230,6 +232,8 @@ from .forecast import (
     relevant_events,
     select_binding_trip,
     t300_speicherfenster,
+    tages_max_aus_forecast,
+    tages_max_merken,
     upcoming_slots,
 )
 from .gmaps import GoogleMapsClient
@@ -380,7 +384,7 @@ class WattsonData:
     # UC11 — Klimaanlagen OG
     urlaub_mode: bool = False
     frischluft_temp: float = 20.0            # Außen via Proxon
-    forecast_max_temp_c: float = 20.0        # heutiger Höchstwert aus Weather
+    forecast_max_temp_c: float | None = None  # heutiger Höchstwert, None = unbekannt
     klima_office_target: float = 23.0
     klima_office_current: float = 22.0
     klima_office_hvac: str = "off"
@@ -458,6 +462,10 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         self._uc12_last_switch_at: datetime | None = None
         # v0.20.17: seit wann die Abluft ununterbrochen über der Hitze-Schwelle liegt
         self._uc12_hitze_seit: datetime | None = None
+        # v0.20.23: Tagesvorhersage, stündlich geholt — Tag, Höchstwert, Abrufzeit
+        self._forecast_tag: date | None = None
+        self._forecast_max_c: float | None = None
+        self._forecast_geholt: datetime | None = None
         # v0.20.13: Schreib-Ziel-Prüfung einmalig im ersten Tick nach dem Hochlauf
         self._entities_checked: bool = False
         # v0.20.20: Start-Freigabe — erst handeln, wenn Kern-Sensoren/Dienste da
@@ -777,6 +785,44 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         except (ValueError, TypeError):
             return None
 
+    async def _forecast_tages_max(self) -> float | None:
+        """Heutige Höchsttemperatur, höchstens alle `FORECAST_REFRESH_MIN` geholt.
+
+        Gehalten wird der höchste Wert des Tages (`tages_max_merken`), weil
+        met.no für heute nur die restlichen Stunden zählt.
+        """
+        now = dt_util.now()
+        heute = now.date()
+        if (
+            self._forecast_tag == heute
+            and self._forecast_geholt is not None
+            and now - self._forecast_geholt < timedelta(minutes=FORECAST_REFRESH_MIN)
+        ):
+            return self._forecast_max_c
+        try:
+            response = await self.hass.services.async_call(
+                "weather", "get_forecasts",
+                {"entity_id": ENTITY_WEATHER_FORECAST, "type": "daily"},
+                blocking=True, return_response=True,
+            )
+        except HomeAssistantError as e:
+            _LOGGER.warning("Wetter-Vorhersage nicht verfügbar: %s", e)
+            response = None
+        wert = tages_max_aus_forecast(
+            response, ENTITY_WEATHER_FORECAST, heute, now.tzinfo,
+        )
+        if wert is None:
+            _LOGGER.warning(
+                "Keine Tages-Höchsttemperatur für %s aus %s",
+                heute, ENTITY_WEATHER_FORECAST,
+            )
+        self._forecast_tag, self._forecast_max_c = tages_max_merken(
+            tag=self._forecast_tag, max_c=self._forecast_max_c,
+            heute=heute, wert=wert,
+        )
+        self._forecast_geholt = now
+        return self._forecast_max_c
+
     async def _fetch_tibber_forecast(self) -> list[PriceSlot]:
         # Default-Call liefert nur aktuellen Tag — explizit start/end angeben
         # damit auch morgige Day-Ahead-Preise enthalten sind (ab ~13:00 verfügbar)
@@ -1083,10 +1129,8 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         s.klima_schlaf_hvac = self._state(ENTITY_KLIMA_SCHLAFZIMMER, "off") or "off"
         s.klima_schlaf_current = float(self._attr(ENTITY_KLIMA_SCHLAFZIMMER, "current_temperature", 22.0) or 22.0)
         s.klima_schlaf_target = float(self._attr(ENTITY_KLIMA_SCHLAFZIMMER, "temperature", 23.0) or 23.0)
-        # Heute-Höchsttemperatur aus Weather-Forecast (für Pre-Cool-Trigger)
-        forecast = self._attr(ENTITY_WEATHER_FORECAST, "forecast", []) or []
-        if forecast and isinstance(forecast, list) and len(forecast) > 0:
-            s.forecast_max_temp_c = float(forecast[0].get("temperature", 20.0) or 20.0)
+        # Heute-Höchsttemperatur (UC11 Pre-Cool, UC12 Schwellen + Saisonsperre)
+        s.forecast_max_temp_c = await self._forecast_tages_max()
         # Anwesenheit (UC11 v2)
         s.christian_home = self._state(ENTITY_PERSON_CHRISTIAN, "unknown") == "home"
         s.sonja_home = self._state(ENTITY_PERSON_SONJA, "unknown") == "home"
@@ -2155,7 +2199,8 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             modifier_parts.append("Eco (niemand da)")
 
         # Modifier: Hitze-Forecast + jetzt PV → Pre-Cool (überschreibt Eco wenn aktiv)
-        if (s.forecast_max_temp_c > HOT_FORECAST_THRESHOLD_C
+        if (s.forecast_max_temp_c is not None
+                and s.forecast_max_temp_c > HOT_FORECAST_THRESHOLD_C
                 and s.pv_surplus > PV_KLIMA_MIN_W):
             cool_target += CLIMATE_PRECOOL_OFFSET_C
             modifier_parts.append("Pre-Cool")
@@ -2382,6 +2427,12 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             return None
         return (abluft_c - first_val) / span_h
 
+    @staticmethod
+    def _forecast_txt(s: WattsonData) -> str:
+        if s.forecast_max_temp_c is None:
+            return "unbekannt"
+        return f"{s.forecast_max_temp_c:.1f}°C"
+
     def _compute_cool_thresholds(
         self, s: WattsonData
     ) -> tuple[float, float, list[str]]:
@@ -2397,7 +2448,10 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
 
         Returns (trigger, heat, korrektur-notizen für reason-Strings).
         """
-        outside = float(s.forecast_max_temp_c or COOL_OUTSIDE_REF_C)
+        outside = (
+            COOL_OUTSIDE_REF_C if s.forecast_max_temp_c is None
+            else s.forecast_max_temp_c
+        )
         delta = COOL_OUTSIDE_SLOPE * (outside - COOL_OUTSIDE_REF_C)
         trigger = max(
             COOL_TRIGGER_MIN_C,
@@ -2476,7 +2530,7 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         trigger_c, heat_c, korrekturen = self._compute_cool_thresholds(s)
         scale_info = (
             f"Trigger {trigger_c:.1f}°C / Heat {heat_c:.1f}°C "
-            f"(Außen-Forecast max {s.forecast_max_temp_c:.1f}°C"
+            f"(Außen-Forecast max {self._forecast_txt(s)}"
             + (", " + ", ".join(korrekturen) if korrekturen else "")
             + ")"
         )
@@ -2521,6 +2575,8 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             heizbetrieb_delta_k=COOL_HEIZBETRIEB_DELTA_K,
             hitze_dauer_min=self._uc12_hitze_dauer_minutes(s.abluft_temp, heat_c, now),
             hitze_min_dauer_min=COOL_HEAT_MIN_DAUER_MIN,
+            aussen_max_c=s.forecast_max_temp_c,
+            saison_max_c=COOL_SAISON_MAX_C,
         )
         should_cool = entscheidung.cool
         reason = entscheidung.reason
@@ -2716,7 +2772,7 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             "title": f"Hitze {s.abluft_temp:.1f}°C — Kühlung läuft",
             "message": (
                 f"Trotz {grund_bruch}: Außen-Forecast max "
-                f"{s.forecast_max_temp_c:.1f}°C → Heat-Schwelle "
+                f"{self._forecast_txt(s)} → Heat-Schwelle "
                 f"{schwelle_txt} überschritten."
             ),
             "data": {
