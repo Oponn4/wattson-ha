@@ -79,7 +79,12 @@ ENTITY_PROXON_CLIMATE_OFFICE        = "climate.proxon_fwt_office"
 ENTITY_PROXON_CLIMATE_SCHLAFZIMMER  = "climate.proxon_fwt_schlafen"
 ENTITY_URLAUB_MODE          = "input_boolean.urlaubsmodus"
 ENTITY_FRISCHLUFT           = "sensor.proxon_fwt_temperatur_t03_frischluft"
-ENTITY_WEATHER_FORECAST     = "weather.forecast_home"           # Für Hitze-Forecast morgen
+# Tages-Höchsttemperatur für UC11 Pre-Cool und UC12. Bis v0.20.22 stand hier
+# `weather.forecast_home` — die Entity gibt es nicht, und das `forecast`-Attribut
+# hat HA 2024.3 ohnehin abgeschafft. Wattson rechnete monatelang stumm mit dem
+# Default 20,0 °C. Gelesen wird jetzt per `weather.get_forecasts` (daily).
+ENTITY_WEATHER_FORECAST     = "weather.gerdihome"
+FORECAST_REFRESH_MIN        = 60     # min — so oft wird die Tagesvorhersage neu geholt
 ENTITY_PERSON_CHRISTIAN     = "person.christian"
 ENTITY_PERSON_SONJA         = "person.sonja"
 ENTITY_PRICE          = "sensor.electricity_price_haus"   # state in EUR/kWh
@@ -456,6 +461,13 @@ COOL_MIN_DWELL_MIN         = 20     # min — Mindestzeit im Schaltzustand (nur 
 # bei 21–23,6 °C. Der Hitze-Zweig bricht die Expensive-Sperre und schaltete ein.
 COOL_HEIZBETRIEB_DELTA_K   = 5.0    # K — Zuluft so viel wärmer als Abluft = Anlage heizt
 COOL_HEAT_MIN_DAUER_MIN    = 20     # min — so lange muss die Hitze anliegen, bevor sie zählt
+
+# UC12 v0.20.23 — Saisonsperre. Am 15.10.2026 um 15:25 hörte die FWT auf zu
+# heizen (Zuluft 42 → 28 °C in einer Minute), die Sonne hatte das Haus auf
+# 24,8 °C Abluft gebracht, und bei 1822 W Überschuss schaltete der PV-Zweig die
+# Kühlung ein — bei 17 °C draußen. An einem kühlen Tag ist Sonnenwärme im Haus
+# erwünscht. Liegt die Tagesvorhersage darunter, kühlt nur noch der Hitze-Zweig.
+COOL_SAISON_MAX_C          = 21.0   # °C — Tages-Höchstwert darunter: keine weiche Kühlung
 
 # UC12 v0.17.2 — B: Humidex-Korrektur (Schwüle), C: Trend-Korrektur.
 # Beide korrigieren die v0.17-Schwellen nach unten: bei Schwüle fühlt sich
