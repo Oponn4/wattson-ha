@@ -466,6 +466,7 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         self._forecast_tag: date | None = None
         self._forecast_max_c: float | None = None
         self._forecast_geholt: datetime | None = None
+        self._forecast_fehler_gemeldet: bool = False
         # v0.20.13: Schreib-Ziel-Prüfung einmalig im ersten Tick nach dem Hochlauf
         self._entities_checked: bool = False
         # v0.20.20: Start-Freigabe — erst handeln, wenn Kern-Sensoren/Dienste da
@@ -790,6 +791,12 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
 
         Gehalten wird der höchste Wert des Tages (`tages_max_merken`), weil
         met.no für heute nur die restlichen Stunden zählt.
+
+        Nur ein Erfolg startet die Wartezeit. v0.20.23 merkte auch den
+        Fehlschlag: beim HA-Start war `weather.gerdihome` im ersten Tick noch
+        nicht geladen, und die Vorhersage fehlte danach eine Stunde lang
+        (17.10.2026, 21:21). Jetzt wird jeden Tick neu gefragt, gewarnt aber
+        nur einmal bis zum nächsten Erfolg.
         """
         now = dt_util.now()
         heute = now.date()
@@ -806,21 +813,25 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
                 blocking=True, return_response=True,
             )
         except HomeAssistantError as e:
-            _LOGGER.warning("Wetter-Vorhersage nicht verfügbar: %s", e)
+            _LOGGER.debug("Wetter-Vorhersage nicht verfügbar: %s", e)
             response = None
         wert = tages_max_aus_forecast(
             response, ENTITY_WEATHER_FORECAST, heute, now.tzinfo,
         )
         if wert is None:
-            _LOGGER.warning(
-                "Keine Tages-Höchsttemperatur für %s aus %s",
-                heute, ENTITY_WEATHER_FORECAST,
-            )
+            if not self._forecast_fehler_gemeldet:
+                _LOGGER.warning(
+                    "Keine Tages-Höchsttemperatur für %s aus %s — frage jeden Tick neu",
+                    heute, ENTITY_WEATHER_FORECAST,
+                )
+                self._forecast_fehler_gemeldet = True
+        else:
+            self._forecast_geholt = now
+            self._forecast_fehler_gemeldet = False
         self._forecast_tag, self._forecast_max_c = tages_max_merken(
             tag=self._forecast_tag, max_c=self._forecast_max_c,
             heute=heute, wert=wert,
         )
-        self._forecast_geholt = now
         return self._forecast_max_c
 
     async def _fetch_tibber_forecast(self) -> list[PriceSlot]:
