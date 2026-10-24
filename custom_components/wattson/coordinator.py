@@ -63,6 +63,8 @@ from .const import (
     ENTITY_EMHASS_P_BATT_FORECAST,
     ENTITY_EMHASS_P_DEFERRABLE0,
     ENTITY_EMHASS_P_DEFERRABLE1,
+    ENTITY_EVCC_BATTERY_MODE,
+    ENTITY_EVCC_CHARGING,
     ENTITY_EVCC_CONNECTED,
     ENTITY_EVCC_LIMIT_SOC,
     ENTITY_EVCC_MAX_CURRENT,
@@ -109,6 +111,8 @@ from .const import (
     ENTITY_URLAUB_MODE,
     ENTITY_WEATHER_FORECAST,
     ENTITY_WINDOW_OFFICE_LINKS,
+    EVCC_BATTERY_GRACE_MIN,
+    EVCC_BATTERY_MODES_HALTEN,
     EVCC_PLAN_BUFFER_MINUTES,
     FORECAST_REFRESH_MIN,
     HEIZSTAB_FAILSAFE_NOTIFY_COOLDOWN_MIN,
@@ -211,6 +215,7 @@ from .forecast import (
     decide_charge_mode,
     deferrable_slot_at,
     effective_car_soc,
+    evcc_batterie_einfluss,
     event_key,
     foreign_plan_note,
     grid_charge_holds,
@@ -234,6 +239,8 @@ from .forecast import (
     t300_speicherfenster,
     tages_max_aus_forecast,
     tages_max_merken,
+    uc10_evcc_abgleich,
+    uc10_fremdaenderung,
     upcoming_slots,
 )
 from .gmaps import GoogleMapsClient
@@ -3012,6 +3019,16 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         self._last_max_charge = None
         # _last_max_discharge bleibt — UC10 übernimmt jetzt
 
+    def _evcc_batterie_einfluss(self, now: datetime) -> str | None:
+        """Liest evccs Batteriemodus aus HA, siehe forecast.evcc_batterie_einfluss."""
+        state = self.hass.states.get(ENTITY_EVCC_BATTERY_MODE)
+        if state is None:
+            return None
+        seit_min = (now - state.last_changed).total_seconds() / 60
+        return evcc_batterie_einfluss(
+            state.state, seit_min, EVCC_BATTERY_GRACE_MIN, EVCC_BATTERY_MODES_HALTEN,
+        )
+
     async def _handle_uc10_discharge_lock(
         self, s: WattsonData, now: datetime, actions: list[str]
     ) -> None:
@@ -3020,7 +3037,13 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         Fallback Heuristik: lock=on → 0W, lock=off → 1500W.
 
         Wenn UC14 (Netzladen) aktiv ist, hat UC14 bereits max_discharge=0 gesetzt
-        — UC10 macht dann nichts (kein eigener POST → kein doppelter Write)."""
+        — UC10 macht dann nichts (kein eigener POST → kein doppelter Write).
+
+        Lädt das Auto, sperrt UC10 die Entladung selbst (0 W) — evcc soll die
+        Batterie nicht mehr anfassen (batteryDischargeControl=false). Hält evcc
+        sie trotzdem, gibt UC10 nicht dagegen frei. Setzt evcc nach einem
+        Moduswechsel auf das Maximum zurück, ist das kein Hand-Eingriff
+        (v0.20.25)."""
         s.uc_status["uc10"] = self._uc_idle_status("uc10")
         s.uc_reason["uc10"] = ""
 
@@ -3095,24 +3118,50 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             return
         current_max_discharge = int(current_settings.get("maxDischargePower", E3DC_MAX_DISCHARGE_W))
 
-        # Override-Detection: hat User maxDischargePower extern geändert?
+        # Lädt das Auto, sperrt UC10 selbst. Hält evcc die Batterie noch
+        # (batteryDischargeControl an), nicht dagegen freigeben.
+        evcc = self._evcc_batterie_einfluss(now)
+        auto_laedt = self._raw_state(ENTITY_EVCC_CHARGING) == "on"
+        ziel, grund = uc10_evcc_abgleich(target_w, auto_laedt, evcc)
+        if ziel is None:
+            # Gedächtnis vergessen: evccs eigene Writes sind kein Hand-Eingriff
+            self._last_max_discharge = None
+            s.uc_reason["uc10"] = f"{grund}, {current_max_discharge}W max-discharge"
+            return
+        if grund is not None:
+            decision_source = f"{grund} (sonst {target_w}W, {decision_source})"
+            target_w = ziel
+            should_lock = True
+            s.uc10_idle_active = True
+
+        # Override-Detection: hat jemand maxDischargePower extern geändert?
         # Toleranz 50W gegen Float-Rundung
-        if (self._last_max_discharge is not None
-                and abs(current_max_discharge - self._last_max_discharge) > 50):
-                prev = self._last_max_discharge
-                await self._override.async_record_override(
-                    "uc10", "e3dc_max_discharge_power", current_max_discharge,
-                )
-                # Memory zurücksetzen — sonst feuert der Detect direkt nach
-                # Cooldown-Ende oder Resume erneut (Race beobachtet 2026-05-27)
-                self._last_max_discharge = None
-                remaining = self._override.cooldown_remaining_minutes("uc10")
-                s.uc_status["uc10"] = f"user-override neu erkannt ({remaining}min)"
-                s.uc_reason["uc10"] = (
-                    f"User hat maxDischargePower extern auf {current_max_discharge}W "
-                    f"gesetzt (war {prev}W)"
-                )
-                return
+        fremd = uc10_fremdaenderung(
+            current_max_discharge, self._last_max_discharge, evcc, E3DC_MAX_DISCHARGE_W,
+        )
+        if fremd == "evcc":
+            _LOGGER.info(
+                "UC10: maxDischargePower %sW (gebucht %sW) kommt von evcc "
+                "(Batteriemodus kürzlich gewechselt) — kein Override",
+                current_max_discharge, self._last_max_discharge,
+            )
+            # Normal weiter: der Block unten setzt das Ziel neu
+            self._last_max_discharge = None
+        elif fremd == "user":
+            prev = self._last_max_discharge
+            await self._override.async_record_override(
+                "uc10", "e3dc_max_discharge_power", current_max_discharge,
+            )
+            # Memory zurücksetzen — sonst feuert der Detect direkt nach
+            # Cooldown-Ende oder Resume erneut (Race beobachtet 2026-05-27)
+            self._last_max_discharge = None
+            remaining = self._override.cooldown_remaining_minutes("uc10")
+            s.uc_status["uc10"] = f"user-override neu erkannt ({remaining}min)"
+            s.uc_reason["uc10"] = (
+                f"User hat maxDischargePower extern auf {current_max_discharge}W "
+                f"gesetzt (war {prev}W)"
+            )
+            return
 
         # Nur setzen wenn deutlich anders (>50W) — vermeidet unnötige Writes
         if abs(target_w - current_max_discharge) <= 50:

@@ -4,10 +4,11 @@ from __future__ import annotations
 import logging
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import Event, EventStateChangedData, HomeAssistant, callback
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.start import async_at_started
 
 from .const import (
@@ -32,6 +33,7 @@ from .const import (
     DEFAULT_VEHICLE_CAPACITY,
     DEFAULT_VEHICLE_CONSUMPTION,
     DOMAIN,
+    ENTITY_EVCC_CHARGING,
     UNIQUE_ID_MIGRATION_V2,
 )
 from .coordinator import WattsonCoordinator, WattsonTripConfig
@@ -170,6 +172,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await coordinator.async_request_refresh()
 
     entry.async_on_unload(async_at_started(hass, _first_real_tick))
+
+    @callback
+    def _auto_laden_geaendert(event: Event[EventStateChangedData]) -> None:
+        """Auto beginnt/beendet das Laden: UC10 sofort sperren bzw. freigeben.
+
+        Ohne das flösse bis zu SCAN_INTERVAL_SECONDS lang der Hausspeicher ins
+        Auto — evcc sperrt ihn nicht mehr selbst.
+        """
+        alt, neu = event.data["old_state"], event.data["new_state"]
+        if alt is None or neu is None or alt.state == neu.state:
+            return
+        hass.async_create_task(coordinator.async_request_refresh())
+
+    entry.async_on_unload(
+        async_track_state_change_event(hass, [ENTITY_EVCC_CHARGING], _auto_laden_geaendert)
+    )
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)

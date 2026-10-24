@@ -124,6 +124,15 @@ ENTITY_EVCC_SOC       = "sensor.evcc_auto_vehicle_soc"
 # ist also nur diese Quelle brauchbar.
 ENTITY_CAR_SOC        = "sensor.gwm_ora_03_soc"
 ENTITY_EVCC_RANGE     = "sensor.evcc_auto_vehicle_range"
+# Wer gerade die Hausbatterie steuert. Mit batteryDischargeControl sperrt evcc
+# beim Laden die Entladung ("lock discharge") und setzt danach ("normal") die
+# Grenze auf das Hardware-Maximum zurück. UC10 muss das von einem Hand-Eingriff
+# unterscheiden (v0.20.25).
+ENTITY_EVCC_BATTERY_MODE = "sensor.evcc_battery_mode_value"
+# Lädt das Auto gerade? Ab v0.20.25 sperrt UC10 dann selbst die Entladung, evcc
+# fasst die Batterie nicht mehr an (batteryDischargeControl=false). Ein Wechsel
+# löst sofort einen Tick aus, nicht erst nach SCAN_INTERVAL_SECONDS.
+ENTITY_EVCC_CHARGING = "binary_sensor.evcc_auto_charging"
 ENTITY_BATTERY_SOC    = "sensor.s10e_state_of_charge"   # % via e3dc_rscp
 ENTITY_PV_POWER       = "sensor.s10e_solar_production"   # kW via e3dc_rscp
 ENTITY_SLEEP          = "input_boolean.sleepmode_helper"
@@ -414,6 +423,16 @@ SOC_BATTERY_RESERVE    = 20     # % — unter diesem SOC keine Discharge-Sperre 
 BATTERIE_KAPAZITAT_KWH = 4.6
 PV_BYPASS_FACTOR       = 4.0    # pv_fc_tomorrow > 4.6 * 4.0 = 18.4 kWh → Bypass
 E3DC_MAX_DISCHARGE_W   = 1500   # Hardware-Max der S10E Batterie
+
+# UC10 vs. evcc (v0.20.25). Beobachtet 24.10.2026: evcc wechselt 16:30:15 von
+# "lock discharge" auf "normal", 16:30:17 steht maxDischargePower auf 1500 W,
+# der Tick um 16:34 wertete das als Hand-Eingriff und sperrte UC10 bis
+# Mitternacht. Dieselbe Folge 12:15 und 12:17. Ein Wechsel des evcc-Batteriemodus
+# innerhalb dieser Frist erklärt eine Rückkehr auf das Maximum.
+EVCC_BATTERY_GRACE_MIN = 10
+# Modi, in denen evcc die Batterie hält. "lock discharge" ist der Text der
+# HA-Integration, "hold"/"charge" die Werte der evcc-API.
+EVCC_BATTERY_MODES_HALTEN = frozenset({"lock discharge", "hold", "charge"})
 
 # UC12 — Proxon Kühlung
 # Trigger/Heat sind ab v0.17 *Basis*-Werte; effektiv skaliert per Outdoor-Forecast
