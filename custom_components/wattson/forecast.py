@@ -1613,3 +1613,51 @@ def next_deferrable_on_block(
     if block_start is not None:
         return (block_start, block_end)  # type: ignore[return-value]
     return None
+
+
+# ── UC10: wer hat maxDischargePower geändert? ─────────────────────────────────
+
+def evcc_batterie_einfluss(
+    modus: str | None,
+    seit_min: float | None,
+    frist_min: float,
+    halten: frozenset[str],
+) -> str | None:
+    """Steuert evcc gerade die Hausbatterie, oder hat es das eben getan?
+
+    `modus` ist der Zustand von `sensor.evcc_battery_mode_value`, `seit_min`
+    die Zeit seit dessen letzter Änderung. Rückgabe:
+
+    - "haelt": evcc sperrt oder lädt die Batterie (Auto lädt mit
+      batteryDischargeControl). UC10 darf dann nicht schreiben, sonst hebt es
+      evccs Sperre auf (24.10. 16:29: 264 W während das Auto lud).
+    - "kuerzlich": der Modus hat sich vor weniger als `frist_min` geändert,
+      auch durch einen evcc-Neustart (`unknown`). Eine Rückkehr auf das
+      Maximum kommt dann von evcc.
+    - None: evcc hält still, jede Abweichung ist fremd.
+    """
+    if modus in halten:
+        return "haelt"
+    if seit_min is not None and 0 <= seit_min < frist_min:
+        return "kuerzlich"
+    return None
+
+
+def uc10_fremdaenderung(
+    ist_w: int,
+    gebucht_w: int | None,
+    evcc: str | None,
+    max_w: int,
+    toleranz_w: int = 50,
+) -> str | None:
+    """Ordnet eine Abweichung von Wattsons letztem Wert einem Verursacher zu.
+
+    None heißt keine Abweichung (oder nichts gebucht). "evcc" heißt: evcc hat
+    nach einem Moduswechsel auf das Maximum zurückgesetzt, kein Override. Jeder
+    andere Wert, auch innerhalb der Frist, bleibt ein Hand-Eingriff ("user").
+    """
+    if gebucht_w is None or abs(ist_w - gebucht_w) <= toleranz_w:
+        return None
+    if evcc == "kuerzlich" and abs(ist_w - max_w) <= toleranz_w:
+        return "evcc"
+    return "user"
