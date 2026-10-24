@@ -1652,12 +1652,40 @@ def uc10_fremdaenderung(
 ) -> str | None:
     """Ordnet eine Abweichung von Wattsons letztem Wert einem Verursacher zu.
 
-    None heißt keine Abweichung (oder nichts gebucht). "evcc" heißt: evcc hat
-    nach einem Moduswechsel auf das Maximum zurückgesetzt, kein Override. Jeder
-    andere Wert, auch innerhalb der Frist, bleibt ein Hand-Eingriff ("user").
+    None heißt keine Abweichung (oder nichts gebucht). "evcc" heißt: evcc hält
+    die Batterie gerade selbst, oder hat nach einem Moduswechsel auf das
+    Maximum zurückgesetzt — kein Override. Jeder andere Wert, auch innerhalb
+    der Frist, bleibt ein Hand-Eingriff ("user").
     """
     if gebucht_w is None or abs(ist_w - gebucht_w) <= toleranz_w:
         return None
+    if evcc == "haelt":
+        return "evcc"
     if evcc == "kuerzlich" and abs(ist_w - max_w) <= toleranz_w:
         return "evcc"
     return "user"
+
+
+def uc10_evcc_abgleich(
+    ziel_w: int,
+    auto_laedt: bool,
+    evcc: str | None,
+) -> tuple[int | None, str | None]:
+    """Passt UC10s Ziel an das Laden des Autos an.
+
+    Wattson ist die einzige Stelle, die maxDischargePower schreibt. Lädt das
+    Auto, sperrt UC10 die Entladung selbst, damit der Hausspeicher nicht ins
+    Auto fließt (25.07.2026: 68 % → 13 % in 80 min).
+
+    Rückgabe (Ziel, Grund):
+    - (0, Grund): Auto lädt, Sperre statt Plan.
+    - (None, Grund): evcc hält die Batterie selbst noch (batteryDischargeControl
+      an) und UC10 wollte freigeben. Nicht schreiben, sonst hebt UC10 die
+      Sperre auf (24.10. 16:29, 264 W).
+    - (ziel_w, None): unverändert.
+    """
+    if auto_laedt:
+        return 0, "Auto lädt — Hausspeicher gesperrt"
+    if evcc == "haelt" and ziel_w > 0:
+        return None, "evcc hält die Batterie — UC10 pausiert"
+    return ziel_w, None

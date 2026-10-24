@@ -64,6 +64,7 @@ from .const import (
     ENTITY_EMHASS_P_DEFERRABLE0,
     ENTITY_EMHASS_P_DEFERRABLE1,
     ENTITY_EVCC_BATTERY_MODE,
+    ENTITY_EVCC_CHARGING,
     ENTITY_EVCC_CONNECTED,
     ENTITY_EVCC_LIMIT_SOC,
     ENTITY_EVCC_MAX_CURRENT,
@@ -238,6 +239,7 @@ from .forecast import (
     t300_speicherfenster,
     tages_max_aus_forecast,
     tages_max_merken,
+    uc10_evcc_abgleich,
     uc10_fremdaenderung,
     upcoming_slots,
 )
@@ -3037,9 +3039,11 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         Wenn UC14 (Netzladen) aktiv ist, hat UC14 bereits max_discharge=0 gesetzt
         — UC10 macht dann nichts (kein eigener POST → kein doppelter Write).
 
-        Hält evcc die Batterie (Auto lädt, batteryDischargeControl), pausiert
-        UC10. Setzt evcc nach einem Moduswechsel auf das Maximum zurück, ist das
-        kein Hand-Eingriff (v0.20.25)."""
+        Lädt das Auto, sperrt UC10 die Entladung selbst (0 W) — evcc soll die
+        Batterie nicht mehr anfassen (batteryDischargeControl=false). Hält evcc
+        sie trotzdem, gibt UC10 nicht dagegen frei. Setzt evcc nach einem
+        Moduswechsel auf das Maximum zurück, ist das kein Hand-Eingriff
+        (v0.20.25)."""
         s.uc_status["uc10"] = self._uc_idle_status("uc10")
         s.uc_reason["uc10"] = ""
 
@@ -3114,17 +3118,21 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             return
         current_max_discharge = int(current_settings.get("maxDischargePower", E3DC_MAX_DISCHARGE_W))
 
-        # evcc steuert die Batterie beim Laden selbst (batteryDischargeControl)
+        # Lädt das Auto, sperrt UC10 selbst. Hält evcc die Batterie noch
+        # (batteryDischargeControl an), nicht dagegen freigeben.
         evcc = self._evcc_batterie_einfluss(now)
-        if evcc == "haelt":
-            # Nicht schreiben, sonst hebt UC10 evccs Sperre auf. Gedächtnis
-            # vergessen: evccs eigene Writes sind kein Hand-Eingriff.
+        auto_laedt = self._raw_state(ENTITY_EVCC_CHARGING) == "on"
+        ziel, grund = uc10_evcc_abgleich(target_w, auto_laedt, evcc)
+        if ziel is None:
+            # Gedächtnis vergessen: evccs eigene Writes sind kein Hand-Eingriff
             self._last_max_discharge = None
-            s.uc_reason["uc10"] = (
-                f"evcc hält die Batterie (Auto lädt) — UC10 pausiert, "
-                f"{current_max_discharge}W max-discharge"
-            )
+            s.uc_reason["uc10"] = f"{grund}, {current_max_discharge}W max-discharge"
             return
+        if grund is not None:
+            decision_source = f"{grund} (sonst {target_w}W, {decision_source})"
+            target_w = ziel
+            should_lock = True
+            s.uc10_idle_active = True
 
         # Override-Detection: hat jemand maxDischargePower extern geändert?
         # Toleranz 50W gegen Float-Rundung

@@ -86,3 +86,36 @@ class TestFremdaenderung:
 
     def test_toleranz_am_maximum(self):
         assert fremd(1460, 264, evcc("normal", 1.0), MAX) == "evcc"
+
+    def test_evcc_sperrt_selbst_ist_kein_override(self):
+        """Übergang, solange batteryDischargeControl noch an ist: evcc setzt 0 W."""
+        assert fremd(0, 264, evcc("lock discharge", 0.5), MAX) == "evcc"
+
+
+abgleich = forecast.uc10_evcc_abgleich
+
+
+class TestAbgleich:
+    """Wattson sperrt beim Laden selbst; evcc fasst die Batterie nicht mehr an."""
+
+    def test_auto_laedt_sperrt_trotz_plan(self):
+        """16:29 mit neuer Logik: EMHASS will 264 W, das Auto lädt."""
+        ziel, grund = abgleich(264, True, None)
+        assert ziel == 0 and "Auto lädt" in grund
+
+    def test_auto_laedt_auch_wenn_evcc_noch_haelt(self):
+        assert abgleich(1500, True, "haelt")[0] == 0
+
+    def test_negativprobe_ohne_laden_folgt_dem_plan(self):
+        assert abgleich(264, False, None) == (264, None)
+
+    def test_evcc_haelt_und_plan_will_freigeben(self):
+        ziel, grund = abgleich(264, False, "haelt")
+        assert ziel is None and "pausiert" in grund
+
+    def test_evcc_haelt_und_plan_sperrt_ohnehin(self):
+        assert abgleich(0, False, "haelt") == (0, None)
+
+    def test_nach_dem_laden_wieder_plan(self):
+        """16:30:45 Laden aus, evcc-Modus seit 30 s "normal"."""
+        assert abgleich(264, False, evcc("normal", 0.5)) == (264, None)

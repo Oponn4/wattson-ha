@@ -129,6 +129,10 @@ ENTITY_EVCC_RANGE     = "sensor.evcc_auto_vehicle_range"
 # Grenze auf das Hardware-Maximum zurück. UC10 muss das von einem Hand-Eingriff
 # unterscheiden (v0.20.25).
 ENTITY_EVCC_BATTERY_MODE = "sensor.evcc_battery_mode_value"
+# Lädt das Auto gerade? Ab v0.20.25 sperrt UC10 dann selbst die Entladung, evcc
+# fasst die Batterie nicht mehr an (batteryDischargeControl=false). Ein Wechsel
+# löst sofort einen Tick aus, nicht erst nach SCAN_INTERVAL_SECONDS.
+ENTITY_EVCC_CHARGING = "binary_sensor.evcc_auto_charging"
 ENTITY_BATTERY_SOC    = "sensor.s10e_state_of_charge"   # % via e3dc_rscp
 ENTITY_PV_POWER       = "sensor.s10e_solar_production"   # kW via e3dc_rscp
 ENTITY_SLEEP          = "input_boolean.sleepmode_helper"
