@@ -141,13 +141,28 @@ ENTITY_SLEEP          = "input_boolean.sleepmode_helper"
 ENTITY_EMHASS_OPTIM_STATUS    = "sensor.optim_status"
 ENTITY_EMHASS_P_BATT_FORECAST = "sensor.p_batt_forecast"     # W, positiv=Entladung
 ENTITY_EMHASS_P_DEFERRABLE0   = "sensor.p_deferrable0"       # W, T300-Heizstab Plan
-ENTITY_EMHASS_P_DEFERRABLE1   = "sensor.p_deferrable1"       # W, Wallbox Plan
+ENTITY_EMHASS_P_DEFERRABLE1   = "sensor.p_deferrable1"       # W, Sauna (fest, aus sensor.wattson_sauna_plan)
 ENTITY_EMHASS_SOC_FORECAST    = "sensor.soc_batt_forecast"   # % (auch 24h-Plan im Attribut)
 
 EMHASS_OPTIM_OK            = "Optimal"
 EMHASS_BATT_DISCHARGE_MIN_W = 100   # > 100W = "darf entladen", sonst sperren
 EMHASS_DEFERRABLE_ON_MIN_W  = 500   # > 500W = "Heizstab/Wallbox sollte laufen"
 EMHASS_MAX_PLAN_AGE_H      = 2      # Plan älter als 2h → unavailable + notify
+
+# Sauna-Plan (v0.20.26, sauna.py): Wattson meldet das Fenster als
+# sensor.wattson_sauna_plan, optimize.sh gibt es EMHASS als deferrable1 mit
+# festem Zeitfenster. Messwerte 3.–18.10.2026 aus sensor.sauna_power.
+ENTITY_SAUNA_STATUS        = "input_select.sauna_status"   # idle/vorheizen/warm, automation.sauna_steuerung
+SAUNA_CALENDARS            = ["calendar.barchen"]
+SAUNA_STICHWORT            = "sauna"   # im Termintitel
+SAUNA_LOOKAHEAD_H          = 24        # = EMHASS-Horizont
+SAUNA_AUFHEIZ_KW           = 9.0       # gemessen 9,07 kW Volllast
+SAUNA_HALTEN_KW            = 3.6       # Mittel nach dem Aufheizen, Leute drin
+SAUNA_AUFHEIZ_DAUER_MIN    = 35        # gemessen 27–36 min Volllast
+SAUNA_AUFHEIZ_VORLAUF_MIN  = 40        # so früh vor Termin-Beginn einschalten
+SAUNA_NUTZ_MIN             = 120       # Standard ohne Termin (gemessen 1:45–2:00)
+SAUNA_NACHLAUF_MIN         = 30        # läuft sie noch, plant der Plan mindestens so weit
+SAUNA_VERFALL_MIN          = 20        # Termin ohne Einschalten verfällt nach Beginn + X
 
 # UC6 Hysterese: nach Mode-Switch mindestens N Minuten halten — verhindert 5-min-Oszillation
 UC6_MODE_HOLD_MINUTES = 10  # v0.17.1: gesenkt von 15 — Confirmation übernimmt Anti-Jitter

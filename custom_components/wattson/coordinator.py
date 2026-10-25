@@ -62,7 +62,6 @@ from .const import (
     ENTITY_EMHASS_OPTIM_STATUS,
     ENTITY_EMHASS_P_BATT_FORECAST,
     ENTITY_EMHASS_P_DEFERRABLE0,
-    ENTITY_EMHASS_P_DEFERRABLE1,
     ENTITY_EVCC_BATTERY_MODE,
     ENTITY_EVCC_CHARGING,
     ENTITY_EVCC_CONNECTED,
@@ -102,6 +101,7 @@ from .const import (
     ENTITY_PV_PEAK_TOMORROW,
     ENTITY_PV_POWER,
     ENTITY_PV_SURPLUS,
+    ENTITY_SAUNA_STATUS,
     ENTITY_SLEEP,
     ENTITY_T300_BOOST_TEMP,
     ENTITY_T300_HEIZSTAB,
@@ -140,6 +140,16 @@ from .const import (
     PV_KLIMA_MIN_W,
     PV_SURPLUS_OFF,
     PV_SURPLUS_ON,
+    SAUNA_AUFHEIZ_DAUER_MIN,
+    SAUNA_AUFHEIZ_KW,
+    SAUNA_AUFHEIZ_VORLAUF_MIN,
+    SAUNA_CALENDARS,
+    SAUNA_HALTEN_KW,
+    SAUNA_LOOKAHEAD_H,
+    SAUNA_NACHLAUF_MIN,
+    SAUNA_NUTZ_MIN,
+    SAUNA_STICHWORT,
+    SAUNA_VERFALL_MIN,
     SCAN_INTERVAL_SECONDS,
     SKIP_LOCATION_KEYWORDS,
     SLEEP_EXEMPT_UCS,
@@ -245,6 +255,15 @@ from .forecast import (
 )
 from .gmaps import GoogleMapsClient
 from .override import OverrideManager, UCDefinition, values_equal
+from .sauna import (
+    SaunaPlan,
+    SaunaProfil,
+    SaunaTermin,
+    betriebsbeginn,
+    ist_sauna_termin,
+    sauna_plan,
+    sauna_termine,
+)
 from .schreiben import schreiben_bestaetigt
 from .start import NEUER_VERSUCH_S, fehlende_abhaengigkeiten, start_freigabe
 
@@ -384,9 +403,11 @@ class WattsonData:
     emhass_p_deferrable0_plan: float = 0.0   # W, T300-Heizstab Plan (current slot)
     heizstab_schedule: list[DeferrableSlot] = field(default_factory=list)  # 24h Forward-Plan
     heizstab_plan_signal: str = "unbekannt"  # "on" | "off" | "unbekannt" (v0.20.11)
-    emhass_p_deferrable1_plan: float = 0.0   # W, Wallbox Plan
-    wallbox_schedule: list[DeferrableSlot] = field(default_factory=list)  # 24h Forward-Plan
     emhass_available: bool = False           # ob EMHASS-Daten nutzbar
+
+    # Sauna-Plan (v0.20.26) — Eingabe für EMHASS, Wattson schaltet nichts
+    sauna_plan: SaunaPlan | None = None
+    sauna_grund: str = "kein Termin, Sauna aus"
 
     # UC11 — Klimaanlagen OG
     urlaub_mode: bool = False
@@ -476,6 +497,11 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         self._forecast_fehler_gemeldet: bool = False
         # v0.20.13: Schreib-Ziel-Prüfung einmalig im ersten Tick nach dem Hochlauf
         self._entities_checked: bool = False
+        # Sauna: zuletzt gelesene Termine — antwortet der Kalender nicht, wird
+        # mit ihnen weitergerechnet (nicht der alte Plan eingefroren: ein
+        # selbst erkannter Plan muss enden, sobald die Sauna aus ist)
+        self._sauna_termine: list[SaunaTermin] = []
+        self._sauna_plan: SaunaPlan | None = None
         # v0.20.20: Start-Freigabe — erst handeln, wenn Kern-Sensoren/Dienste da
         self._running_seit: datetime | None = None
         self._start_freigegeben: bool = False
@@ -1100,17 +1126,9 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             published_now_w=s.emhass_p_deferrable0_plan,
             min_on_w=EMHASS_DEFERRABLE_ON_MIN_W,
         )
-        s.emhass_p_deferrable1_plan = self._fval(ENTITY_EMHASS_P_DEFERRABLE1, 0.0)
-        # Wird weiter eingelesen (Diagnose, Dashboard), aber seit v0.19 NICHT
-        # mehr von UC6 befolgt: evcc kennt den Tibber-Tarif selbst und plant
-        # das Auto besser, als eine zweite Instanz es von außen kann.
-        # Im Auge behalten: EMHASS plant Batterie und Heizstab weiterhin unter
-        # der Annahme, die Wallbox laufe nach seinem Plan. Weicht das stark ab,
-        # gehört die Wallbox als Deferrable aus der EMHASS-Konfiguration raus.
-        s.wallbox_schedule = parse_deferrable_schedule(
-            self._attr(ENTITY_EMHASS_P_DEFERRABLE1, "deferrables_schedule", []),
-            key="p_deferrable1",
-        )
+        # deferrable1 ist seit v0.20.26 die Sauna (fest eingeplant, siehe
+        # sauna.py) — kein Plan, dem Wattson folgt. Die Wallbox ist seit
+        # v0.19 kein EMHASS-Deferrable mehr.
         s.emhass_available = s.emhass_status == EMHASS_OPTIM_OK
         if s.emhass_available:
             bsp = self._attr(ENTITY_EMHASS_P_BATT_FORECAST, "battery_scheduled_power", [])
@@ -1245,6 +1263,10 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         if not self._entities_checked:
             # nach der Start-Freigabe, damit die Warnung etwas bedeutet
             self._warn_missing_entities()
+
+        # Vor dem Schlafmodus: der Plan ist reine Eingabe für EMHASS, er
+        # schaltet nichts und muss auch nachts stimmen.
+        await self._update_sauna_plan(s, now)
 
         if s.sleep_mode:
             _LOGGER.info(
@@ -1576,6 +1598,41 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             s.evcc_reason = "Auto nicht angeschlossen"
             s.uc_status.setdefault("uc6", self._uc_idle_status("uc6"))
         s.uc_reason["uc6"] = s.evcc_reason
+
+    async def _update_sauna_plan(self, s: WattsonData, now: datetime) -> None:
+        """Sauna-Fenster für EMHASS (sauna.py): Kalender, sonst selbst erkannt."""
+        profil = SaunaProfil(
+            aufheiz_kw=SAUNA_AUFHEIZ_KW,
+            halten_kw=SAUNA_HALTEN_KW,
+            aufheiz_dauer_min=SAUNA_AUFHEIZ_DAUER_MIN,
+            aufheiz_vorlauf_min=SAUNA_AUFHEIZ_VORLAUF_MIN,
+            nutz_min=SAUNA_NUTZ_MIN,
+            nachlauf_min=SAUNA_NACHLAUF_MIN,
+            verfall_min=SAUNA_VERFALL_MIN,
+            stichwort=SAUNA_STICHWORT,
+        )
+        st = self.hass.states.get(ENTITY_SAUNA_STATUS)
+        status = st.state if st is not None else None
+        beginn = betriebsbeginn(
+            status, dt_util.as_local(st.last_changed) if st is not None else None, profil,
+        )
+        events = await self._fetch_calendar_events(SAUNA_CALENDARS, SAUNA_LOOKAHEAD_H)
+        if events is not None:
+            self._sauna_termine = sauna_termine(events, SAUNA_STICHWORT, now.tzinfo)
+        plan = sauna_plan(
+            termine=self._sauna_termine, now=now, status=status, beginn=beginn, p=profil,
+        )
+        grund = plan.grund if plan is not None else "kein Termin, Sauna aus"
+        if events is None:
+            grund += " (Kalender nicht abrufbar, letzte Termine)"
+        if (plan is None) != (self._sauna_plan is None) or (
+            plan is not None and self._sauna_plan is not None
+            and (plan.start, plan.ende) != (self._sauna_plan.start, self._sauna_plan.ende)
+        ):
+            _LOGGER.info("Sauna-Plan: %s", grund if plan is None else
+                         f"{plan.start:%H:%M}–{plan.ende:%H:%M} ({plan.quelle}, {grund})")
+        self._sauna_plan = plan
+        s.sauna_plan, s.sauna_grund = plan, grund
 
     async def _fetch_calendar_events(
         self, entity_ids: list[str], hours: int
@@ -3244,6 +3301,9 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             s.uc_status["uc2"] = "fehler"
             s.uc_reason["uc2"] = s.trip_reason
             return
+        # Sauna-Termine stehen auch in Bärchen — keine Fahrt, auch wenn das
+        # iPhone ihnen die Hausadresse als Ort mitgibt.
+        events = [ev for ev in events if not ist_sauna_termin(ev, SAUNA_STICHWORT)]
 
         candidates = await self._evaluate_trip_candidates(cfg, events, now)
         await self._cleanup_stale_trip_plan(
