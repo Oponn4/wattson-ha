@@ -411,6 +411,43 @@ Shelly-Lasttrenner soll L2+L3 abklemmen für 1P-PV-Laden (5.2 kWp liefert nie
 Sperre) via `e3dc.set_power_limits`. Fallback-Heuristik: binäres Lock über
 cheapest/expensive-4h-Fenster. Pausiert wenn UC14 aktiv (kein Doppel-POST).
 
+## Sauna-Plan — Last für EMHASS (v0.20.26)
+
+Kein UC mit eigenem Schalter: Wattson schaltet an der Sauna nichts, es meldet
+nur, **wann** sie Last zieht. `sensor.wattson_sauna_plan` (State `kalender` |
+`erkannt` | `keiner`, Attribute `start`, `ende`, `leistung_w`, `energie_kwh`,
+`grund`). `optimize.sh` auf CT 106 gibt das Fenster EMHASS als `deferrable1`
+mit festem Zeitfenster (`operating_hours` = Fensterlänge,
+`set_deferrable_load_single_constant`). EMHASS plant dann den Akku dazu, UC10
+folgt wie immer `p_batt_forecast`.
+
+**Anlass 25.10.2026:** EMHASS rechnete 17–20 Uhr mit 0,3–0,8 kW Hauslast und
+hielt den Akku für später zurück (`soc_final` 78 %), während die Sauna zum
+Tagesspitzenpreis (25–26 ct) lief. Testlauf mit Sauna als festem Verbraucher:
+1,4 kW Entladung 17:00–19:30, danach 5 %.
+
+**Quellen, in dieser Reihenfolge** (`sauna.py`, rein, Tests in `tests/test_sauna.py`):
+
+1. Termin mit „Sauna" im Titel in `calendar.barchen`. Beginn = ab dann sitzt man
+   drin; die Last beginnt `SAUNA_AUFHEIZ_VORLAUF_MIN` (40) davor. Ganztags-Termine
+   zählen nicht. Ist die Sauna 20 min nach Beginn noch aus, verfällt der Termin.
+2. Rückfall **selbst erkennen**: `input_select.sauna_status` = `vorheizen`/`warm`
+   ohne passenden Termin → Fenster ab Einschalten, 35 min Aufheizen + 120 min.
+   Läuft sie länger, reicht der Plan immer mindestens 30 min über jetzt hinaus.
+   Ein Statuswechsel löst sofort einen Tick aus.
+
+Einschaltzeit kommt aus dem Status-Helper (`vorheizen` = Einschalten, `warm` =
+Einschalten + 35 min), übersteht also einen Neustart ohne eigenen Speicher.
+
+Profil (gemessen 3.–18.10.2026, `sensor.sauna_power`): 9,07 kW für 27–36 min,
+danach im Mittel 3,6 kW; ein Abend 8,8–11,1 kWh. EMHASS bekommt die mittlere
+Leistung über das Restfenster, gedeckelt auf 6 kW (sonst reißt Sauna + Haus
+`maximum_power_from_grid` = 9 kW und das LP wird unlösbar). Für die
+Akku-Entscheidung reicht der Mittelwert: der Akku gibt höchstens 1,5 kW ab,
+die Sauna zieht in jedem Slot mehr.
+
+UC2 filtert Sauna-Termine aus Bärchen heraus, falls ein Termin einen Ort trägt.
+
 ## UC11 — Klima OG Advisor
 
 **v0.18 — Smart-UC11:** Pro-Raum Humidex aus Shelly BLU H&T-Sensoren (Office EE37, Schlaf 757E).

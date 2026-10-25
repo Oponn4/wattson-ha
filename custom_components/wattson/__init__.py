@@ -34,6 +34,7 @@ from .const import (
     DEFAULT_VEHICLE_CONSUMPTION,
     DOMAIN,
     ENTITY_EVCC_CHARGING,
+    ENTITY_SAUNA_STATUS,
     UNIQUE_ID_MIGRATION_V2,
 )
 from .coordinator import WattsonCoordinator, WattsonTripConfig
@@ -174,9 +175,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     entry.async_on_unload(async_at_started(hass, _first_real_tick))
 
     @callback
-    def _auto_laden_geaendert(event: Event[EventStateChangedData]) -> None:
-        """Auto beginnt/beendet das Laden: UC10 sofort sperren bzw. freigeben.
+    def _sofort_neu_rechnen(event: Event[EventStateChangedData]) -> None:
+        """Auto lädt/lädt nicht, Sauna an/aus: sofort neu rechnen.
 
+        Auto: UC10 sofort sperren bzw. freigeben.
         Ohne das flösse bis zu SCAN_INTERVAL_SECONDS lang der Hausspeicher ins
         Auto — evcc sperrt ihn nicht mehr selbst.
         """
@@ -186,7 +188,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.async_create_task(coordinator.async_request_refresh())
 
     entry.async_on_unload(
-        async_track_state_change_event(hass, [ENTITY_EVCC_CHARGING], _auto_laden_geaendert)
+        async_track_state_change_event(
+            # Sauna an/aus: der selbst erkannte Sauna-Plan soll im nächsten
+            # optimize.sh-Lauf stehen, nicht erst nach dem nächsten Intervall.
+            hass, [ENTITY_EVCC_CHARGING, ENTITY_SAUNA_STATUS], _sofort_neu_rechnen,
+        )
     )
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator

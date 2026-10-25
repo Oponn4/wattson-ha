@@ -36,7 +36,8 @@ EMHASS-Deferrable mehr.
 
 ## Out-of-Scope (bewusst)
 
-- Sauna-Nudge → `script.strompreis_auskunft`, nicht Wattson
+- Sauna-Nudge (wann einschalten) → `script.strompreis_auskunft`, nicht Wattson.
+  Die Sauna-**Last** plant Wattson seit v0.20.26 für EMHASS ein (siehe use-cases.md, Sauna-Plan).
 - Speicher-Arbitrage (5 kWh zu klein, < 50 €/a)
 - Anbieterwechsel (1×/Jahr manuell), Direktvermarktung
 

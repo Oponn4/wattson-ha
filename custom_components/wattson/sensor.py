@@ -6,6 +6,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.util import dt as dt_util
 
 from . import wattson_device_info
 from .const import DOMAIN, UC_DEFINITIONS
@@ -26,6 +27,7 @@ async def async_setup_entry(
         WattsonExpensiveWindowSensor(coordinator, entry, hours=2),
         WattsonNextTripSensor(coordinator, entry),
         WattsonTibberForecastSensor(coordinator, entry),
+        WattsonSaunaPlanSensor(coordinator, entry),
     ]
     for uc_id, slug, display, _ in UC_DEFINITIONS:
         entities.append(WattsonUCStatusSensor(coordinator, entry, uc_id, slug, display))
@@ -274,4 +276,40 @@ class WattsonNextTripSensor(WattsonBaseSensor):
                 round(d.trip_extra_cost_eur, 2)
                 if d.trip_extra_cost_eur is not None else None
             ),
+        }
+
+
+class WattsonSaunaPlanSensor(WattsonBaseSensor):
+    """Sauna-Fenster für EMHASS (sauna.py). optimize.sh liest die Attribute
+    `start`, `ende` und `leistung_w` und plant die Sauna als deferrable1 fest ein.
+
+    State: `kalender` | `erkannt` | `keiner`.
+    """
+
+    def __init__(self, coordinator, entry):
+        super().__init__(coordinator, entry, "sauna_plan", "Sauna Plan")
+        self._attr_icon = "mdi:sauna"
+
+    @property
+    def native_value(self):
+        if self.coordinator.data is None:
+            return None
+        plan = self.coordinator.data.sauna_plan
+        return plan.quelle if plan is not None else "keiner"
+
+    @property
+    def extra_state_attributes(self):
+        if self.coordinator.data is None:
+            return {}
+        d = self.coordinator.data
+        plan = d.sauna_plan
+        if plan is None:
+            return {"grund": d.sauna_grund}
+        return {
+            "start": plan.start.isoformat(),
+            "ende": plan.ende.isoformat(),
+            "titel": plan.titel,
+            "energie_kwh": plan.energie_kwh,
+            "leistung_w": plan.leistung_w(dt_util.now()),
+            "grund": d.sauna_grund,
         }

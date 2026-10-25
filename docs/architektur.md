@@ -36,7 +36,7 @@ plan-aware und macht alles, was EMHASS nicht kann.
 |---------|-------|-----------------|
 | Battery-Schedule (SOC-Trajektorie) | EMHASS | LP mit Tibber-Preisen + PV-Forecast |
 | T300-Heizstab | EMHASS → UC4b | deferrable0, plan-aware |
-| Wallbox-Energie | EMHASS → UC6 | deferrable1, plan-aware |
+| Sauna-Last | Wattson → EMHASS | deferrable1, festes Fenster aus `sensor.wattson_sauna_plan` (Kalender oder selbst erkannt); EMHASS entscheidet nur den Akku |
 | Kalender-Trip (UC2) | Wattson | gmaps-Distanz → `evcc_intg.set_vehicle_plan` (evcc plant selbst) |
 | Notifications (UC1, Safety) | Wattson | EMHASS hat keinen Notify-Pfad |
 | Proxon-Kühlung (UC12) | Wattson | thermisch + forecast-skalierte Schwellen |
