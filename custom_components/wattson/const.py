@@ -231,6 +231,11 @@ UC6_DOWNSHIFT_CONFIRMATION_CYCLES = 2  # 2 Cycles in Folge "kein Bedarf mehr"
 # statt Live-Werte reaktiv zu folgen. Anti-Replan-Jitter durch Confirmation-Cycles.
 UC4B_CONFIRMATION_CYCLES   = 2     # so viele Cycles in Folge "Plan=off" bis ausschalten
 UC4B_REMINDER_COOLDOWN_MIN = 60    # Safety-Reminder: max 1/h
+# Safety-Reminder nur außerhalb des günstigsten Tagesdrittels (v0.20.27).
+# Tibbers Preisstufe misst gegen den Schnitt der Vortage: am 28.10.2026 stand
+# sie ab 06:00 durchgehend auf expensive/very_expensive, der Heizstab-Slot um
+# 12:00 (41,3 ct, Tag 38,1–59,2 ct) lag aber im günstigsten Achtel des Tages.
+UC4B_REMINDER_MIN_RANKING  = 0.33
 
 # UC4b v0.20.11 — gemessen am 19.09.2026, zwei unabhängige Befunde.
 #

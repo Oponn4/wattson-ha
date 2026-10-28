@@ -174,6 +174,7 @@ from .const import (
     UC4B_ELEMENT_HYSTERESE_C,
     UC4B_MIN_DWELL_MIN,
     UC4B_REMINDER_COOLDOWN_MIN,
+    UC4B_REMINDER_MIN_RANKING,
     UC6_DOWNSHIFT_CONFIRMATION_CYCLES,
     UC6_MODE_HOLD_MINUTES,
     UC6_NOW_TRIP_URGENT_HOURS,
@@ -232,6 +233,7 @@ from .forecast import (
     heizstab_block_text,
     heizstab_kann_wirken,
     heizstab_plan_signal,
+    heizstab_reminder_faellig,
     hitze_uhr,
     humidex,
     is_in_window,
@@ -2103,7 +2105,10 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
     async def _uc4b_send_safety_notify(
         self, s: WattsonData, now: datetime, actions: list[str]
     ) -> None:
-        """UC4b Safety-Net: warnt wenn Heizstab läuft und Strompreis ≥ expensive.
+        """UC4b Safety-Net: warnt wenn Heizstab läuft und Strompreis teuer ist.
+
+        Teuer = Tibber-Stufe ≥ expensive **und** nicht im günstigsten Drittel
+        des Tages (v0.20.27, s. `heizstab_reminder_faellig`).
 
         Greift wenn EMHASS-Plan suboptimal entscheidet, ein User-Override den Stab
         vergessen lässt oder Proxon-intern den Stab anwirft. Wattson schaltet nicht
@@ -2112,7 +2117,11 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         """
         if not s.t300_heizstab_on:
             return
-        if s.price_level not in UC12_EXPENSIVE_LEVELS:
+        if not heizstab_reminder_faellig(
+            price_level=s.price_level, price_ranking=s.price_ranking,
+            expensive_levels=UC12_EXPENSIVE_LEVELS,
+            min_ranking=UC4B_REMINDER_MIN_RANKING,
+        ):
             return
         if s.sleep_mode or now.hour >= UC11_QUIET_START_H or now.hour < UC11_QUIET_END_H:
             actions.append(
