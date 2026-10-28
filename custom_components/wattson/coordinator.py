@@ -145,6 +145,9 @@ from .const import (
     SAUNA_AUFHEIZ_VORLAUF_MIN,
     SAUNA_CALENDARS,
     SAUNA_HALTEN_KW,
+    SAUNA_KALENDER_ABEND_H,
+    SAUNA_KALENDER_INTERVALL_ABEND_MIN,
+    SAUNA_KALENDER_INTERVALL_MIN,
     SAUNA_LOOKAHEAD_H,
     SAUNA_NACHLAUF_MIN,
     SAUNA_NUTZ_MIN,
@@ -256,6 +259,7 @@ from .forecast import (
     upcoming_slots,
 )
 from .gmaps import GoogleMapsClient
+from .kalender import abruf_faellig, abruf_intervall_min, termine_holen
 from .override import OverrideManager, UCDefinition, values_equal
 from .sauna import (
     SaunaPlan,
@@ -503,6 +507,8 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         # mit ihnen weitergerechnet (nicht der alte Plan eingefroren: ein
         # selbst erkannter Plan muss enden, sobald die Sauna aus ist)
         self._sauna_termine: list[SaunaTermin] = []
+        self._sauna_kalender_versuch: datetime | None = None
+        self._sauna_kalender_ok = True
         self._sauna_plan: SaunaPlan | None = None
         # v0.20.20: Start-Freigabe — erst handeln, wenn Kern-Sensoren/Dienste da
         self._running_seit: datetime | None = None
@@ -1618,14 +1624,32 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         beginn = betriebsbeginn(
             status, dt_util.as_local(st.last_changed) if st is not None else None, profil,
         )
-        events = await self._fetch_calendar_events(SAUNA_CALENDARS, SAUNA_LOOKAHEAD_H)
-        if events is not None:
-            self._sauna_termine = sauna_termine(events, SAUNA_STICHWORT, now.tzinfo)
+        # v0.20.28: stündlich fragen, 15–20 Uhr alle 20 min. Ein
+        # Statuswechsel der Sauna wirkt trotzdem sofort, der kommt über
+        # `status`, nicht über den Kalender.
+        intervall = abruf_intervall_min(
+            now,
+            normal_min=SAUNA_KALENDER_INTERVALL_MIN,
+            abend_min=SAUNA_KALENDER_INTERVALL_ABEND_MIN,
+            abend_h=SAUNA_KALENDER_ABEND_H,
+        )
+        if abruf_faellig(self._sauna_kalender_versuch, now, intervall):
+            self._sauna_kalender_versuch = now
+            events = await self._fetch_calendar_events(
+                SAUNA_CALENDARS, SAUNA_LOOKAHEAD_H,
+            )
+            if events is not None:
+                self._sauna_termine = sauna_termine(
+                    events, SAUNA_STICHWORT, now.tzinfo,
+                )
+                self._sauna_kalender_ok = True
+            else:
+                self._sauna_kalender_ok = False
         plan = sauna_plan(
             termine=self._sauna_termine, now=now, status=status, beginn=beginn, p=profil,
         )
         grund = plan.grund if plan is not None else "kein Termin, Sauna aus"
-        if events is None:
+        if not self._sauna_kalender_ok:
             grund += " (Kalender nicht abrufbar, letzte Termine)"
         if (plan is None) != (self._sauna_plan is None) or (
             plan is not None and self._sauna_plan is not None
@@ -1639,32 +1663,16 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
     async def _fetch_calendar_events(
         self, entity_ids: list[str], hours: int
     ) -> list[dict] | None:
-        """Events der konfigurierten Kalender.
+        """Events der konfigurierten Kalender, s. `kalender.termine_holen`."""
 
-        None = Abruf fehlgeschlagen, [] = wirklich keine Termine. Die
-        Unterscheidung ist wichtig: das Aufräumen alter Fahrpläne darf einen
-        gültigen Plan nicht löschen, nur weil der Kalender gerade nicht antwortet.
-        """
-        if not entity_ids:
-            return []
-        try:
-            resp = await self.hass.services.async_call(
+        async def abruf(ids: list[str], h: int) -> dict | None:
+            return await self.hass.services.async_call(
                 "calendar", "get_events",
-                {"entity_id": entity_ids, "duration": {"hours": hours}},
+                {"entity_id": ids, "duration": {"hours": h}},
                 blocking=True, return_response=True,
             )
-        except HomeAssistantError as e:
-            _LOGGER.warning("calendar.get_events fehlgeschlagen: %s", e)
-            return None
-        if not resp:
-            return None
-        # Response ist {entity_id: {"events": [...]}, ...} — mergen
-        merged: list[dict] = []
-        for cal_id, cal_data in resp.items():
-            if isinstance(cal_data, dict):
-                for ev in cal_data.get("events", []):
-                    merged.append({**ev, "_calendar": cal_id})
-        return merged
+
+        return await termine_holen(abruf, entity_ids, hours)
 
     async def _handle_uc4b_heizstab(
         self, s: WattsonData, now: datetime, actions: list[str]

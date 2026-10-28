@@ -443,6 +443,16 @@ Tagesspitzenpreis (25–26 ct) lief. Testlauf mit Sauna als festem Verbraucher:
 Einschaltzeit kommt aus dem Status-Helper (`vorheizen` = Einschalten, `warm` =
 Einschalten + 35 min), übersteht also einen Neustart ohne eigenen Speicher.
 
+**Kalenderabruf (v0.20.28):** `calendar.barchen` wird stündlich gefragt, von
+15 bis 20 Uhr alle 20 min (spontane Sauna-Termine entstehen typischerweise am
+Nachmittag); 34 statt 288 Abrufe am Tag. HAs eigener Abruf füllt nur den
+Zustand der Kalender-Entity (nächster Termin); jedes `calendar.get_events` geht
+live zu iCloud. Bis v0.20.27 kam das jeden Tick, iCloud antwortete am 28.10.
+mit `RateLimitError`, und weil `_fetch_calendar_events` nur `HomeAssistantError`
+fing, fiel der ganze Tick aus (fünf Mal seit 26.10.). Jetzt zählt jeder Fehler
+als „nicht abrufbar" (`kalender.py`), es wird mit den letzten Terminen
+weitergerechnet. Das gilt auch für UC2.
+
 Profil (gemessen 3.–18.10.2026, `sensor.sauna_power`): 9,07 kW für 27–36 min,
 danach im Mittel 3,6 kW; ein Abend 8,8–11,1 kWh. EMHASS bekommt die mittlere
 Leistung über das Restfenster, gedeckelt auf 6 kW (sonst reißt Sauna + Haus
