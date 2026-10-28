@@ -1585,6 +1585,23 @@ def heizstab_kann_wirken(
     return tank_c <= e_heiz_ziel_c - hysterese_c
 
 
+
+def heizstab_reminder_faellig(
+    *, price_level: str, price_ranking: float,
+    expensive_levels: tuple[str, ...], min_ranking: float,
+) -> bool:
+    """Lohnt die Warnung „Heizstab läuft bei teurem Strom"?
+
+    Teuer heißt hier zweierlei: Tibbers Preisstufe ist teuer **und** die
+    Stunde gehört nicht zum günstigsten Teil des Tages. Die Preisstufe allein
+    vergleicht mit den Vortagen. An einem teuren Tag stand sie am 28.10.2026
+    von früh bis mittags auf teuer, und Wattson warnte fünf Minuten nach dem
+    eigenen Einschalten im billigsten Slot des Tages (Rang 0,125). Billiger
+    ging es an dem Tag nicht, ausschalten hätte nichts gespart.
+    """
+    if price_level not in expensive_levels:
+        return False
+    return price_ranking > min_ranking
 def next_deferrable_on_block(
     slots: list[DeferrableSlot], now: datetime, threshold_w: float,
 ) -> tuple[datetime, datetime] | None:

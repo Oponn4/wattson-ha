@@ -248,8 +248,12 @@ startet der Tank bei ~52, Hysterese also irrelevant. **Betriebsart LF1/LF2
 Boost heizt darin nicht, WP auch nicht (4h-Test ohne jede Reaktion).
 
 **Safety-Reminder:** Heizstab an + `price_level ∈ {expensive, very_expensive}`
-→ Push mit [Aus]/[Ignorieren], 60min-Cooldown, Quiet-Hours-Suppress.
++ Tagesrang über `UC4B_REMINDER_MIN_RANKING` (0,33, seit v0.20.27) → Push mit [Aus]/[Ignorieren], 60min-Cooldown, Quiet-Hours-Suppress.
 Action-Automation: `automation.wattson_heizstab_safety_action`.
+Tibbers Stufe vergleicht mit den Vortagen. Am 28.10.2026 stand sie ganztags
+auf teuer, und Wattson warnte 5 min nach dem eigenen Einschalten im billigsten
+Slot des Tages (41,3 ct, Rang 0,125). Im günstigsten Tagesdrittel entfällt die
+Warnung deshalb.
 
 ## UC6 — E-Auto-Lademodus (3-Level)
 
