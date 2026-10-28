@@ -156,6 +156,11 @@ ENTITY_SAUNA_STATUS        = "input_select.sauna_status"   # idle/vorheizen/warm
 SAUNA_CALENDARS            = ["calendar.barchen"]
 SAUNA_STICHWORT            = "sauna"   # im Termintitel
 SAUNA_LOOKAHEAD_H          = 24        # = EMHASS-Horizont
+# Kalenderabruf (v0.20.28): iCloud-CalDAV drosselt, s. kalender.py. Spontane
+# Sauna-Termine entstehen typischerweise am Nachmittag, sonst reicht stündlich.
+SAUNA_KALENDER_INTERVALL_MIN       = 60
+SAUNA_KALENDER_INTERVALL_ABEND_MIN = 20
+SAUNA_KALENDER_ABEND_H             = (15, 20)   # [von, bis) Ortszeit
 SAUNA_AUFHEIZ_KW           = 9.0       # gemessen 9,07 kW Volllast
 SAUNA_HALTEN_KW            = 3.6       # Mittel nach dem Aufheizen, Leute drin
 SAUNA_AUFHEIZ_DAUER_MIN    = 35        # gemessen 27–36 min Volllast
