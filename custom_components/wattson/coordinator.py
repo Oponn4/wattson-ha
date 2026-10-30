@@ -132,6 +132,7 @@ from .const import (
     MIN_SPREAD_EUR,
     MISC_UC2_PLAN,
     NOTIFY_SERVICE,
+    OUTDOOR_WARM_MIN_C,
     PLUGIN_ARRIVAL_WINDOW_MIN,
     PLUGIN_COMFORT_SOC,
     PLUGIN_REMINDER_COOLDOWN_MIN,
@@ -260,6 +261,7 @@ from .forecast import (
 )
 from .gmaps import GoogleMapsClient
 from .kalender import abruf_faellig, abruf_intervall_min, termine_holen
+from .klima import kuehlsperre, raumtemperatur
 from .override import OverrideManager, UCDefinition, values_equal
 from .sauna import (
     SaunaPlan,
@@ -394,6 +396,9 @@ class WattsonData:
     ht_office_rh: float | None = None
     ht_schlaf_temp: float | None = None        # v0.18: BTHome H&T Schlafzimmer
     ht_schlaf_rh: float | None = None
+    # v0.20.29: Median aus H&T, Klimaanlage und Proxon-Panel (siehe klima.py)
+    raum_office_temp: float | None = None
+    raum_schlaf_temp: float | None = None
     cool_enable_on: bool = False    # tatsächlicher Switch-Status
     cool_snooze_until: datetime | None = None  # Reminder-Snooze (aus Helper)
     # v0.20.9: läuft die Freigabe *wegen Hitze* bzw. *wegen PV-Überschuss*?
@@ -815,6 +820,15 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         except (TypeError, ValueError):
             return None
 
+    def _attr_fval_or_none(self, entity_id: str, attribute: str) -> float | None:
+        state = self.hass.states.get(entity_id)
+        if state is None or state.state in ("unavailable", "unknown"):
+            return None
+        try:
+            return float(state.attributes.get(attribute))
+        except (TypeError, ValueError):
+            return None
+
     def _ival(self, entity_id: str, default: int = 0) -> int:
         return int(self._fval(entity_id, default))
 
@@ -1173,6 +1187,16 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         s.klima_schlaf_hvac = self._state(ENTITY_KLIMA_SCHLAFZIMMER, "off") or "off"
         s.klima_schlaf_current = float(self._attr(ENTITY_KLIMA_SCHLAFZIMMER, "current_temperature", 22.0) or 22.0)
         s.klima_schlaf_target = float(self._attr(ENTITY_KLIMA_SCHLAFZIMMER, "temperature", 23.0) or 23.0)
+        s.raum_office_temp = raumtemperatur(
+            s.ht_office_temp,
+            self._attr_fval_or_none(ENTITY_KLIMA_OFFICE, "current_temperature"),
+            self._attr_fval_or_none(ENTITY_PROXON_CLIMATE_OFFICE, "current_temperature"),
+        )
+        s.raum_schlaf_temp = raumtemperatur(
+            s.ht_schlaf_temp,
+            self._attr_fval_or_none(ENTITY_KLIMA_SCHLAFZIMMER, "current_temperature"),
+            self._attr_fval_or_none(ENTITY_PROXON_CLIMATE_SCHLAFZIMMER, "current_temperature"),
+        )
         # Heute-Höchsttemperatur (UC11 Pre-Cool, UC12 Schwellen + Saisonsperre)
         s.forecast_max_temp_c = await self._forecast_tages_max()
         # Anwesenheit (UC11 v2)
@@ -2230,8 +2254,10 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         await self._uc11_handle_room(s, actions, "schlaf")
         if not s.uc_reason["uc11"]:
             s.uc_reason["uc11"] = (
-                f"OK (office {s.klima_office_current:.1f}°C/{s.klima_office_hvac}, "
-                f"schlaf {s.klima_schlaf_current:.1f}°C/{s.klima_schlaf_hvac})"
+                f"OK (office {s.raum_office_temp or s.klima_office_current:.1f}°C/"
+                f"{s.klima_office_hvac}, "
+                f"schlaf {s.raum_schlaf_temp or s.klima_schlaf_current:.1f}°C/"
+                f"{s.klima_schlaf_hvac})"
             )
 
     async def _uc11_handle_room(
@@ -2244,7 +2270,7 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             proxon_soll = s.proxon_soll_office
             current_hvac = s.klima_office_hvac
             current_target = s.klima_office_target
-            inside_temp = s.ht_office_temp if s.ht_office_temp is not None else s.klima_office_current
+            inside_temp = s.raum_office_temp if s.raum_office_temp is not None else s.klima_office_current
             inside_rh   = s.ht_office_rh   if s.ht_office_rh   is not None else self._fval(ENTITY_HUMIDITY_PROXY, 50.0)
             auto_action = UC11_AUTO_ACTION_OFFICE
         else:
@@ -2252,7 +2278,7 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             proxon_soll = s.proxon_soll_schlaf
             current_hvac = s.klima_schlaf_hvac
             current_target = s.klima_schlaf_target
-            inside_temp = s.ht_schlaf_temp if s.ht_schlaf_temp is not None else s.klima_schlaf_current
+            inside_temp = s.raum_schlaf_temp if s.raum_schlaf_temp is not None else s.klima_schlaf_current
             inside_rh   = s.ht_schlaf_rh   if s.ht_schlaf_rh   is not None else self._fval(ENTITY_HUMIDITY_PROXY, 50.0)
             auto_action = UC11_AUTO_ACTION_SCHLAF
 
@@ -2333,29 +2359,39 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             f"({'unbequem' if too_hot else 'warm + Außen kühler'})"
         )
 
-        if auto_action:
-            # Autonome Aktion (v0.15+, aktuell deaktiviert)
+        sperre = (
+            kuehlsperre(
+                aussen_c=s.frischluft_temp,
+                tages_max_c=s.forecast_max_temp_c,
+                aussen_min_c=OUTDOOR_WARM_MIN_C,
+                saison_max_c=COOL_SAISON_MAX_C,
+            )
+            if auto_action else None
+        )
+        if sperre:
+            # v0.20.29: an kühlen Tagen / bei kühler Außenluft kühlt Wattson
+            # nicht selbst — der Advisor schlägt dann höchstens Lüften vor.
+            actions.append(f"UC11 {room}: nicht selbst kühlen ({sperre})")
+        if auto_action and not sperre:
             target_mode = "cool"
             target_temp = cool_target
-            if current_hvac != target_mode:
+            if (current_hvac != target_mode
+                    or abs(current_target - target_temp) >= 0.5):
+                # Modus und Sollwert in einem Call: `climate.set_temperature`
+                # nimmt `hvac_mode` mit. Bestätigt wird über den Zustand
+                # (`cool`). Bis v0.20.28 lief der Sollwert als eigener Write,
+                # dessen Rücklesen den Zustand mit der Temperatur verglich —
+                # scheiterte immer, und jeder Tick schrieb erneut.
                 acted, _ = await self._try_act(
                     "uc11", entity, target_mode,
-                    "climate", "set_hvac_mode",
-                    {"entity_id": entity, "hvac_mode": target_mode},
-                )
-                if acted:
-                    actions.append(
-                        f"{room} → {target_mode} {target_temp:.1f}°C{modifier_str}"
-                    )
-            if abs(current_target - target_temp) >= 0.5:
-                acted, _ = await self._try_act(
-                    "uc11", entity, target_temp,
                     "climate", "set_temperature",
-                    {"entity_id": entity, "temperature": target_temp},
+                    {"entity_id": entity, "hvac_mode": target_mode,
+                     "temperature": target_temp},
                 )
                 if acted:
                     actions.append(
-                        f"{room} Soll {current_target:.1f}→{target_temp:.1f}°C{modifier_str}"
+                        f"{room} → {target_mode} {current_target:.1f}→"
+                        f"{target_temp:.1f}°C{modifier_str}"
                     )
         else:
             # Advisor-Mode (v0.14.1 Default): Notify mit Empfehlung
