@@ -468,7 +468,7 @@ UC2 filtert Sauna-Termine aus Bärchen heraus, falls ein Termin einen Ort trägt
 
 | Raum | Modus | Begründung |
 |------|-------|------------|
-| Office | Auto (`set_hvac_mode`) | eigener HT-Sensor, tagsüber kein Schlafrisiko |
+| Office | Auto (`set_temperature` mit `hvac_mode`) | eigener HT-Sensor, tagsüber kein Schlafrisiko |
 | Schlafzimmer | Advisor (Notify) | Sonja leichter Schläfer → keine autonome Nacht-Aktion |
 
 Trigger: `humidex_innen ≥ 30` (some discomfort) ∧ Δinnen−außen ≥ +3°C
@@ -480,6 +480,12 @@ UC12 B Schwüle: `humidity_proxy_pct` = max(HT-Office, HT-Schlaf) statt TP357 Wo
 - v0.15.2: Notify unterdrückt wenn Proxon-Kühlung (UC12) bereits läuft
 - v0.18.0: echte pro-Raum RH + Office Auto-Mode
 - v0.18.1: Window-Guard `binary_sensor.office_doof_window_office_links_window` → kein Auto-Klima-Start; läuft Klima schon → abschalten
+- v0.20.29: Raumtemperatur = Median aus H&T, Klimaanlage und Proxon-Panel (zwei Werte: der niedrigere).
+  Anlass 30.10.2026: Shelly Office am Südfenster in der Sonne 28,6 °C, Raum 24,3–24,5 °C, außen 10 °C →
+  Wattson kühlte. Dazu Kühlsperre (`klima.kuehlsperre`): Tages-Höchstwert < `COOL_SAISON_MAX_C` oder
+  außen < `OUTDOOR_WARM_MIN_C` → keine Auto-Kühlung, nur Advisor (Lüften). Modus + Sollwert jetzt ein
+  Call; der getrennte `set_temperature`-Write verglich beim Rücklesen den Zustand mit der Temperatur
+  und scheiterte jeden Tick.
 
 `switch.wattson_klimaanlagen_og` = UC11 Enable-Toggle.
 
