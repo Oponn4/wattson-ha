@@ -541,6 +541,8 @@ CLIMATE_PEAK_OFFSET_C      = 1.0   # bei Tibber-Peak: zusätzlicher Offset (höh
 UC11_AUTO_ACTION_OFFICE    = True
 UC11_AUTO_ACTION_SCHLAF    = False
 UC11_NOTIFY_COOLDOWN_MIN   = 60     # max 1 Notify/h pro Raum
+UC11_AUS_MIN_LAUFZEIT_MIN  = 20     # v0.20.30: so lange läuft eine von Wattson gestartete Klima mindestens
+UC11_AUS_HYSTERESE_K       = 2.0    # v0.20.30: aus erst 2 K unter Einschaltschwelle (Humidex) bzw. Außengrenze
 UC11_QUIET_START_H         = 22     # ab 22 Uhr keine Notifies (Schlaf)
 UC11_QUIET_END_H           = 7      # bis 7 Uhr keine Notifies
 HUMIDEX_WARM_THRESHOLD     = 30.0   # ab humidex 30 = "some discomfort" → Notify wenn Spread passt
