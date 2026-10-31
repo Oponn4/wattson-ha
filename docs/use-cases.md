@@ -486,6 +486,14 @@ UC12 B Schwüle: `humidity_proxy_pct` = max(HT-Office, HT-Schlaf) statt TP357 Wo
   außen < `OUTDOOR_WARM_MIN_C` → keine Auto-Kühlung, nur Advisor (Lüften). Modus + Sollwert jetzt ein
   Call; der getrennte `set_temperature`-Write verglich beim Rücklesen den Zustand mit der Temperatur
   und scheiterte jeden Tick.
+- v0.20.30: Auto-Aus. Was Wattson selbst auf `cool` geschaltet hat (letzter Action-Record uc11 = `cool`,
+  danach keine Hand-Änderung), schaltet Wattson nach mindestens `UC11_AUS_MIN_LAUFZEIT_MIN` (20 min) wieder aus:
+  gefühlt `UC11_AUS_HYSTERESE_K` (2 K) unter `HUMIDEX_WARM_THRESHOLD` oder Kühlsperre mit 2 K Abstand zur
+  Außengrenze. Von Hand Eingeschaltetes bleibt unangetastet. Auch im Schlafmodus erlaubt (Ausschalten ist leise); einschalten, verstellen und Notifies bleiben nachts gesperrt.
+- v0.20.30: Sollwert von Hand verstellt, während Wattson kühlt (Context mit `user_id`, `last_updated` nach
+  Wattsons letztem Write) → Override bis Mitternacht. Vorher sah die Erkennung nur den Zustand `cool` und
+  schrieb den Sollwert im nächsten Tick zurück. Fernbedienung/Hersteller-App tragen keine `user_id` und
+  bleiben unsichtbar.
 
 `switch.wattson_klimaanlagen_og` = UC11 Enable-Toggle.
 

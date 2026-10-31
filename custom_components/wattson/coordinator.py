@@ -183,6 +183,8 @@ from .const import (
     UC6_MODE_HOLD_MINUTES,
     UC6_NOW_TRIP_URGENT_HOURS,
     UC6_SUN_SURPLUS_MIN_W,
+    UC11_AUS_HYSTERESE_K,
+    UC11_AUS_MIN_LAUFZEIT_MIN,
     UC11_AUTO_ACTION_OFFICE,
     UC11_AUTO_ACTION_SCHLAF,
     UC11_NOTIFY_COOLDOWN_MIN,
@@ -261,7 +263,7 @@ from .forecast import (
 )
 from .gmaps import GoogleMapsClient
 from .kalender import abruf_faellig, abruf_intervall_min, termine_holen
-from .klima import kuehlsperre, raumtemperatur
+from .klima import auto_aus_grund, kuehlsperre, raumtemperatur
 from .override import OverrideManager, UCDefinition, values_equal
 from .sauna import (
     SaunaPlan,
@@ -751,6 +753,18 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             else:
                 always_charge = self._state(ac_entity)
         return normalize_mode(raw, always_charge)
+
+    def _von_hand_seit(self, entity_id: str, seit: datetime) -> bool:
+        """Hat ein Mensch die Entity nach `seit` angefasst?
+
+        Anders als `_user_touch_at` zählt auch eine reine Attribut-Änderung
+        (z.B. Sollwert von Hand verstellt): die ändert `last_updated` und den
+        Context, nicht aber `last_changed`.
+        """
+        state = self.hass.states.get(entity_id)
+        if state is None or state.context is None or not state.context.user_id:
+            return False
+        return state.last_updated > seit
 
     def _user_touch_at(self, entity_id: str) -> datetime | None:
         """Zeitpunkt der letzten Änderung, die HA einem Menschen zuschreibt.
@@ -1323,6 +1337,11 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             # bleibt gesperrt (`sleep_only_off`) — das treibt die Lüfterstufe
             # auf max und weckt. Schließen ist leise.
             await self._handle_uc12_cooling(
+                s, now, sleep_actions, sleep_only_off=True,
+            )
+            # v0.20.30: UC11 darf nachts ausschalten, was Wattson selbst
+            # eingeschaltet hat — Abschalten ist leise (Christian, 31.10.).
+            await self._handle_uc11_klima(
                 s, now, sleep_actions, sleep_only_off=True,
             )
             await self._run_trip_planning(s, now, sleep_actions)
@@ -2201,10 +2220,11 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             _LOGGER.warning("UC4b safety reminder failed: %s", ex)
 
     async def _handle_uc11_klima(
-        self, s: WattsonData, now: datetime, actions: list[str]
+        self, s: WattsonData, now: datetime, actions: list[str],
+        sleep_only_off: bool = False,
     ) -> None:
         """UC11: Klimaanlagen OG (Office + Schlafzimmer).
-        Sleep-Mode = NICHTS (Frau leichter Schläfer, Office=Nachbarzimmer).
+        Sleep-Mode = nur Ausschalten, was Wattson eingeschaltet hat (v0.20.30).
         Urlaub-Mode = alles aus.
         Sonst: Komfort-Sollwert = Proxon-Heiz-Soll + 2°C, modifiziert durch
         PV-Pre-Cool / Tibber-Peak-Bump."""
@@ -2222,8 +2242,14 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             return
 
         # STRICT Sleep-Mode: NICHTS — auch Office nicht (Nachbarzimmer)
-        if s.sleep_mode:
-            s.uc_reason["uc11"] = "Schlafmodus → NICHTS (Frau leichter Schläfer)"
+        # Schlafmodus: nichts einschalten, nichts verstellen, keine Notifies
+        # (Frau leichter Schläfer, Office = Nachbarzimmer). Ausschalten, was
+        # Wattson selbst eingeschaltet hat, ist erlaubt (v0.20.30).
+        if s.sleep_mode or sleep_only_off:
+            await self._uc11_handle_room(s, actions, "office", nur_aus=True)
+            s.uc_status["uc11"] = "schlafmodus"
+            if not s.uc_reason["uc11"]:
+                s.uc_reason["uc11"] = "Schlafmodus → nur Ausschalten"
             return
 
         # Urlaub: beide aus
@@ -2263,8 +2289,12 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
     async def _uc11_handle_room(
         self, s: WattsonData, actions: list[str], room: str,
         forced_off: bool = False, reason_prefix: str = "",
+        nur_aus: bool = False,
     ) -> None:
-        """Hilfsfunktion: Steuere ein Klima-Raum nach UC11-Regeln."""
+        """Hilfsfunktion: Steuere ein Klima-Raum nach UC11-Regeln.
+
+        `nur_aus` (Schlafmodus): nur das Auto-Aus läuft, kein Einschalten.
+        """
         if room == "office":
             entity = ENTITY_KLIMA_OFFICE
             proxon_soll = s.proxon_soll_office
@@ -2338,6 +2368,42 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         outside_hx = humidex(s.frischluft_temp, inside_rh)
         delta_hx = inside_hx - outside_hx
 
+        # v0.20.30: was Wattson eingeschaltet hat, schaltet Wattson auch aus
+        if auto_action and current_hvac == "cool":
+            last = self._override.get_last_action(entity)
+            wattson_hat_an = (
+                last is not None and last.uc_id == "uc11"
+                and last.value == "cool"
+                and not self._von_hand_seit(entity, last.set_at)
+            )
+            laufzeit_min = (
+                (dt_util.now() - last.set_at).total_seconds() / 60
+                if last is not None else 0.0
+            )
+            grund = auto_aus_grund(
+                wattson_hat_an=wattson_hat_an,
+                laufzeit_min=laufzeit_min,
+                min_laufzeit_min=UC11_AUS_MIN_LAUFZEIT_MIN,
+                innen_hx=inside_hx,
+                an_schwelle_hx=HUMIDEX_WARM_THRESHOLD,
+                hysterese_k=UC11_AUS_HYSTERESE_K,
+                aussen_c=s.frischluft_temp,
+                tages_max_c=s.forecast_max_temp_c,
+                aussen_min_c=OUTDOOR_WARM_MIN_C,
+                saison_max_c=COOL_SAISON_MAX_C,
+            )
+            if grund:
+                acted, _ = await self._try_act(
+                    "uc11", entity, "off",
+                    "climate", "set_hvac_mode",
+                    {"entity_id": entity, "hvac_mode": "off"},
+                )
+                if acted:
+                    actions.append(f"UC11 {room}: Klima aus ({grund})")
+                return
+        if nur_aus:
+            return
+
         # Trigger-Bedingung:
         # - Innen ≥ 28 humidex → unbequem (egal Außen)
         # - ODER Innen ≥ 26 humidex UND Innen ≥ Außen + 2°C (Klima besser als Lüften)
@@ -2375,6 +2441,25 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         if auto_action and not sperre:
             target_mode = "cool"
             target_temp = cool_target
+            # v0.20.30: Sollwert von Hand verstellt, während Wattson kühlt?
+            # Die Override-Erkennung vergleicht nur den Zustand (`cool`), eine
+            # reine Sollwert-Änderung sah sie nicht — Wattson schrieb den Wert
+            # im nächsten Tick zurück. Jetzt zählt jeder Hand-Eingriff seit
+            # Wattsons letztem Write als Override (Cooldown bis Mitternacht).
+            last = self._override.get_last_action(entity)
+            if (last is not None and last.uc_id == "uc11"
+                    and current_hvac == target_mode
+                    and self._von_hand_seit(entity, last.set_at)):
+                await self._override.async_record_override(
+                    "uc11", entity, current_target,
+                )
+                remaining = self._override.cooldown_remaining_minutes("uc11")
+                s.uc_status["uc11"] = f"user-override ({remaining}min Rest)"
+                s.uc_reason["uc11"] = (
+                    f"{room}: Sollwert von Hand auf {current_target:.1f}°C → "
+                    f"Wattson hält sich raus ({remaining}min)"
+                )
+                return
             if (current_hvac != target_mode
                     or abs(current_target - target_temp) >= 0.5):
                 # Modus und Sollwert in einem Call: `climate.set_temperature`

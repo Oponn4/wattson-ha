@@ -57,3 +57,45 @@ def kuehlsperre(
     if aussen_c < aussen_min_c:
         return f"außen {aussen_c:.1f} °C < {aussen_min_c:.1f} °C → Lüften reicht"
     return None
+
+
+def auto_aus_grund(
+    *,
+    wattson_hat_an: bool,
+    laufzeit_min: float,
+    min_laufzeit_min: float,
+    innen_hx: float,
+    an_schwelle_hx: float,
+    hysterese_k: float,
+    aussen_c: float,
+    tages_max_c: float | None,
+    aussen_min_c: float,
+    saison_max_c: float,
+) -> str | None:
+    """Grund, eine von Wattson eingeschaltete Klima wieder auszuschalten (v0.20.30).
+
+    Bis v0.20.29 schaltete UC11 die Office-Klima auf Kühlen, aber nie wieder
+    aus — nur der Fenster-Guard tat das. Am 30.10.2026 lief sie deshalb über
+    eine Stunde, obwohl der Auslöser (Sonne auf dem H&T) längst weg war.
+
+    Nur was Wattson selbst eingeschaltet hat, schaltet Wattson aus: von Hand
+    eingeschaltet oder danach von Hand verstellt bleibt unangetastet
+    (`wattson_hat_an` = False). Gegen Takten:
+    - Mindestlaufzeit, bevor überhaupt ausgeschaltet wird.
+    - Aus erst, wenn die gefühlte Temperatur `hysterese_k` unter der
+      Einschaltschwelle liegt, bzw. die Außenluft `hysterese_k` unter der
+      Kühlgrenze — nicht schon an der Schwelle selbst.
+    """
+    if not wattson_hat_an or laufzeit_min < min_laufzeit_min:
+        return None
+    if innen_hx < an_schwelle_hx - hysterese_k:
+        return f"abgekühlt (gefühlt {innen_hx:.1f} °C)"
+    sperre = kuehlsperre(
+        aussen_c=aussen_c,
+        tages_max_c=tages_max_c,
+        aussen_min_c=aussen_min_c - hysterese_k,
+        saison_max_c=saison_max_c,
+    )
+    if sperre:
+        return sperre
+    return None

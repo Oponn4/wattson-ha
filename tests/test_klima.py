@@ -64,3 +64,57 @@ def test_heisser_tag_erlaubt():
 
 def test_grenze_aussen_genau_auf_schwelle_erlaubt():
     assert _sperre(aussen_c=const.OUTDOOR_WARM_MIN_C, tages_max_c=30.0) is None
+
+
+# ── Auto-Aus (v0.20.30) ─────────────────────────────────────────────────────
+
+def _aus(**kw):
+    werte = {
+        "wattson_hat_an": True,
+        "laufzeit_min": 60.0,
+        "min_laufzeit_min": const.UC11_AUS_MIN_LAUFZEIT_MIN,
+        "innen_hx": 25.0,
+        "an_schwelle_hx": const.HUMIDEX_WARM_THRESHOLD,
+        "hysterese_k": const.UC11_AUS_HYSTERESE_K,
+        "aussen_c": 27.0,
+        "tages_max_c": 31.0,
+        "aussen_min_c": const.OUTDOOR_WARM_MIN_C,
+        "saison_max_c": const.COOL_SAISON_MAX_C,
+    }
+    werte.update(kw)
+    return klima.auto_aus_grund(**werte)
+
+
+def test_fall_30_10_waere_ausgegangen():
+    # Wattson an seit 10:42, Raum 24,5 °C bei 40 % RH, außen 10 °C
+    hx = forecast.humidex(KLIMA, RH)
+    assert _aus(innen_hx=hx, aussen_c=AUSSEN, tages_max_c=14.0) is not None
+
+
+def test_von_hand_eingeschaltet_bleibt_an():
+    assert _aus(wattson_hat_an=False) is None
+
+
+def test_mindestlaufzeit_schuetzt_vor_takten():
+    assert _aus(laufzeit_min=const.UC11_AUS_MIN_LAUFZEIT_MIN - 1) is None
+    assert _aus(laufzeit_min=const.UC11_AUS_MIN_LAUFZEIT_MIN) is not None
+
+
+def test_hysterese_innen():
+    schwelle = const.HUMIDEX_WARM_THRESHOLD
+    # knapp unter der Einschaltschwelle: läuft weiter
+    assert _aus(innen_hx=schwelle - 1.0) is None
+    # deutlich darunter: aus
+    assert _aus(innen_hx=schwelle - const.UC11_AUS_HYSTERESE_K - 0.1) is not None
+
+
+def test_hysterese_aussen():
+    warm = const.HUMIDEX_WARM_THRESHOLD + 2
+    grenze = const.OUTDOOR_WARM_MIN_C
+    # knapp unter der Kühlgrenze: läuft weiter (kein Takten an der Grenze)
+    assert _aus(innen_hx=warm, aussen_c=grenze - 1.0) is None
+    assert _aus(innen_hx=warm, aussen_c=grenze - const.UC11_AUS_HYSTERESE_K - 0.1) is not None
+
+
+def test_heisser_tag_und_noch_warm_bleibt_an():
+    assert _aus(innen_hx=const.HUMIDEX_WARM_THRESHOLD + 3) is None
