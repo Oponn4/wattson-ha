@@ -1221,6 +1221,7 @@ def foreign_plan_note(
     plan_soc: int | None,
     plan_time: datetime | None,
     stored: dict | None,
+    now: datetime | None = None,
     tolerance_s: int = 60,
 ) -> str | None:
     """Hält evcc einen Fahrplan, den Wattson nicht gesetzt hat? Dann beschreibe ihn.
@@ -1240,8 +1241,16 @@ def foreign_plan_note(
     Kein Plan in evcc (`plan_soc` 0/None) → None: dann gibt es nichts zu
     schützen. Kein eigener Plan hinterlegt, aber einer in evcc → fremd; das
     sperrt Wattson bewusst aus, bis der Plan weg ist oder ihm gehört.
+
+    Zielzeit vorbei (`plan_time <= now`) → None (v0.20.31). evcc löscht einen
+    abgelaufenen Plan nicht, er bleibt am Fahrzeug hinterlegt. Am 07.11.2026
+    stand dort abends noch „20 % bis 07.11 09:10" und hätte Wattson ohne diese
+    Prüfung dauerhaft gesperrt — ein Plan, dessen Zielzeit vorbei ist, hat
+    nichts mehr zu schützen. Ohne `now` bleibt es beim alten Verhalten.
     """
     if not plan_soc:
+        return None
+    if now is not None and plan_time is not None and plan_time <= now:
         return None
     if _plan_matches(stored, plan_soc, plan_time, tolerance_s):
         return None
