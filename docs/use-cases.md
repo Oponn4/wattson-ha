@@ -92,6 +92,13 @@ dafür der **hinterlegte** Plan (`sensor.evcc_auto_vehicle_plans_soc/_time`),
 nicht der effektive: der steht auf 0, sobald evcc gerade nicht nach Plan lädt,
 während der hinterlegte weiterbesteht.
 
+**Abgelaufene Pläne sind nicht mehr fremd (v0.20.31):** evcc lässt einen Plan
+nach seiner Zielzeit am Fahrzeug stehen. Am 07.11.2026 hielt evcc noch
+„20 % bis 07.11 09:10", Wattson hatte keinen eigenen Plan hinterlegt — die
+Besitzprüfung hätte UC2 damit dauerhaft gesperrt, Termin-Plan und Grundplan
+gleichermaßen. Liegt die Zielzeit hinter `now`, gilt der Plan nicht mehr als
+fremd und darf überschrieben werden.
+
 Dazu endet ein Plan-Override nicht mehr stur um Mitternacht:
 `cooldown_until_next_midnight(now, hold_until)` hält mindestens bis zur
 Zielzeit des überschriebenen Plans.

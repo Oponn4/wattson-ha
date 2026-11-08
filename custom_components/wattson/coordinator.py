@@ -3580,6 +3580,7 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         plan_soc, plan_time = self._evcc_plan()
         return foreign_plan_note(
             plan_soc=plan_soc, plan_time=plan_time, stored=self._stored_plan(),
+            now=dt_util.now(),
         )
 
     async def _trip_plan_blocked(self) -> str | None:

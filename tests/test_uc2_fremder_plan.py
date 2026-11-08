@@ -116,6 +116,54 @@ class TestFremderPlan:
             ) is not None
 
 
+class TestAbgelaufenerFremderPlan:
+    """Vorfall 07.11.2026: evcc hält „20 % bis 07.11 09:10" auch nach der Zielzeit.
+
+    Ohne Blick auf die Uhr galt der Plan als fremd und sperrte UC2 dauerhaft —
+    Termin-Plan wie Grundplan.
+    """
+
+    WINTER = timezone(timedelta(hours=1))
+    PLAN_ZEIT = datetime(2026, 11, 7, 9, 10, tzinfo=WINTER)
+    ABENDS = datetime(2026, 11, 7, 21, 30, tzinfo=WINTER)
+
+    def test_der_vorfall_abgelaufen_sperrt_nicht(self):
+        assert foreign_plan_note(
+            plan_soc=20, plan_time=self.PLAN_ZEIT, stored=None, now=self.ABENDS,
+        ) is None
+
+    def test_gegenprobe_laufender_fremder_plan_sperrt_weiter(self):
+        note = foreign_plan_note(
+            plan_soc=20, plan_time=self.PLAN_ZEIT, stored=None,
+            now=self.PLAN_ZEIT - timedelta(minutes=1),
+        )
+        assert note == "20% bis 07.11 09:10"
+
+    def test_genau_zur_zielzeit_ist_abgelaufen(self):
+        assert foreign_plan_note(
+            plan_soc=20, plan_time=self.PLAN_ZEIT, stored=None, now=self.PLAN_ZEIT,
+        ) is None
+
+    def test_der_19_09_bleibt_gesperrt(self):
+        """Mitternacht liegt vor Christians 10:45 — die alte Lücke bleibt zu."""
+        note = foreign_plan_note(
+            plan_soc=100, plan_time=CHRISTIANS_PLAN_ZEIT,
+            stored=grundplan_gespeichert(),
+            now=datetime(2026, 9, 20, 0, 1, 8, tzinfo=TZ),
+        )
+        assert note == "100% bis 20.09 10:45"
+
+    def test_plan_ohne_zeit_bleibt_fremd_auch_mit_uhr(self):
+        assert foreign_plan_note(
+            plan_soc=50, plan_time=None, stored=None, now=self.ABENDS,
+        ) == "50% ohne Zielzeit"
+
+    def test_ohne_now_altes_verhalten(self):
+        assert foreign_plan_note(
+            plan_soc=20, plan_time=self.PLAN_ZEIT, stored=None,
+        ) == "20% bis 07.11 09:10"
+
+
 class TestCooldownMitZielzeit:
     def test_der_vorfall_cooldown_haelt_bis_zur_zielzeit(self):
         bis = cooldown_until_next_midnight(EINGRIFF, CHRISTIANS_PLAN_ZEIT)
