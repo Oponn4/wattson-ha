@@ -93,3 +93,64 @@ class TestBaselineSocGrenze:
 
     def test_knapp_unter_baseline_ohne_deckung_noetig(self):
         assert needed(SOC - 0.5, []) is True
+
+
+# ── Zielzeit: feste Abfahrt vor 12:00 (v0.20.32) ────────────────────────────
+# Am 13.11.2026 stand der Grundplan auf „50 % bis 12:00". evcc legte die Slots
+# deshalb größtenteils auf den Vormittag, einer lag um 23:45 — Sonja fuhr um
+# 07:12 mit 28 % los und das Vorheizen scheiterte.
+
+baseline_ready_time = forecast.baseline_ready_time
+BUFFER = const.EVCC_PLAN_BUFFER_MINUTES  # 30
+WINTER = timezone(timedelta(hours=1))
+
+
+def ready_for(now: datetime, departures: list[datetime]):
+    return baseline_ready_time(
+        now=now, ready_hour=const.BASELINE_READY_HOUR,
+        fixed_departures=departures, buffer_minutes=BUFFER,
+    )
+
+
+def test_ohne_feste_abfahrt_bleibt_es_bei_12_uhr():
+    now = datetime(2026, 11, 12, 15, 0, tzinfo=WINTER)
+    ready, abfahrt = ready_for(now, [])
+    assert ready == datetime(2026, 11, 13, 12, 0, tzinfo=WINTER)
+    assert abfahrt is None
+
+
+def test_schulabfahrt_vor_12_uhr_zieht_die_zielzeit_vor():
+    # der Fall vom 13.11.2026: Grundplan um 15:00 am Vortag gesetzt
+    now = datetime(2026, 11, 12, 15, 0, tzinfo=WINTER)
+    schule = datetime(2026, 11, 13, 7, 5, tzinfo=WINTER)
+    ready, abfahrt = ready_for(now, [schule])
+    assert ready == datetime(2026, 11, 13, 6, 35, tzinfo=WINTER)
+    assert abfahrt == schule
+
+
+def test_abfahrt_nach_der_zielzeit_aendert_nichts():
+    # Freitagnachmittag: nächste Schulabfahrt erst Montag, Zielzeit Samstag 12:00
+    now = datetime(2026, 11, 13, 16, 0, tzinfo=WINTER)
+    montag = datetime(2026, 11, 16, 7, 5, tzinfo=WINTER)
+    ready, abfahrt = ready_for(now, [montag])
+    assert ready == datetime(2026, 11, 14, 12, 0, tzinfo=WINTER)
+    assert abfahrt is None
+
+
+def test_angebrochener_puffer_zaehlt_nicht():
+    # 06:50, Abfahrt 07:05: Puffer seit 06:35 angebrochen — keine Zielzeit in
+    # der Vergangenheit, sondern die normale 12:00
+    now = datetime(2026, 11, 13, 6, 50, tzinfo=WINTER)
+    schule = datetime(2026, 11, 13, 7, 5, tzinfo=WINTER)
+    ready, abfahrt = ready_for(now, [schule])
+    assert ready == datetime(2026, 11, 13, 12, 0, tzinfo=WINTER)
+    assert abfahrt is None
+
+
+def test_frueheste_abfahrt_gewinnt():
+    now = datetime(2026, 11, 12, 20, 0, tzinfo=WINTER)
+    frueh = datetime(2026, 11, 13, 7, 5, tzinfo=WINTER)
+    spaeter = datetime(2026, 11, 13, 9, 0, tzinfo=WINTER)
+    ready, abfahrt = ready_for(now, [spaeter, frueh])
+    assert abfahrt == frueh
+    assert ready == datetime(2026, 11, 13, 6, 35, tzinfo=WINTER)

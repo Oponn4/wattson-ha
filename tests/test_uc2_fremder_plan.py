@@ -36,7 +36,7 @@ EINGRIFF = datetime(2026, 9, 19, 18, 57, tzinfo=TZ)
 def grundplan_gespeichert(zeit: datetime = GRUNDPLAN_ZEIT, soc: int = 50) -> dict:
     """Was Wattson nach einem eigenen Write in `misc.uc2_plan` hinterlegt."""
     return {
-        "key": f"baseline:{soc}:{zeit.date().isoformat()}",
+        "key": f"baseline:{soc}:{zeit.isoformat(timespec='minutes')}",
         "uid": "wattson-baseline",
         "titel": "Grundplan",
         "soc": soc,

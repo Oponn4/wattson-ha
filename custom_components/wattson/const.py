@@ -228,6 +228,13 @@ BASELINE_PLAN_UID             = "baseline"
 # dieser Grenze bleibt er trotzdem, damit für Ungeplantes Reichweite dasteht
 # (30 % ≈ 110 km beim ORA). 0 schaltet die Reserve ab.
 BASELINE_FLOOR_SOC            = 30
+# Feste Abfahrten (v0.20.32). Timestamp-Sensoren, die die nächste regelmäßige
+# Abfahrt melden — heute Sonjas Schulweg aus dem Schulkalender. Am 13.11.2026
+# stand der Grundplan auf „50 % bis 12:00", evcc legte die Slots deshalb fast
+# alle auf den Vormittag; um 07:12 fuhr Sonja mit 28 % los. Liegt eine feste
+# Abfahrt vor BASELINE_READY_HOUR, zielt der Grundplan auf sie (minus
+# EVCC_PLAN_BUFFER_MINUTES) statt auf 12:00.
+FIXED_DEPARTURE_ENTITIES      = ["sensor.sonja_schulkalender_nachste_abfahrt"]
 
 # Downshift (Richtung "weniger laden") braucht Confirmation gegen Replan-Jitter
 UC6_DOWNSHIFT_CONFIRMATION_CYCLES = 2  # 2 Cycles in Folge "kein Bedarf mehr"
