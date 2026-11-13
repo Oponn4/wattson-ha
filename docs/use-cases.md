@@ -78,6 +78,16 @@ und mittags 18 ct anstanden. Als harte Reserve bleibt `BASELINE_FLOOR_SOC`
 geplanten Fahrten. Entscheidung liegt in `forecast.baseline_plan_needed`,
 Tests in `tests/test_baseline_plan.py`.
 
+**Feste Abfahrten (v0.20.32):** Die Standard-Zielzeit ist 12:00, damit evcc
+den Vormittags-Preisrutsch mitnehmen kann. Für regelmäßige Abfahrten davor ist
+das zu spät: am 13.11.2026 stand der Grundplan auf „50 % bis 12:00", evcc lud
+nur 23:45–00:00, und Sonja fuhr um 07:12 mit 28 % zur Schule. Jetzt liest UC2
+die Timestamp-Sensoren aus `FIXED_DEPARTURE_ENTITIES` (heute
+`sensor.sonja_schulkalender_nachste_abfahrt` aus dem Schulkalender, auch für
+den nächsten Schultag). Liegt eine Abfahrt vor 12:00, zielt der Grundplan auf
+sie minus `EVCC_PLAN_BUFFER_MINUTES`. Ein angebrochener Puffer zählt nicht.
+Logik in `forecast.baseline_ready_time`, Tests in `tests/test_baseline_plan.py`.
+
 Der Grundplan trägt die uid `BASELINE_PLAN_UID` und ist von der Stale-Erkennung
 **ausgenommen** (`forecast.plan_is_stale`). Er stammt aus keinem Kalendertermin,
 also findet die uid-Suche nie etwas — ohne die Ausnahme las die Aufräumroutine

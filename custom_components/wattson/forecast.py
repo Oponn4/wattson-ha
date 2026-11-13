@@ -356,6 +356,40 @@ def baseline_plan_needed(
     return any(not c.satisfied_by(car_soc) for c in candidates)
 
 
+def baseline_ready_time(
+    *,
+    now: datetime,
+    ready_hour: int,
+    fixed_departures: list[datetime],
+    buffer_minutes: int,
+) -> tuple[datetime, datetime | None]:
+    """Zielzeit des Grundplans und die feste Abfahrt, die sie bestimmt.
+
+    Standard ist die nächste `ready_hour` (12:00). Bis dahin sucht evcc die
+    günstigsten Slots — und legt sie bevorzugt in den Vormittag, wenn dort die
+    Sonne den Preis drückt. Fährt das Auto vorher regelmäßig weg (Schulweg um
+    07:05), lädt es also nach der Abfahrt. Am 13.11.2026 genau so passiert:
+    Grundplan „50 % bis 12:00", ein Slot um 23:45, Abfahrt mit 28 %.
+
+    Liegt eine feste Abfahrt vor der Standard-Zielzeit, gewinnt sie, minus
+    `buffer_minutes` (wie beim Termin-Fahrplan). Abfahrten, deren Puffer schon
+    angebrochen ist, zählen nicht: dafür bleibt keine Ladezeit, und eine
+    Zielzeit in der Vergangenheit nimmt evcc nicht an.
+
+    Rückgabe: (Zielzeit, maßgebliche Abfahrt oder None).
+    """
+    ready = now.replace(hour=ready_hour, minute=0, second=0, microsecond=0)
+    if ready <= now:
+        ready += timedelta(days=1)
+    buffer = timedelta(minutes=buffer_minutes)
+    candidates = sorted(
+        d for d in fixed_departures if now < d - buffer < ready
+    )
+    if not candidates:
+        return ready, None
+    return candidates[0] - buffer, candidates[0]
+
+
 SLOT_HOURS = 0.25  # PriceSlot-Länge
 
 

@@ -114,6 +114,7 @@ from .const import (
     EVCC_BATTERY_GRACE_MIN,
     EVCC_BATTERY_MODES_HALTEN,
     EVCC_PLAN_BUFFER_MINUTES,
+    FIXED_DEPARTURE_ENTITIES,
     FORECAST_REFRESH_MIN,
     HEIZSTAB_FAILSAFE_NOTIFY_COOLDOWN_MIN,
     HEIZSTAB_MAX_CONTINUOUS_H,
@@ -223,6 +224,7 @@ from .forecast import (
     PriceSlot,
     TripCandidate,
     baseline_plan_needed,
+    baseline_ready_time,
     calculate_required_soc,
     charge_threshold_ct,
     cheapest_window,
@@ -3617,6 +3619,26 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             return f"user-override neu erkannt ({remaining}min Rest)"
         return None
 
+    def _fixed_departures(self) -> list[datetime]:
+        """Feste Abfahrten aus FIXED_DEPARTURE_ENTITIES (Timestamp-Sensoren).
+
+        Fehlende oder unlesbare Sensoren liefern nichts — dann gilt die
+        Standard-Zielzeit wie vor v0.20.32.
+        """
+        result: list[datetime] = []
+        for entity_id in FIXED_DEPARTURE_ENTITIES:
+            raw = self._state(entity_id)
+            if raw in (None, "", "unknown", "unavailable"):
+                continue
+            parsed = dt_util.parse_datetime(str(raw))
+            if parsed is None:
+                _LOGGER.debug("UC2: %s nicht lesbar (%r)", entity_id, raw)
+                continue
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=dt_util.DEFAULT_TIME_ZONE)
+            result.append(dt_util.as_local(parsed))
+        return result
+
     async def _run_baseline_plan(
         self, s: WattsonData, cfg: WattsonTripConfig, now: datetime,
         actions: list[str], candidates: list[TripCandidate],
@@ -3653,18 +3675,22 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
             await self._clear_baseline_plan(cfg, actions)
             return
 
-        ready = now.replace(
-            hour=BASELINE_READY_HOUR, minute=0, second=0, microsecond=0
+        ready, abfahrt = baseline_ready_time(
+            now=now, ready_hour=BASELINE_READY_HOUR,
+            fixed_departures=self._fixed_departures(),
+            buffer_minutes=EVCC_PLAN_BUFFER_MINUTES,
         )
-        if ready <= now:
-            ready += timedelta(days=1)
+        grund = (f" (feste Abfahrt {abfahrt.strftime('%d.%m %H:%M')})"
+                 if abfahrt else "")
 
-        plan_key = f"baseline:{BASELINE_SOC}:{ready.date().isoformat()}"
+        # Uhrzeit gehört in den Key: verschiebt sich die Abfahrt, muss der Plan
+        # neu gesetzt werden (bis v0.20.31 nur das Datum, Zielzeit fix 12:00).
+        plan_key = f"baseline:{BASELINE_SOC}:{ready.isoformat(timespec='minutes')}"
         if (self._ival(ENTITY_EVCC_PLAN_SOC) == BASELINE_SOC
                 and self._stored_plan_key() == plan_key):
             s.trip_plan_set = True
             s.trip_reason = (f"Grundplan aktiv: {BASELINE_SOC}% bis "
-                             f"{ready.strftime('%d.%m %H:%M')}")
+                             f"{ready.strftime('%d.%m %H:%M')}{grund}")
             return
 
         blocked = await self._trip_plan_blocked()
@@ -3700,7 +3726,7 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
                 "abfahrt": ready.isoformat(),
             })
             act_desc = (f"Grundplan {BASELINE_SOC}% bis "
-                        f"{ready.strftime('%d.%m %H:%M')}")
+                        f"{ready.strftime('%d.%m %H:%M')}{grund}")
         actions.append(act_desc)
         s.trip_plan_set = True
         s.trip_reason = act_desc
