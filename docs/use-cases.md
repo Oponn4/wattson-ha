@@ -58,7 +58,10 @@ teuerste den Ziel-SOC. Plan-Lifecycle persistiert (`misc.uc2_plan`), damit ein
 Neustart keine Phantom-Pläne hinterlässt. UC2 läuft **auch im Schlafmodus**
 (`SLEEP_EXEMPT_UCS`) — ein Plan für den Morgen entsteht sonst nie.
 
-Sensor: `sensor.wattson_naechste_fahrt`. Erbt UC6-Override: hat der User den
+Sensor: `sensor.wattson_naechste_fahrt`. Seit v0.20.33 trägt auch die
+UC-Kachel „E-Auto Fahrplan" (`sensor.wattson_eauto_fahrplan`,
+Attribut `begruendung`) denselben Satz; vorher zeigte sie im Normalfall nur
+„aktiv". Erbt UC6-Override: hat der User den
 Mode manuell gesetzt, greift UC2 nicht ein.
 
 **Grundplan (v0.20):** Steht kein Termin an, setzt UC2 trotzdem einen Fahrplan:

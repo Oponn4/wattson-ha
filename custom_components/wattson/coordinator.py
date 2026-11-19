@@ -3398,6 +3398,10 @@ class WattsonCoordinator(DataUpdateCoordinator[WattsonData]):
         """
         try:
             await self._handle_trip_planning(s, now, actions)
+            # Die UC-Kachel im Dashboard liest `uc_reason`, nicht `trip_reason`.
+            # Die frühen Ausstiege setzen beides; der normale Weg setzte nur
+            # `trip_reason`, die Kachel zeigte dann bloß „aktiv".
+            s.uc_reason["uc2"] = s.trip_reason
         except Exception as ex:
             _LOGGER.exception("UC2 Trip-Planning fehlgeschlagen")
             s.trip_reason = f"Fehler: {ex}"
