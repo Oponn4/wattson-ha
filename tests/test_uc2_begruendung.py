@@ -21,7 +21,7 @@ def _funktion(quelle: str, name: str) -> str:
 
 def test_erfolgreicher_lauf_uebernimmt_trip_reason():
     body = _funktion(COORDINATOR, "_run_trip_planning")
-    try_teil, except_teil = body.split("except Exception", 1)
+    try_teil = body.split("except Exception", 1)[0]
     assert "await self._handle_trip_planning(" in try_teil
     nach_aufruf = try_teil.split("await self._handle_trip_planning(", 1)[1]
     assert 's.uc_reason["uc2"] = s.trip_reason' in nach_aufruf
